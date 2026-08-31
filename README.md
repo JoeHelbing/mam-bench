@@ -7,6 +7,8 @@
 
 MAM-Bench first characterizes one explicit Schelling segregation model, then tests whether separate model-controlled Influence Actors can steer its emergent outcome. Reference Landscape v1 and the first live model-evaluation pilot are complete.
 
+Read [Benchmarking Self-Organized AI Swarms in Steering Complex Systems](https://joehelbing.net/post/mam-bench) for an illustrated overview of the current pilot.
+
 ## Reference Landscape v1
 
 The frozen profile uses:

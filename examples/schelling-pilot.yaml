@@ -1,0 +1,11 @@
+schema_version: mam-bench.run.v1
+simulations:
+  - schelling-influence-pilot-v1
+models:
+  - id: qwen-3-8-27b
+    runtime: openrouter
+    model: qwen/qwen3.8-27b
+    provider: phala
+output:
+  directory: ../results/schelling-pilot
+  retain_diagnostic_artifacts: false

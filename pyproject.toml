@@ -1,0 +1,26 @@
+[project]
+name = "mam-bench"
+version = "0.1.0"
+description = "Run reproducible multi-agent model benchmarks with validated evidence"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5.2",
+    "pydantic>=2.13.5",
+    "pydantic-ai-slim[openai]>=2.36.0",
+    "pyyaml>=6.0.3",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"

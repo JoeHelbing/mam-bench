@@ -1,0 +1,12 @@
+.scratch/
+.venv/
+__pycache__/
+*.py[cod]
+.pyright/
+.ruff_cache/
+results/
+data/reference-landscape/*/.partial-artifacts.json
+data/reference-landscape/*/analysis/
+examples/assets/
+examples/*.html
+/tmp/playground/

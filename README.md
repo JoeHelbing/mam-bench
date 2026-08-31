@@ -1,5 +1,10 @@
 # MAM-Bench
 
+> [!WARNING]
+> **Work in progress:** MAM-Bench is an early research benchmark. Its interfaces,
+> evaluation profiles, datasets, and scoring may change before the first stable
+> release. Do not treat current results as a mature or standardized benchmark.
+
 MAM-Bench first characterizes one explicit Schelling segregation model, then tests whether separate model-controlled Influence Actors can steer its emergent outcome. Reference Landscape v1 and the first live model-evaluation pilot are complete.
 
 ## Reference Landscape v1

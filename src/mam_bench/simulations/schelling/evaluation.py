@@ -57,17 +57,18 @@ class RuntimeSettings(BaseModel):
     provider: Literal["openrouter", "openai-compatible"] = "openrouter"
     base_url: str = "https://openrouter.ai/api/v1"
     model_name: str = "qwen/qwen3.8-27b"
-    openrouter_provider_slug: str = "phala"
-    openrouter_allow_fallbacks: bool = False
-    openrouter_require_parameters: bool = True
+    openrouter_provider_slug: str | None = "phala"
+    openrouter_allow_fallbacks: bool | None = False
+    openrouter_require_parameters: bool | None = True
     temperature: float = 1.0
     top_p: float = 0.95
     top_k: int = 20
     reasoning_effort: Literal["medium"] = "medium"
-    max_completion_tokens: int = 4096
+    max_completion_tokens: int = 32_768
     request_limit: int = 4
     tool_call_limit: int = 3
-    wave_timeout_seconds: float = 600.0
+    physical_actor_concurrency: Literal[4] = 4
+    wave_timeout_seconds: float = 3_600.0
 
 
 class InfluenceEvaluationConfig(BaseModel):
@@ -169,7 +170,7 @@ class MoveDecision(BaseModel):
         return self
 
     @classmethod
-    def stay_put(cls) -> "MoveDecision":
+    def stay_put(cls) -> MoveDecision:
         return cls(stay=True, row=None, column=None)
 
 

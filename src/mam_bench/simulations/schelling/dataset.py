@@ -208,7 +208,7 @@ class DatasetManifest(BaseModel):
         artifacts: list[ArtifactRecord],
         modal_client_version: str | None = None,
         generator_versions: dict[str, str] | None = None,
-    ) -> "DatasetManifest":
+    ) -> DatasetManifest:
         ordered = tuple(
             sorted(artifacts, key=lambda item: (item.tolerance_index, item.vacancy_index))
         )

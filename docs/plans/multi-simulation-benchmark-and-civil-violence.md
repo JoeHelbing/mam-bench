@@ -104,8 +104,6 @@ refactor after behavior is protected at the new seam.
 ### YAML v1
 
 ```yaml
-schema_version: mam-bench.run.v1
-
 simulations:
   - schelling-influence-pilot-v1
 
@@ -128,9 +126,7 @@ output:
 
 ### Configuration invariants
 
-- The root is one mapping with exactly `schema_version`, `simulations`, `models`,
-  and `output`.
-- `schema_version` equals `mam-bench.run.v1`.
+- The root is one mapping with exactly `simulations`, `models`, and `output`.
 - `simulations` is a non-empty list of unique built-in simulation IDs.
 - `models` is a non-empty list with unique, path-safe `id` values.
 - Each model uses one closed, discriminated runtime configuration.
@@ -142,8 +138,8 @@ output:
   reference paths, and evidence switches are absent from YAML.
 - `output.directory` resolves relative to the YAML file and must be new or empty.
 - `retain_diagnostic_artifacts` never suppresses Run Evidence.
-- YAML aliases, merge keys, custom tags, duplicate keys, and multiple documents
-  are rejected.
+- YAML is loaded with PyYAML's `safe_load`; custom tags and multiple documents
+  are rejected by the loader.
 - Unknown fields fail validation.
 - Execution order is simulation order, then model order.
 - Every selected simulation runs against every selected model.
@@ -192,7 +188,6 @@ class OutputSelection(BaseModel):
 class BenchmarkConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["mam-bench.run.v1"]
     simulations: tuple[str, ...]
     models: tuple[ModelSelection, ...]
     output: OutputSelection
@@ -204,9 +199,8 @@ Public parsing interface:
 def load_benchmark_config(path: Path) -> BenchmarkConfig: ...
 ```
 
-Implementation requires a real YAML parser. The proposed dependency is PyYAML
-with a repository-owned strict `SafeLoader` that rejects duplicate keys,
-aliases, merges, custom tags, and multi-document input. Adding the dependency
+Implementation uses PyYAML's standard `safe_load`, followed by Pydantic validation.
+Adding the dependency
 requires explicit approval at implementation time; this plan does not install it.
 
 ## Exact Model Runtime interface
@@ -1047,12 +1041,10 @@ uv run ruff check src tests modal_reference_sweep.py
 uv run pyright
 ```
 
-Critical-path gates:
+Critical-path gate:
 
 ```bash
-./bin/mam-bench run examples/schelling-pilot.yaml
-./bin/mam-bench validate-evaluation \
-  results/schelling-pilot/runs/schelling-influence-pilot-v1/qwen-3-8-27b
+uv run main.py examples/schelling-pilot.yaml
 ```
 
 Before the Civil Violence treatment panel, require:

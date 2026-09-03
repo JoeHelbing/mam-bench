@@ -2,34 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Hashable, Iterator
 from pathlib import Path
-from typing import Annotated, Any, Literal, Protocol, cast
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
-from yaml import parse as parse_yaml_untyped  # pyright: ignore[reportUnknownVariableType]
-from yaml.events import (
-    AliasEvent,
-    CollectionStartEvent,
-    DocumentStartEvent,
-    Event,
-    NodeEvent,
-    ScalarEvent,
-)
-from yaml.nodes import MappingNode, Node
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _SAFE_ID_PATTERN = r"^[a-z0-9][a-z0-9._-]*$"
 _ENVIRONMENT_NAME_PATTERN = r"^[A-Z_][A-Z0-9_]*$"
-
-
-class BenchmarkConfigError(ValueError):
-    """One or more fail-closed YAML configuration errors."""
-
-    def __init__(self, errors: tuple[str, ...]) -> None:
-        self.errors = errors
-        super().__init__("benchmark configuration failed:\n" + "\n".join(errors))
 
 
 class OpenRouterModel(BaseModel):
@@ -86,11 +67,10 @@ class OutputSelection(BaseModel):
 
 
 class BenchmarkConfig(BaseModel):
-    """Closed YAML v1 contract selecting one Cartesian benchmark matrix."""
+    """Configuration for choosing which simulations and models to run."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
-    schema_version: Literal["mam-bench.run.v1"]
     simulations: tuple[SimulationSelection, ...] = Field(min_length=1)
     models: tuple[ModelSelection, ...] = Field(min_length=1)
     output: OutputSelection
@@ -105,104 +85,18 @@ class BenchmarkConfig(BaseModel):
         return self
 
 
-class _StrictSafeLoader(yaml.SafeLoader):
-    """SafeLoader with duplicate and merge-key rejection."""
-
-
-class _ObjectConstructor(Protocol):
-    def construct_object(self, node: Node, deep: bool = False) -> object: ...
-
-
-def _construct_unique_mapping(
-    loader: _StrictSafeLoader,
-    node: MappingNode,
-    deep: bool = False,
-) -> dict[Hashable, Any]:
-    mapping: dict[Hashable, Any] = {}
-    items = cast(list[tuple[Node, Node]], node.value)
-    construct_object = cast(_ObjectConstructor, loader).construct_object
-    for key_node, value_node in items:
-        if key_node.tag == "tag:yaml.org,2002:merge":
-            raise yaml.constructor.ConstructorError(
-                "while constructing a mapping",
-                node.start_mark,
-                "YAML merge keys are not allowed",
-                key_node.start_mark,
-            )
-        key = construct_object(key_node, deep)
-        if not isinstance(key, Hashable):
-            raise yaml.constructor.ConstructorError(
-                "while constructing a mapping",
-                node.start_mark,
-                "mapping keys must be scalar",
-                key_node.start_mark,
-            )
-        if key in mapping:
-            raise yaml.constructor.ConstructorError(
-                "while constructing a mapping",
-                node.start_mark,
-                f"duplicate key is not allowed: {key!r}",
-                key_node.start_mark,
-            )
-        mapping[key] = construct_object(value_node, deep)
-    return mapping
-
-
-_StrictSafeLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-    _construct_unique_mapping,
-)
-
-
-def _reject_unsafe_yaml_features(content: str) -> None:
-    document_count = 0
-    parse_yaml = cast(Callable[..., Iterator[Event]], parse_yaml_untyped)
-    events = parse_yaml(content, Loader=yaml.SafeLoader)
-    for event in events:
-        if isinstance(event, DocumentStartEvent):
-            document_count += 1
-            if document_count > 1:
-                raise yaml.YAMLError("multiple YAML documents are not allowed")
-        if isinstance(event, AliasEvent):
-            raise yaml.YAMLError("YAML aliases are not allowed")
-        if isinstance(event, NodeEvent) and event.anchor is not None:
-            raise yaml.YAMLError("YAML anchors are not allowed")
-        if (
-            isinstance(event, (CollectionStartEvent, ScalarEvent))
-            and event.tag is not None
-            and not event.tag.startswith("tag:yaml.org,2002:")
-        ):
-            raise yaml.YAMLError("custom YAML tags are not allowed")
-
-
-def _validation_errors(error: ValidationError) -> tuple[str, ...]:
-    messages: list[str] = []
-    for detail in error.errors(include_url=False, include_context=False, include_input=False):
-        location = ".".join(str(part) for part in detail["loc"])
-        messages.append(f"{location}: {detail['msg']}")
-    return tuple(messages)
-
-
 def load_benchmark_config(path: Path) -> BenchmarkConfig:
-    """Load one strict YAML document without constructing runtime objects."""
+    """Load one YAML document without constructing runtime objects."""
 
-    try:
-        content = path.read_text(encoding="utf-8")
-        _reject_unsafe_yaml_features(content)
-        document = yaml.load(content, Loader=_StrictSafeLoader)
-        config = BenchmarkConfig.model_validate(document)
-        directory = config.output.directory
-        if not directory.is_absolute():
-            directory = path.resolve().parent / directory
-        directory = directory.resolve()
-        if directory.exists() and (not directory.is_dir() or any(directory.iterdir())):
-            raise ValueError("output.directory must be new or empty")
-        return config.model_copy(
-            update={"output": config.output.model_copy(update={"directory": directory})}
-        )
-    except BenchmarkConfigError:
-        raise
-    except ValidationError as exc:
-        raise BenchmarkConfigError(_validation_errors(exc)) from exc
-    except (OSError, UnicodeError, yaml.YAMLError, ValueError) as exc:
-        raise BenchmarkConfigError((str(exc),)) from exc
+    with path.open("rb") as config_file:
+        document = yaml.safe_load(config_file)
+    config = BenchmarkConfig.model_validate(document)
+    directory = config.output.directory
+    if not directory.is_absolute():
+        directory = path.resolve().parent / directory
+    directory = directory.resolve()
+    if directory.exists() and (not directory.is_dir() or any(directory.iterdir())):
+        raise ValueError("output.directory must be new or empty")
+    return config.model_copy(
+        update={"output": config.output.model_copy(update={"directory": directory})}
+    )

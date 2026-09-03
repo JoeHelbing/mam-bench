@@ -173,6 +173,7 @@ def main(
         raise RuntimeError(f"sweep ended with {len(records)} of 161 artifacts")
     print("All raw artifacts received.")
     print(
-        "Finalize locally with: ./bin/mam-bench finalize-dataset "
+        "Validate and finalize the dataset with "
+        "mam_bench.simulations.schelling.dataset APIs: "
         f"{output_root}"
     )

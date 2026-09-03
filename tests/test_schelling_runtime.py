@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import unittest
@@ -10,6 +11,9 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.messages import (
     ModelResponse as PydanticModelResponse,
+)
+from pydantic_ai.messages import (
+    ThinkingPart as PydanticThinkingPart,
 )
 from pydantic_ai.messages import (
     ToolCallPart as PydanticToolCallPart,
@@ -39,6 +43,7 @@ from mam_bench.runtime import (
     RuntimeDescriptor,
     RuntimeInfrastructureError,
     RuntimeMessage,
+    RuntimeReasoningPart,
     SamplingControl,
     SamplingSettings,
     StructuredOutput,
@@ -76,9 +81,18 @@ class _ScriptedRuntime:
 
     def __init__(self) -> None:
         self.requests: list[ModelRequest] = []
+        self.active_requests = 0
+        self.maximum_active_requests = 0
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         self.requests.append(request)
+        self.active_requests += 1
+        self.maximum_active_requests = max(
+            self.maximum_active_requests,
+            self.active_requests,
+        )
+        await asyncio.sleep(0)
+        self.active_requests -= 1
         parts: tuple[TextPart | ToolCallPart, ...]
         output: JsonValue
         if request.request_id.endswith(":state"):
@@ -143,6 +157,11 @@ class _FakePydanticModel:
         self.calls.append((messages, model_settings, model_request_parameters))
         return PydanticModelResponse(
             parts=(
+                PydanticThinkingPart(
+                    content="Evaluate the available destination.",
+                    id="reasoning-1",
+                    provider_name="test-provider",
+                ),
                 PydanticToolCallPart(
                     tool_name="submit_move",
                     args={"stay": True, "row": None, "column": None},
@@ -217,6 +236,16 @@ class PydanticModelRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     parts=(TextPart(text="standing instructions"),),
                 ),
                 RuntimeMessage(
+                    role="assistant",
+                    parts=(
+                        RuntimeReasoningPart(
+                            text="Earlier private reasoning.",
+                            id="prior-reasoning",
+                            provider_name="test-provider",
+                        ),
+                    ),
+                ),
+                RuntimeMessage(
                     role="user",
                     parts=(TextPart(text="choose a move"),),
                 ),
@@ -260,9 +289,23 @@ class PydanticModelRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.usage.input_tokens, 7)
         self.assertEqual(response.usage.output_tokens, 3)
         self.assertEqual(response.provider_response_id, "response-1")
-        self.assertIsInstance(response.messages[0].parts[0], ToolCallPart)
+        reasoning = response.messages[0].parts[0]
+        self.assertIsInstance(reasoning, RuntimeReasoningPart)
+        typed_reasoning = cast(RuntimeReasoningPart, reasoning)
+        self.assertEqual(typed_reasoning.text, "Evaluate the available destination.")
+        self.assertEqual(typed_reasoning.id, "reasoning-1")
+        self.assertEqual(typed_reasoning.provider_name, "test-provider")
+        self.assertIsInstance(response.messages[0].parts[1], ToolCallPart)
         messages, settings, parameters = model.calls[0]
-        self.assertTrue(all(isinstance(message, PydanticModelRequest) for message in messages))
+        self.assertIsInstance(messages[0], PydanticModelRequest)
+        self.assertIsInstance(messages[1], PydanticModelResponse)
+        replayed_reasoning = cast(PydanticModelResponse, messages[1]).parts[0]
+        self.assertIsInstance(replayed_reasoning, PydanticThinkingPart)
+        self.assertEqual(
+            cast(PydanticThinkingPart, replayed_reasoning).content,
+            "Earlier private reasoning.",
+        )
+        self.assertIsInstance(messages[2], PydanticModelRequest)
         settings_dict = dict(cast(Any, settings))
         self.assertEqual(settings_dict["temperature"], 1.0)
         self.assertEqual(settings_dict["top_p"], 0.95)
@@ -318,11 +361,21 @@ class RuntimeInfluenceTeamTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(result.rounds_completed, 20)
             self.assertEqual(len(runtime.requests), 20 * 2 * 16 * 2)
+            self.assertEqual(runtime.maximum_active_requests, 4)
             self.assertEqual(
                 len({request.request_id for request in runtime.requests}),
                 len(runtime.requests),
             )
-            first_state, first_action = runtime.requests[:2]
+            first_state = next(
+                request
+                for request in runtime.requests
+                if request.request_id == "schelling:r1:p0:a0:state"
+            )
+            first_action = next(
+                request
+                for request in runtime.requests
+                if request.request_id == "schelling:r1:p0:a0:action"
+            )
             expected_seed = model_sampling_seed(
                 config,
                 round_number=1,
@@ -333,10 +386,14 @@ class RuntimeInfluenceTeamTests(unittest.IsolatedAsyncioTestCase):
             state_output = cast(StructuredOutput, first_state.output)
             self.assertEqual(state_output.name, "inspect_state")
             self.assertEqual(first_state.sampling.request_seed, expected_seed)
+            self.assertEqual(first_state.sampling.max_output_tokens, 32_768)
             self.assertIsInstance(first_action.output, TextOutput)
             self.assertEqual(first_action.sampling.request_seed, expected_seed)
+            self.assertEqual(first_action.sampling.max_output_tokens, 32_768)
             self.assertEqual(first_state.limits.request_limit, 1)
             self.assertEqual(first_action.limits.request_limit, 1)
+            self.assertEqual(first_state.limits.timeout_seconds, 3_600.0)
+            self.assertEqual(first_action.limits.timeout_seconds, 3_600.0)
             self.assertTrue(
                 any(
                     isinstance(part, ToolResultPart)

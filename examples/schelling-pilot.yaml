@@ -1,4 +1,3 @@
-schema_version: mam-bench.run.v1
 simulations:
   - schelling-influence-pilot-v1
 models:

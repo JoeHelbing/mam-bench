@@ -1,3 +1,4 @@
+import json
 import shutil
 import tempfile
 import unittest
@@ -31,12 +32,13 @@ class _AlwaysStayRuntime:
     descriptor = RuntimeDescriptor(
         model_id="always-stay",
         runtime="scripted",
-        provider="test",
+        provider="openai-compatible",
         model="test/always-stay",
         adapter_version="scripted-v1",
         capabilities=frozenset(RuntimeCapability),
         sampling_controls=frozenset(SamplingControl),
         max_concurrent_requests=16,
+        endpoint="http://127.0.0.1:8000/v1",
     )
 
     def __init__(self) -> None:
@@ -145,6 +147,12 @@ class SchellingBenchmarkSimulationTests(unittest.IsolatedAsyncioTestCase):
                 len([path for path in paths if path.startswith("actor-histories/")]),
                 16,
             )
+            run_payload = json.loads((run_directory / "run.json").read_text())
+            recorded_runtime = run_payload["config"]["runtime"]
+            self.assertEqual(recorded_runtime["provider"], "openai-compatible")
+            self.assertEqual(recorded_runtime["base_url"], "http://127.0.0.1:8000/v1")
+            self.assertEqual(recorded_runtime["model_name"], "test/always-stay")
+            self.assertIsNone(recorded_runtime["openrouter_provider_slug"])
             self.assertEqual(
                 len(
                     [

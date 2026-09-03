@@ -93,7 +93,7 @@ SCHELLING_RUNTIME_REQUIREMENTS = RuntimeRequirements(
         }
     ),
     sampling_controls=frozenset(SamplingControl),
-    minimum_concurrent_requests=16,
+    minimum_concurrent_requests=4,
 )
 
 
@@ -115,7 +115,11 @@ class RuntimeInfluenceTeam:
     ) -> tuple[CoordinationPost, ...]:
         """Run one synchronized coordination wave through the Model Runtime seam."""
 
-        async def run_one(
+        semaphore = asyncio.Semaphore(
+            contexts[0].config.runtime.physical_actor_concurrency
+        )
+
+        async def run_admitted(
             context: ActorWaveContext,
         ) -> tuple[CoordinationPost, list[RuntimeMessage]]:
             started = time.perf_counter()
@@ -165,6 +169,12 @@ class RuntimeInfluenceTeam:
             except RuntimeInfrastructureError as exc:
                 raise InfluenceInfrastructureError(_error_text(exc)) from exc
 
+        async def run_one(
+            context: ActorWaveContext,
+        ) -> tuple[CoordinationPost, list[RuntimeMessage]]:
+            async with semaphore:
+                return await run_admitted(context)
+
         try:
             async with asyncio.timeout(contexts[0].config.runtime.wave_timeout_seconds):
                 completed = await asyncio.gather(*(run_one(context) for context in contexts))
@@ -185,7 +195,11 @@ class RuntimeInfluenceTeam:
     async def move(self, contexts: tuple[ActorWaveContext, ...]) -> tuple[MoveProposal, ...]:
         """Run one synchronized movement wave through the Model Runtime seam."""
 
-        async def run_one(
+        semaphore = asyncio.Semaphore(
+            contexts[0].config.runtime.physical_actor_concurrency
+        )
+
+        async def run_admitted(
             context: ActorWaveContext,
         ) -> tuple[MoveProposal, list[RuntimeMessage]]:
             started = time.perf_counter()
@@ -234,6 +248,12 @@ class RuntimeInfluenceTeam:
             except RuntimeInfrastructureError as exc:
                 raise InfluenceInfrastructureError(_error_text(exc)) from exc
 
+        async def run_one(
+            context: ActorWaveContext,
+        ) -> tuple[MoveProposal, list[RuntimeMessage]]:
+            async with semaphore:
+                return await run_admitted(context)
+
         try:
             async with asyncio.timeout(contexts[0].config.runtime.wave_timeout_seconds):
                 completed = await asyncio.gather(*(run_one(context) for context in contexts))
@@ -269,7 +289,7 @@ class RuntimeInfluenceTeam:
                 ),
                 json_schema=cast(dict[str, JsonValue], StateRequest.model_json_schema()),
             ),
-            sampling=_sampling_settings(context, phase_code, max_output_tokens=512),
+            sampling=_sampling_settings(context, phase_code),
             limits=RequestLimits(
                 request_limit=1,
                 tool_call_limit=1,
@@ -440,18 +460,23 @@ class PydanticInfluenceTeam(RuntimeInfluenceTeam):
     """Compatibility wrapper around the PydanticAI Model Runtime adapter."""
 
     def __init__(self, settings: RuntimeSettings) -> None:
-        super().__init__(
-            PydanticModelRuntime(
-                PydanticRuntimeSettings(
-                    provider=settings.provider,
-                    base_url=settings.base_url,
-                    model_name=settings.model_name,
-                    openrouter_provider_slug=settings.openrouter_provider_slug,
-                    openrouter_allow_fallbacks=settings.openrouter_allow_fallbacks,
-                    openrouter_require_parameters=settings.openrouter_require_parameters,
-                )
-            )
+        if settings.provider != "openrouter":
+            raise ValueError("legacy PydanticInfluenceTeam requires OpenRouter settings")
+        if (
+            settings.openrouter_provider_slug is None
+            or settings.openrouter_allow_fallbacks is None
+            or settings.openrouter_require_parameters is None
+        ):
+            raise ValueError("OpenRouter routing settings must be complete")
+        runtime_settings = PydanticRuntimeSettings(
+            provider=settings.provider,
+            base_url=settings.base_url,
+            model_name=settings.model_name,
+            openrouter_provider_slug=settings.openrouter_provider_slug,
+            openrouter_allow_fallbacks=settings.openrouter_allow_fallbacks,
+            openrouter_require_parameters=settings.openrouter_require_parameters,
         )
+        super().__init__(PydanticModelRuntime(runtime_settings))
 
 
 def inspect_state(context: ActorWaveContext, request: StateRequest) -> str:

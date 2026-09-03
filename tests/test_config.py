@@ -2,12 +2,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mam_bench.config import BenchmarkConfigError, load_benchmark_config
+import yaml
+from pydantic import ValidationError
+
+from mam_bench.config import load_benchmark_config
 from mam_bench.registry import RegistryPreflightError, resolve_benchmark_plan
 from mam_bench.runner import CompatibilityPreflightError, preflight_benchmark
 
 VALID_YAML = """\
-schema_version: mam-bench.run.v1
 simulations:
   - schelling-influence-pilot-v1
 models:
@@ -38,7 +40,6 @@ class BenchmarkConfigTests(unittest.TestCase):
 
             config = load_benchmark_config(path)
 
-            self.assertEqual(config.schema_version, "mam-bench.run.v1")
             self.assertEqual(config.simulations, ("schelling-influence-pilot-v1",))
             self.assertEqual(
                 tuple(model.id for model in config.models),
@@ -53,33 +54,17 @@ class BenchmarkConfigTests(unittest.TestCase):
             )
             self.assertFalse(config.output.directory.exists())
 
-    def test_rejects_duplicate_keys_aliases_merges_tags_and_documents(self) -> None:
+    def test_safe_load_rejects_custom_tags_and_multiple_documents(self) -> None:
         invalid_documents = {
-            "duplicate key": VALID_YAML.replace(
-                "schema_version: mam-bench.run.v1",
-                "schema_version: mam-bench.run.v1\nschema_version: mam-bench.run.v1",
-            ),
-            "alias": VALID_YAML.replace(
-                "simulations:\n  - schelling-influence-pilot-v1",
-                "simulations: &simulations\n  - schelling-influence-pilot-v1\ncopy: *simulations",
-            ),
-            "merge": VALID_YAML.replace(
-                "output:\n  directory: results/comparison-001",
-                "defaults: &defaults\n"
-                "  retain_diagnostic_artifacts: false\n"
-                "output:\n"
-                "  <<: *defaults\n"
-                "  directory: results/comparison-001",
-            ),
             "custom tag": VALID_YAML.replace(
-                "schema_version: mam-bench.run.v1",
-                "schema_version: !custom mam-bench.run.v1",
+                "- schelling-influence-pilot-v1",
+                "- !custom schelling-influence-pilot-v1",
             ),
             "multiple documents": f"{VALID_YAML}---\n{VALID_YAML}",
         }
         with tempfile.TemporaryDirectory() as directory:
             for name, content in invalid_documents.items():
-                with self.subTest(name=name), self.assertRaises(BenchmarkConfigError):
+                with self.subTest(name=name), self.assertRaises(yaml.YAMLError):
                     load_benchmark_config(self._write(directory, content))
 
     def test_rejects_unsafe_or_duplicate_selections_and_nonempty_output(self) -> None:
@@ -96,14 +81,14 @@ class BenchmarkConfigTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             for name, content in invalid_documents.items():
-                with self.subTest(name=name), self.assertRaises(BenchmarkConfigError):
+                with self.subTest(name=name), self.assertRaises(ValidationError):
                     load_benchmark_config(self._write(directory, content))
 
             credential_url = VALID_YAML.replace(
                 "http://127.0.0.1:8000/v1",
                 "https://user:do-not-store@example.test/v1",
             )
-            with self.assertRaises(BenchmarkConfigError) as caught:
+            with self.assertRaises(ValidationError) as caught:
                 load_benchmark_config(self._write(directory, credential_url))
             self.assertNotIn("do-not-store", str(caught.exception))
 
@@ -111,7 +96,7 @@ class BenchmarkConfigTests(unittest.TestCase):
             output = Path(directory) / "results" / "comparison-001"
             output.mkdir(parents=True)
             (output / "existing.txt").write_text("occupied", encoding="utf-8")
-            with self.assertRaises(BenchmarkConfigError):
+            with self.assertRaises(ValueError):
                 load_benchmark_config(path)
 
     def test_rejects_mechanics_and_unknown_runtime_fields(self) -> None:
@@ -129,7 +114,7 @@ class BenchmarkConfigTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             for name, content in invalid_documents.items():
-                with self.subTest(name=name), self.assertRaises(BenchmarkConfigError):
+                with self.subTest(name=name), self.assertRaises(ValidationError):
                     load_benchmark_config(self._write(directory, content))
 
     def test_reports_every_unknown_runtime_before_output(self) -> None:
@@ -139,11 +124,12 @@ class BenchmarkConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = self._write(directory, content)
 
-            with self.assertRaises(BenchmarkConfigError) as caught:
+            with self.assertRaises(ValidationError) as caught:
                 load_benchmark_config(path)
 
-            self.assertTrue(any("models.0" in error for error in caught.exception.errors))
-            self.assertTrue(any("models.1" in error for error in caught.exception.errors))
+            locations = tuple(error["loc"] for error in caught.exception.errors())
+            self.assertTrue(any(location[:2] == ("models", 0) for location in locations))
+            self.assertTrue(any(location[:2] == ("models", 1) for location in locations))
             self.assertFalse((Path(directory) / "results").exists())
 
     def test_requires_nonempty_lists_and_existing_environment_names_only(self) -> None:
@@ -151,14 +137,14 @@ class BenchmarkConfigTests(unittest.TestCase):
             no_simulations = VALID_YAML.replace(
                 "simulations:\n  - schelling-influence-pilot-v1", "simulations: []"
             )
-            with self.assertRaises(BenchmarkConfigError):
+            with self.assertRaises(ValidationError):
                 load_benchmark_config(self._write(directory, no_simulations))
 
             no_models = VALID_YAML.replace(
                 VALID_YAML[VALID_YAML.index("models:") : VALID_YAML.index("output:")],
                 "models: []\n",
             )
-            with self.assertRaises(BenchmarkConfigError):
+            with self.assertRaises(ValidationError):
                 load_benchmark_config(self._write(directory, no_models))
 
 

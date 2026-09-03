@@ -24,6 +24,9 @@ from pydantic_ai.messages import (
     TextPart as PydanticTextPart,
 )
 from pydantic_ai.messages import (
+    ThinkingPart as PydanticThinkingPart,
+)
+from pydantic_ai.messages import (
     ToolCallPart as PydanticToolCallPart,
 )
 from pydantic_ai.models import Model, ModelRequestParameters
@@ -41,6 +44,7 @@ from mam_bench.runtime import (
     RuntimeInfrastructureError,
     RuntimeMessage,
     RuntimeProtocolError,
+    RuntimeReasoningPart,
     SamplingControl,
     TextOutput,
     TextPart,
@@ -117,7 +121,7 @@ class PydanticRuntimeFactory:
         self.settings = settings
         self.descriptor = pydantic_runtime_descriptor(settings)
 
-    def create(self) -> "PydanticModelRuntime":
+    def create(self) -> PydanticModelRuntime:
         return PydanticModelRuntime(self.settings)
 
 
@@ -242,10 +246,22 @@ def _to_pydantic_messages(messages: tuple[RuntimeMessage, ...]) -> list[ModelMes
     translated: list[ModelMessage] = []
     for message in messages:
         if message.role == "assistant":
-            response_parts: list[PydanticTextPart | PydanticToolCallPart] = []
+            response_parts: list[
+                PydanticTextPart | PydanticThinkingPart | PydanticToolCallPart
+            ] = []
             for part in message.parts:
                 if isinstance(part, TextPart):
                     response_parts.append(PydanticTextPart(content=part.text))
+                elif isinstance(part, RuntimeReasoningPart):
+                    response_parts.append(
+                        PydanticThinkingPart(
+                            content=part.text,
+                            id=part.id,
+                            signature=part.signature,
+                            provider_name=part.provider_name,
+                            provider_details=cast(Any, part.provider_details),
+                        )
+                    )
                 elif isinstance(part, ToolCallPart):
                     response_parts.append(
                         PydanticToolCallPart(
@@ -293,10 +309,20 @@ def _validate_response_limits(
 def _from_pydantic_response(
     response: PydanticModelResponse,
 ) -> tuple[RuntimeMessage, ...]:
-    parts: list[TextPart | ToolCallPart] = []
+    parts: list[TextPart | RuntimeReasoningPart | ToolCallPart] = []
     for part in response.parts:
         if isinstance(part, PydanticTextPart):
             parts.append(TextPart(text=part.content))
+        elif isinstance(part, PydanticThinkingPart):
+            parts.append(
+                RuntimeReasoningPart(
+                    text=part.content,
+                    id=part.id,
+                    signature=part.signature,
+                    provider_name=part.provider_name,
+                    provider_details=cast(dict[str, JsonValue] | None, part.provider_details),
+                )
+            )
         elif isinstance(part, PydanticToolCallPart):
             parts.append(
                 ToolCallPart(

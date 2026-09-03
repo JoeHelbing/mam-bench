@@ -59,7 +59,7 @@ class ModelEvaluationAnalysis(BaseModel):
     case_path: str
     model_name: str
     provider: str
-    provider_backend: str
+    provider_backend: str | None
     objective: SteeringObjective
     tolerance_fraction: str
     vacancy_percentage: float

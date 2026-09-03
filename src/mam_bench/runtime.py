@@ -65,6 +65,19 @@ class TextPart(BaseModel):
     text: str
 
 
+class RuntimeReasoningPart(BaseModel):
+    """Auditable provider reasoning returned before an answer or tool call."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["reasoning"] = "reasoning"
+    text: str
+    id: str | None = None
+    signature: str | None = None
+    provider_name: str | None = None
+    provider_details: dict[str, JsonValue] | None = None
+
+
 class ToolCallPart(BaseModel):
     """One provider-neutral model tool call."""
 
@@ -88,7 +101,7 @@ class ToolResultPart(BaseModel):
 
 
 type RuntimePart = Annotated[
-    TextPart | ToolCallPart | ToolResultPart,
+    TextPart | RuntimeReasoningPart | ToolCallPart | ToolResultPart,
     Field(discriminator="kind"),
 ]
 

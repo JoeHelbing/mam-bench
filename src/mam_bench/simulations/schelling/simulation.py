@@ -17,7 +17,7 @@ from mam_bench.benchmark import (
 from mam_bench.runtime import ModelRuntime, RuntimeDescriptor, RuntimeRequirements
 
 from .dataset import validate_dataset
-from .evaluation import InfluenceEvaluationConfig, SteeringObjective
+from .evaluation import InfluenceEvaluationConfig, RuntimeSettings, SteeringObjective
 from .evidence import run_model_evaluation, validate_evaluation_artifact
 from .interaction import (
     SCHELLING_RUNTIME_REQUIREMENTS,
@@ -76,7 +76,10 @@ class PreparedSchellingSimulation:
         retain_diagnostic_artifacts: bool,
     ) -> None:
         team = RuntimeInfluenceTeam(runtime)
-        await run_model_evaluation(self.config, team, output_directory)
+        config = self.config.model_copy(
+            update={"runtime": _recorded_runtime_settings(self.config.runtime, runtime.descriptor)}
+        )
+        await run_model_evaluation(config, team, output_directory)
         _write_evidence_manifest(
             output_directory,
             runtime.descriptor,
@@ -158,6 +161,26 @@ class SchellingBenchmarkSimulation:
             evidence=receipt,
             diagnostic_artifacts_retained=manifest.diagnostic_artifacts_retained,
         )
+
+
+def _recorded_runtime_settings(
+    settings: RuntimeSettings,
+    descriptor: RuntimeDescriptor,
+) -> RuntimeSettings:
+    if descriptor.provider not in {"openrouter", "openai-compatible"}:
+        return settings
+    if descriptor.endpoint is None:
+        raise ValueError("selected Model Runtime must record its endpoint")
+    return settings.model_copy(
+        update={
+            "provider": descriptor.provider,
+            "base_url": descriptor.endpoint,
+            "model_name": descriptor.model,
+            "openrouter_provider_slug": descriptor.routing_provider,
+            "openrouter_allow_fallbacks": descriptor.allow_fallbacks,
+            "openrouter_require_parameters": descriptor.require_parameters,
+        }
+    )
 
 
 def default_schelling_dataset_path() -> Path:

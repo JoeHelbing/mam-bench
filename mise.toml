@@ -1,0 +1,31 @@
+min_version = "2026.5.0"
+
+[env]
+UV_PYTHON = "3.14.7"
+
+[tools]
+python = "3.14.7"
+uv = "0.12.7"
+ruff = "0.16.5"
+"npm:pyright" = "1.1.413"
+
+[tasks.setup]
+description = "Install the locked Python dependencies"
+run = "uv sync --frozen"
+
+[tasks.test]
+description = "Run the unit test suite"
+env = { PYTHONPATH = "src" }
+run = "uv run --frozen python -m unittest discover -s tests -v"
+
+[tasks.lint]
+description = "Run Ruff lint checks"
+run = "uv run --frozen ruff check src tests main.py modal_reference_sweep.py"
+
+[tasks.typecheck]
+description = "Run strict Pyright checks"
+run = "uv run --frozen pyright"
+
+[tasks.check]
+description = "Run all local verification checks"
+depends = ["test", "lint", "typecheck"]

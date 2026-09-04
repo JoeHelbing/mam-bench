@@ -3,10 +3,10 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, Self
 
 from openai import AsyncOpenAI
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -28,6 +28,19 @@ class AgentSettings(BaseModel):
     max_completion_tokens: int = 32_768
     concurrency: int = 4
     timeout_seconds: float = 3_600.0
+    context_window_tokens: int = Field(default=260_000, gt=0)
+    compaction_trigger_fraction: float = Field(default=0.7, gt=0, lt=1)
+    compaction_tail_tokens: int = Field(default=40_000, ge=0)
+    summary_completion_tokens: int = Field(default=16_000, gt=0)
+    memory_injection_tokens: int = Field(default=4_000, gt=0)
+
+    @model_validator(mode="after")
+    def validate_compaction_tail(self) -> Self:
+        """Keep the verbatim tail below the threshold that triggers compaction."""
+        trigger_tokens = self.context_window_tokens * self.compaction_trigger_fraction
+        if self.compaction_tail_tokens >= trigger_tokens:
+            raise ValueError("compaction_tail_tokens must be below the compaction trigger")
+        return self
 
 
 class RuntimeInfo(BaseModel):

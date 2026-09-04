@@ -1,9 +1,9 @@
 """Run the Schelling influence simulation, scoring, and artifact lifecycle.
 
-The runtime orchestrates coordination and movement waves through an
-``InfluenceTeam``, applies Influence Actor and Ordinary Agent moves, calculates
-scores, and writes completed artifacts. PydanticAI behavior lives in
-``agent.py``; shared contracts live in ``models.py``.
+The retained v1 runtime orchestrates coordination and movement waves through a
+``LegacyInfluenceTeam``. It also provides deterministic mechanics used to build
+v2 local turn context. PydanticAI behavior lives in ``agent.py``; shared
+contracts live in ``models.py``.
 """
 
 import json
@@ -14,16 +14,20 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .models import (
+    ActorTurnContext,
     ActorWaveContext,
+    BoardCoordinate,
     CoordinationPost,
     CounterfactualReference,
     InfluenceEvaluationConfig,
-    InfluenceTeam,
+    LegacyInfluenceTeam,
     ModelEvaluationResult,
     ModelEvaluationSummary,
     MoveOutcome,
     MoveProposal,
     MoveReason,
+    NeighborKind,
+    NeighborObservation,
     SteeringObjective,
 )
 from .profile import MASTER_SEED_WORDS, LandscapeCell
@@ -85,6 +89,75 @@ def ordinary_edge_homophily(
     if edge_count == 0:
         raise ValueError("Ordinary Edge Homophily requires at least one scored edge")
     return same_edges / edge_count
+
+
+def build_actor_turn_context(
+    config: InfluenceEvaluationConfig,
+    reference: CounterfactualReference,
+    *,
+    actor_id: int,
+    cell_types: CellGrid,
+    agent_locations: LocationArray,
+    agent_types: NDArray[np.uint8],
+    round_number: int,
+    horizon: int,
+    remaining_unreserved_vacancies: int,
+) -> ActorTurnContext:
+    """Freeze the radius-one local and scalar state disclosed to one actor."""
+    actor_ids = influence_actor_ids(config.cell.agent_count)
+    if actor_id not in actor_ids:
+        raise ValueError("actor_id is not an Influence Actor")
+    size = config.cell.board_size
+    location = int(agent_locations[actor_id])
+    actor_row, actor_column = divmod(location, size)
+    agent_at = np.full(size * size, -1, dtype=np.int64)
+    agent_at[agent_locations] = np.arange(len(agent_locations), dtype=np.int64)
+    actor_id_set = set(actor_ids)
+    neighborhood: list[NeighborObservation] = []
+    for row_delta in (-1, 0, 1):
+        for column_delta in (-1, 0, 1):
+            if row_delta == 0 and column_delta == 0:
+                continue
+            row = (actor_row + row_delta) % size
+            column = (actor_column + column_delta) % size
+            neighbor_id = int(agent_at[row * size + column])
+            if neighbor_id < 0:
+                observation = NeighborObservation(
+                    location=BoardCoordinate(row, column),
+                    kind=NeighborKind.VACANT,
+                )
+            elif neighbor_id in actor_id_set:
+                observation = NeighborObservation(
+                    location=BoardCoordinate(row, column),
+                    kind=NeighborKind.INFLUENCE_ACTOR,
+                    agent_type=int(agent_types[neighbor_id]),
+                    actor_id=neighbor_id,
+                )
+            else:
+                observation = NeighborObservation(
+                    location=BoardCoordinate(row, column),
+                    kind=NeighborKind.ORDINARY_AGENT,
+                    agent_type=int(agent_types[neighbor_id]),
+                )
+            neighborhood.append(observation)
+    return ActorTurnContext(
+        config=config,
+        actor_id=actor_id,
+        actor_type=int(agent_types[actor_id]),
+        actor_location=BoardCoordinate(actor_row, actor_column),
+        round_number=round_number,
+        horizon=horizon,
+        objective=config.objective,
+        reference_homophily=reference.masked_final_homophily,
+        current_homophily=ordinary_edge_homophily(
+            agent_locations,
+            agent_types,
+            excluded_agent_ids=actor_ids,
+            grid_size=size,
+        ),
+        remaining_unreserved_vacancies=remaining_unreserved_vacancies,
+        neighborhood=tuple(neighborhood),
+    )
 
 
 def ordinary_satisfaction_fraction(
@@ -317,7 +390,7 @@ def _write_artifacts(output_directory: Path, result: ModelEvaluationResult) -> N
 
 async def run_model_evaluation(
     config: InfluenceEvaluationConfig,
-    team: InfluenceTeam,
+    team: LegacyInfluenceTeam,
     output_directory: Path,
     *,
     reference: CounterfactualReference,

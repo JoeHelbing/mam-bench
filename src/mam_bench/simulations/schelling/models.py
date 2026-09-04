@@ -70,6 +70,125 @@ class CoordinationPost:
     round_number: int = 0
 
 
+@dataclass(frozen=True)
+class BoardCoordinate:
+    """One absolute row and column on the toroidal board."""
+
+    row: int
+    column: int
+
+
+class NeighborKind(StrEnum):
+    """Actor-visible classification of one neighboring cell."""
+
+    VACANT = "vacant"
+    ORDINARY_AGENT = "ordinary-agent"
+    INFLUENCE_ACTOR = "influence-actor"
+
+
+@dataclass(frozen=True)
+class NeighborObservation:
+    """One cell in a frozen radius-one actor observation."""
+
+    location: BoardCoordinate
+    kind: NeighborKind
+    agent_type: int | None = None
+    actor_id: int | None = None
+
+
+@dataclass(frozen=True)
+class ActorTurnContext:
+    """The complete Schelling state disclosed at the start of one actor turn."""
+
+    config: InfluenceEvaluationConfig
+    actor_id: int
+    actor_type: int
+    actor_location: BoardCoordinate
+    round_number: int
+    horizon: int
+    objective: SteeringObjective
+    reference_homophily: float
+    current_homophily: float
+    remaining_unreserved_vacancies: int
+    neighborhood: tuple[NeighborObservation, ...]
+
+
+class SubmitMove(BaseModel):
+    """One terminal v2 request to move the calling Influence Actor."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    row: int
+    column: int
+
+
+class Stay(BaseModel):
+    """One terminal v2 request to leave the calling Influence Actor in place."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+type ActorTerminalAction = SubmitMove | Stay
+
+
+@dataclass(frozen=True)
+class ActorTurnResult:
+    """One Influence Actor's terminal result from the turn-oriented team seam."""
+
+    actor_id: int
+    action: ActorTerminalAction
+
+
+@dataclass(frozen=True)
+class UnverifiedPost:
+    """Free-form actor-authored content in the Public Document."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class AuthoritativeRecord:
+    """Runtime-authored fact in the Public Document."""
+
+    text: str
+
+
+type PublicDocumentRecord = UnverifiedPost | AuthoritativeRecord
+
+
+class DocumentRead(BaseModel):
+    """Rendered unread Public Document records returned to one actor."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    content: str
+    more_available: bool
+
+
+class PostReceipt(BaseModel):
+    """Authoritative acknowledgement of one appended actor post."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    sequence: int
+
+
+class ActorTurnCoordinator(Protocol):
+    """Schelling-owned public operations available during one actor turn."""
+
+    async def read_document(self, actor_id: int) -> DocumentRead: ...
+
+    async def post_message(self, actor_id: int, text: str) -> PostReceipt: ...
+
+
+@dataclass
+class ActorTurnDependencies:
+    """Typed Schelling dependencies available throughout one v2 actor turn."""
+
+    context: ActorTurnContext
+    coordinator: ActorTurnCoordinator
+
+
 class MoveDecision(BaseModel):
     """One stay or relocation choice returned through a strict output tool."""
 
@@ -153,7 +272,20 @@ class ActorWaveContext:
 
 
 class InfluenceTeam(Protocol):
-    """Replaceable two-wave team used by fake and PydanticAI runtimes."""
+    """Turn-oriented team seam shared by scripted and PydanticAI v2 actors."""
+
+    @property
+    def runtime_info(self) -> RuntimeInfo: ...
+
+    async def run_turn(
+        self,
+        context: ActorTurnContext,
+        coordinator: ActorTurnCoordinator,
+    ) -> ActorTurnResult: ...
+
+
+class LegacyInfluenceTeam(Protocol):
+    """Existing two-wave team retained until the complete v2 runtime replaces it."""
 
     @property
     def runtime_info(self) -> RuntimeInfo: ...

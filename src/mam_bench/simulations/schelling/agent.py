@@ -1,9 +1,9 @@
-"""PydanticAI implementation of the Schelling Influence Actor team.
+"""PydanticAI implementation of Schelling Influence Actor interactions.
 
-This module defines the reusable phase agents, dynamic instruction and tool
-registration, strict movement output, request limits, model settings, actor
-history, state-inspection tool implementation, and provider-error handling.
-The simulation round loop remains in ``runtime.py``.
+The v2 path runs persistent, locally embodied actor turns with Schelling-owned
+Public Document tools and terminal outputs over the package-level session
+runtime. The v1 phase agents remain available until the full simulation loop is
+replaced. Simulation mechanics stay in ``runtime.py``.
 """
 
 import asyncio
@@ -18,19 +18,32 @@ from pydantic_ai import Agent, ModelMessage, ModelRetry, RunContext, ToolOutput,
 from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.models.openai import OpenAIChatModelSettings
 
+from mam_bench.agent import AgentSessionRuntime, SharedCommunication, SharedRecord
 from mam_bench.benchmark import ModelRuntime
 
 from .models import (
     COORDINATION_PHASE_CODE,
     MOVEMENT_PHASE_CODE,
     ActorRunDependencies,
+    ActorTerminalAction,
+    ActorTurnContext,
+    ActorTurnCoordinator,
+    ActorTurnDependencies,
+    ActorTurnResult,
     ActorWaveContext,
+    AuthoritativeRecord,
     CoordinationPost,
+    DocumentRead,
     MoveDecision,
     MoveProposal,
+    PostReceipt,
+    PublicDocumentRecord,
     StateRequest,
+    Stay,
+    SubmitMove,
+    UnverifiedPost,
 )
-from .prompt import turn_prompt, wave_instructions
+from .prompt import ACTOR_TURN_INSTRUCTIONS, actor_turn_prompt, turn_prompt, wave_instructions
 from .reference import EMPTY_CELL, unhappy_agent_ids
 from .runtime import (
     influence_actor_ids,
@@ -38,6 +51,57 @@ from .runtime import (
     ordinary_edge_homophily,
     ordinary_satisfaction_fraction,
 )
+
+ACTOR_TURN_PHASE_CODE = 2
+PUBLIC_DOCUMENT_PAGE_CHARS = 40_000
+PUBLIC_POST_CHARS = 4_000
+PUBLIC_RUNTIME_RECORD_CHARS = 4_000
+PUBLIC_RUNTIME_SOURCE_CHARS = 100
+
+
+def _actor_turn_agent(
+    runtime: ModelRuntime,
+) -> Agent[ActorTurnDependencies, ActorTerminalAction]:
+    agent: Agent[ActorTurnDependencies, ActorTerminalAction] = Agent(
+        runtime.model,
+        deps_type=ActorTurnDependencies,
+        output_type=[
+            ToolOutput(
+                SubmitMove,
+                name="submit_move",
+                description="End this turn by requesting one destination row and column.",
+                strict=True,
+                max_retries=0,
+            ),
+            ToolOutput(
+                Stay,
+                name="stay",
+                description="End this turn without moving.",
+                strict=True,
+                max_retries=0,
+            ),
+        ],
+        instructions=ACTOR_TURN_INSTRUCTIONS,
+        retries=0,
+    )
+
+    @agent.tool(name="read_document", retries=0, strict=True)
+    async def _read_document(  # pyright: ignore[reportUnusedFunction]
+        ctx: RunContext[ActorTurnDependencies],
+    ) -> DocumentRead:
+        """Read the oldest unread complete Public Document records."""
+        return await ctx.deps.coordinator.read_document(ctx.deps.context.actor_id)
+
+    @agent.tool(name="post_message", retries=0, strict=True)
+    async def _post_message(  # pyright: ignore[reportUnusedFunction]
+        ctx: RunContext[ActorTurnDependencies], text: str
+    ) -> PostReceipt:
+        """Append one free-form, explicitly unverified Public Document post."""
+        if len(text) > PUBLIC_POST_CHARS:
+            raise ModelRetry("post_message text must be at most 4,000 characters")
+        return await ctx.deps.coordinator.post_message(ctx.deps.context.actor_id, text)
+
+    return agent
 
 
 def _configure_actor_agent[AgentOutput](
@@ -105,6 +169,59 @@ def _movement_agent(runtime: ModelRuntime) -> Agent[ActorRunDependencies, MoveDe
     )
 
 
+class SchellingTurnCoordinator:
+    """Interpret and render Schelling records over generic shared storage."""
+
+    def __init__(self, communication: SharedCommunication[PublicDocumentRecord]) -> None:
+        self._communication = communication
+
+    async def read_document(self, actor_id: int) -> DocumentRead:
+        page = await self._communication.read(
+            str(actor_id),
+            max_chars=PUBLIC_DOCUMENT_PAGE_CHARS,
+            renderer=_render_public_document,
+        )
+        return DocumentRead(content=page.content, more_available=page.more_available)
+
+    async def post_message(self, actor_id: int, text: str) -> PostReceipt:
+        if len(text) > PUBLIC_POST_CHARS:
+            raise ValueError("Public Document posts must be at most 4,000 characters")
+        record = await self._communication.append(str(actor_id), UnverifiedPost(text))
+        return PostReceipt(sequence=record.sequence)
+
+    async def publish_authoritative(self, source: str, text: str) -> int:
+        """Append one bounded runtime-authored fact and return its sequence."""
+        if not source or len(source) > PUBLIC_RUNTIME_SOURCE_CHARS:
+            raise ValueError("runtime record source must contain 1 to 100 characters")
+        if len(text) > PUBLIC_RUNTIME_RECORD_CHARS:
+            raise ValueError("runtime record text must be at most 4,000 characters")
+        record = await self._communication.append(source, AuthoritativeRecord(text))
+        return record.sequence
+
+
+def _render_public_document(
+    records: tuple[SharedRecord[PublicDocumentRecord], ...],
+) -> str:
+    lines: list[str] = []
+    for record in records:
+        if isinstance(record.payload, UnverifiedPost):
+            rendered = {
+                "sequence": record.sequence,
+                "kind": "unverified_post",
+                "author_session_id": record.author_session_id,
+                "text": record.payload.text,
+            }
+        else:
+            rendered = {
+                "sequence": record.sequence,
+                "kind": "authoritative_runtime_record",
+                "source": record.author_session_id,
+                "text": record.payload.text,
+            }
+        lines.append(json.dumps(rendered, ensure_ascii=False, separators=(",", ":")))
+    return "\n".join(lines)
+
+
 class RuntimeInfluenceTeam:
     """Run the Schelling interaction protocol with PydanticAI agents."""
 
@@ -113,9 +230,43 @@ class RuntimeInfluenceTeam:
         self.runtime_info = runtime.info
         self._coordination_agent = _coordination_agent(runtime)
         self._movement_agent = _movement_agent(runtime)
+        self._actor_turn_agent = _actor_turn_agent(runtime)
+        self._actor_sessions: AgentSessionRuntime[
+            ActorTurnDependencies,
+            ActorTerminalAction,
+            PublicDocumentRecord,
+        ] = AgentSessionRuntime(self._actor_turn_agent, settings=runtime.info.agent_settings)
         self._recent_messages: dict[int, list[tuple[int, int, list[ModelMessage]]]] = {
             actor_id: [] for actor_id in influence_actor_ids(300)
         }
+
+    @property
+    def communication(self) -> SharedCommunication[PublicDocumentRecord]:
+        """Return the v2 trial's generic Public Document storage."""
+        return self._actor_sessions.communication
+
+    async def run_turn(
+        self,
+        context: ActorTurnContext,
+        coordinator: ActorTurnCoordinator,
+    ) -> ActorTurnResult:
+        """Run one persistent, locally embodied v2 Influence Actor turn."""
+        try:
+            async with asyncio.timeout(self.runtime.info.agent_settings.timeout_seconds):
+                result = await self._actor_sessions.run(
+                    str(context.actor_id),
+                    actor_turn_prompt(context),
+                    deps=ActorTurnDependencies(context, coordinator),
+                    model_settings=_model_settings(
+                        context,
+                        self.runtime,
+                        ACTOR_TURN_PHASE_CODE,
+                    ),
+                    usage_limits=UsageLimits(request_limit=16, tool_calls_limit=15),
+                )
+        except (ModelAPIError, APIError, OSError) as error:
+            raise RuntimeError(_error_text(error)) from None
+        return ActorTurnResult(actor_id=context.actor_id, action=result.output)
 
     async def coordinate(
         self, contexts: tuple[ActorWaveContext, ...]
@@ -258,7 +409,7 @@ class RuntimeInfluenceTeam:
 
 
 def _model_settings(
-    context: ActorWaveContext,
+    context: ActorTurnContext | ActorWaveContext,
     runtime: ModelRuntime,
     phase_code: int,
 ) -> OpenAIChatModelSettings:

@@ -1,4 +1,6 @@
+import asyncio
 import unittest
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import cast
 from unittest.mock import patch
@@ -20,7 +22,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RequestUsage
 from pydantic_ai_harness.memory import InMemoryStore, MemoryFile
 
-from mam_bench.agent import AgentSessionRuntime
+from mam_bench.agent import AgentSessionRuntime, SharedRecord
 from mam_bench.benchmark import AgentSettings
 
 
@@ -146,6 +148,175 @@ class CompactionModel:
 
         self.normal_requests += 1
         return _response(TextPart(f"normal-{self.normal_requests}"), cost=self.normal_cost)
+
+
+@dataclass(frozen=True)
+class SharedPayload:
+    text: str
+
+
+def _render_payloads(records: tuple[SharedRecord[SharedPayload], ...]) -> str:
+    return "|".join(record.payload.text for record in records)
+
+
+class SharedCommunicationTests(unittest.IsolatedAsyncioTestCase):
+    def _runtime(self) -> AgentSessionRuntime[None, str, SharedPayload]:
+        return AgentSessionRuntime(Agent(FunctionModel(MemoryModel()), output_type=str))
+
+    async def test_pages_complete_records_with_isolated_cursors_and_trial_reset(self) -> None:
+        runtime = self._runtime()
+        communication = runtime.communication
+        first = await communication.append("session-a", SharedPayload("aaaa"))
+        second = await communication.append("session-b", SharedPayload("bb"))
+        third = await communication.append("session-a", SharedPayload("ccc"))
+
+        page_one = await communication.read(
+            "reader-a",
+            max_chars=7,
+            renderer=_render_payloads,
+        )
+        page_two = await communication.read(
+            "reader-a",
+            max_chars=7,
+            renderer=_render_payloads,
+        )
+        other_reader = await communication.read(
+            "reader-b",
+            max_chars=100,
+            renderer=_render_payloads,
+        )
+        oversized_first = await communication.read(
+            "reader-c",
+            max_chars=2,
+            renderer=_render_payloads,
+        )
+        empty = await communication.read(
+            "reader-a",
+            max_chars=7,
+            renderer=_render_payloads,
+        )
+        fresh = await self._runtime().communication.read(
+            "reader-a",
+            max_chars=7,
+            renderer=_render_payloads,
+        )
+
+        self.assertEqual((first.sequence, second.sequence, third.sequence), (0, 1, 2))
+        self.assertEqual(first.author_session_id, "session-a")
+        self.assertEqual(page_one.records, (first, second))
+        self.assertEqual(page_one.content, "aaaa|bb")
+        self.assertTrue(page_one.more_available)
+        self.assertEqual(page_two.records, (third,))
+        self.assertFalse(page_two.more_available)
+        self.assertEqual(other_reader.records, (first, second, third))
+        self.assertEqual(oversized_first.records, (first,))
+        self.assertEqual(oversized_first.content, "aaaa")
+        self.assertTrue(oversized_first.more_available)
+        self.assertEqual(empty.records, ())
+        self.assertEqual(empty.content, "")
+        self.assertFalse(empty.more_available)
+        self.assertEqual(empty.next_cursor, page_two.next_cursor)
+        self.assertEqual(fresh.records, ())
+
+    async def test_read_is_linearized_and_a_failed_render_does_not_advance_cursor(self) -> None:
+        runtime = self._runtime()
+        communication = runtime.communication
+        first = await communication.append("writer", SharedPayload("first"))
+        renderer_entered = asyncio.Event()
+        release_renderer = asyncio.Event()
+
+        async def controlled_renderer(
+            records: tuple[SharedRecord[SharedPayload], ...],
+        ) -> str:
+            renderer_entered.set()
+            await release_renderer.wait()
+            return _render_payloads(records)
+
+        read_task = asyncio.create_task(
+            communication.read("reader", max_chars=100, renderer=controlled_renderer)
+        )
+        await renderer_entered.wait()
+        append_task = asyncio.create_task(
+            communication.append("writer", SharedPayload("after-read"))
+        )
+        await asyncio.sleep(0)
+        self.assertFalse(append_task.done())
+
+        release_renderer.set()
+        first_page = await read_task
+        second = await append_task
+        second_page = await communication.read(
+            "reader",
+            max_chars=100,
+            renderer=_render_payloads,
+        )
+
+        self.assertEqual(first_page.records, (first,))
+        self.assertEqual(second_page.records, (second,))
+
+        def broken_renderer(records: tuple[SharedRecord[SharedPayload], ...]) -> str:
+            del records
+            raise RuntimeError("cannot render")
+
+        third = await communication.append("writer", SharedPayload("third"))
+        with self.assertRaisesRegex(RuntimeError, "cannot render"):
+            await communication.read("failing-reader", max_chars=100, renderer=broken_renderer)
+        recovered = await communication.read(
+            "failing-reader",
+            max_chars=100,
+            renderer=_render_payloads,
+        )
+        self.assertEqual(recovered.records, (first, second, third))
+
+    async def test_rolling_admission_is_bounded_and_preserves_completion_order(self) -> None:
+        settings = AgentSettings(concurrency=2)
+        runtime: AgentSessionRuntime[None, str, SharedPayload] = AgentSessionRuntime(
+            Agent(FunctionModel(MemoryModel()), output_type=str),
+            settings=settings,
+        )
+        gates = [asyncio.Event() for _ in range(5)]
+        started = [asyncio.Event() for _ in range(5)]
+        active = 0
+        maximum_active = 0
+
+        async def worker(item: int) -> int:
+            nonlocal active, maximum_active
+            active += 1
+            maximum_active = max(maximum_active, active)
+            started[item].set()
+            try:
+                await gates[item].wait()
+                await runtime.communication.append("worker", SharedPayload(str(item)))
+                return item * 10
+            finally:
+                active -= 1
+
+        rolling_task = asyncio.create_task(runtime.run_rolling(range(5), worker))
+        await started[0].wait()
+        await started[1].wait()
+        gates[1].set()
+        await started[2].wait()
+        self.assertFalse(gates[0].is_set())
+        gates[2].set()
+        await started[3].wait()
+        gates[0].set()
+        await started[4].wait()
+        gates[4].set()
+        await asyncio.sleep(0)
+        gates[3].set()
+        completed = await rolling_task
+        publication = await runtime.communication.read(
+            "auditor",
+            max_chars=100,
+            renderer=_render_payloads,
+        )
+
+        self.assertEqual(maximum_active, 2)
+        self.assertEqual([item.item for item in completed], [1, 2, 0, 4, 3])
+        self.assertEqual([item.result for item in completed], [10, 20, 0, 40, 30])
+        self.assertEqual([item.admission_sequence for item in completed], [1, 2, 0, 4, 3])
+        self.assertEqual([item.completion_sequence for item in completed], list(range(5)))
+        self.assertEqual(publication.content, "1|2|0|4|3")
 
 
 class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):

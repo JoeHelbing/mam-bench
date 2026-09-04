@@ -26,7 +26,7 @@ class AgentSettings(BaseModel):
     top_k: int = 20
     reasoning_effort: str = "medium"
     max_completion_tokens: int = 32_768
-    concurrency: int = 4
+    concurrency: int = Field(default=4, gt=0)
     timeout_seconds: float = 3_600.0
     context_window_tokens: int = Field(default=260_000, gt=0)
     compaction_trigger_fraction: float = Field(default=0.7, gt=0, lt=1)

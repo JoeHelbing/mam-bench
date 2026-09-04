@@ -1,33 +1,30 @@
-"""Frozen scientific contract for the first Schelling Reference Landscape."""
+"""Fixed coordinates and constants for Schelling Reference Dataset v2."""
 
-import math
-from typing import Self
-
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from dataclasses import dataclass
 
 
-class Rational(BaseModel):
-    """A normalized exact fraction between zero and one."""
+@dataclass(frozen=True)
+class Rational:
+    """An exact fraction used by the simulation."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    numerator: int = Field(ge=0)
-    denominator: int = Field(gt=0)
-
-    @model_validator(mode="after")
-    def validate_normalized_fraction(self) -> Self:
-        if self.numerator > self.denominator:
-            raise ValueError("fraction must be between zero and one")
-        if math.gcd(self.numerator, self.denominator) != 1:
-            raise ValueError("fraction must be normalized")
-        return self
+    numerator: int
+    denominator: int
 
     def __str__(self) -> str:
         return f"{self.numerator}/{self.denominator}"
 
+    @classmethod
+    def parse(cls, value: str) -> Rational:
+        numerator, denominator = value.split("/")
+        return cls(int(numerator), int(denominator))
 
-TOLERANCES: tuple[Rational, ...] = tuple(
-    Rational(numerator=numerator, denominator=denominator)
+    @property
+    def filename_component(self) -> str:
+        return f"{self.numerator}-of-{self.denominator}"
+
+
+TOLERANCES = tuple(
+    Rational(numerator, denominator)
     for numerator, denominator in (
         (0, 1),
         (1, 8),
@@ -54,97 +51,61 @@ TOLERANCES: tuple[Rational, ...] = tuple(
         (1, 1),
     )
 )
-
-VACANCY_FRACTIONS: tuple[Rational, ...] = tuple(
-    Rational(numerator=numerator, denominator=denominator)
+BOARD_SIZES = (20, 60, 100)
+VACANCY_FRACTIONS = tuple(
+    Rational(numerator, denominator)
     for numerator, denominator in (
+        (1, 100),
+        (1, 40),
+        (1, 20),
         (1, 10),
-        (3, 20),
         (1, 5),
         (1, 4),
         (3, 10),
-        (7, 20),
         (2, 5),
+        (1, 2),
     )
 )
-VACANCY_COUNTS: tuple[int, ...] = (40, 60, 80, 100, 120, 140, 160)
-LANDSCAPE_SEED_IDS: tuple[int, ...] = tuple(range(20))
-LANDSCAPE_CELL_COUNT = len(TOLERANCES) * len(VACANCY_COUNTS)
-MASTER_SEED_WORDS: tuple[int, int] = (0x4D414D42, 0x454E4348)
+LANDSCAPE_SEED_IDS = tuple(range(50))
+LANDSCAPE_CELL_COUNT = len(BOARD_SIZES) * len(TOLERANCES) * len(VACANCY_FRACTIONS)
+MASTER_SEED_WORDS = (0x4D414D42, 0x454E4348)
+MAX_TRANSITIONS = 30
+PROFILE_VERSION = "schelling-reference-v2"
 
 
-class LandscapeCell(BaseModel):
-    """One exact tolerance-vacancy coordinate in the Reference Landscape."""
+@dataclass(frozen=True)
+class LandscapeCell:
+    """One board-size, tolerance, and vacancy coordinate."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    tolerance_index: int = Field(ge=0, lt=len(TOLERANCES))
-    vacancy_index: int = Field(ge=0, lt=len(VACANCY_COUNTS))
+    board_size: int
     tolerance: Rational
     vacancy_fraction: Rational
-    vacancy_count: int
 
-    @model_validator(mode="after")
-    def validate_coordinate(self) -> Self:
-        if self.tolerance != TOLERANCES[self.tolerance_index]:
-            raise ValueError("tolerance does not match tolerance_index")
-        if self.vacancy_fraction != VACANCY_FRACTIONS[self.vacancy_index]:
-            raise ValueError("vacancy_fraction does not match vacancy_index")
-        if self.vacancy_count != VACANCY_COUNTS[self.vacancy_index]:
-            raise ValueError("vacancy_count does not match vacancy_index")
-        return self
+    @property
+    def vacancy_count(self) -> int:
+        return (
+            self.board_size**2
+            * self.vacancy_fraction.numerator
+            // self.vacancy_fraction.denominator
+        )
 
     @property
     def agent_count(self) -> int:
-        return 400 - self.vacancy_count
+        return self.board_size**2 - self.vacancy_count
 
     @property
     def cell_id(self) -> str:
-        return f"t{self.tolerance_index:02d}-v{self.vacancy_index:02d}"
-
-
-class ReferenceProfile(BaseModel):
-    """Versioned fixed mechanics and coordinates for generation."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    profile_version: str = "schelling-reference-v1"
-    grid_size: int = 20
-    max_transitions: int = 500
-    group_count: int = 2
-    neighborhood_radius: int = 1
-    topology: str = "toroidal"
-    update_rule: str = "staged-sequential-reservation"
-    distance: str = "toroidal-chebyshev"
-    rng: str = "numpy-pcg64-seedsequence"
-    tie_draw_rule: str = "draw-only-for-multiple-nearest"
-    master_seed_words: tuple[int, int] = MASTER_SEED_WORDS
-    tolerances: tuple[Rational, ...] = TOLERANCES
-    vacancy_fractions: tuple[Rational, ...] = VACANCY_FRACTIONS
-    vacancy_counts: tuple[int, ...] = VACANCY_COUNTS
-    landscape_seed_ids: tuple[int, ...] = LANDSCAPE_SEED_IDS
-
-
-PROFILE = ReferenceProfile()
-
-
-def landscape_cell(tolerance_index: int, vacancy_index: int) -> LandscapeCell:
-    """Build and validate one canonical landscape coordinate."""
-
-    return LandscapeCell(
-        tolerance_index=tolerance_index,
-        vacancy_index=vacancy_index,
-        tolerance=TOLERANCES[tolerance_index],
-        vacancy_fraction=VACANCY_FRACTIONS[vacancy_index],
-        vacancy_count=VACANCY_COUNTS[vacancy_index],
-    )
+        return (
+            f"board-{self.board_size:03d}"
+            f"__tolerance-{self.tolerance.filename_component}"
+            f"__vacancy-{self.vacancy_fraction.filename_component}"
+        )
 
 
 def landscape_cells() -> tuple[LandscapeCell, ...]:
-    """Return all cells in tolerance-major, vacancy-minor order."""
-
     return tuple(
-        landscape_cell(tolerance_index, vacancy_index)
-        for tolerance_index in range(len(TOLERANCES))
-        for vacancy_index in range(len(VACANCY_COUNTS))
+        LandscapeCell(board_size, tolerance, vacancy)
+        for board_size in BOARD_SIZES
+        for tolerance in TOLERANCES
+        for vacancy in VACANCY_FRACTIONS
     )

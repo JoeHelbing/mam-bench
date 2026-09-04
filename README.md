@@ -5,26 +5,26 @@
 > evaluation profiles, datasets, and scoring may change before the first stable
 > release. Do not treat current results as a mature or standardized benchmark.
 
-MAM-Bench first characterizes one explicit Schelling segregation model, then tests whether separate model-controlled Influence Actors can steer its emergent outcome. Reference Landscape v1 and the first live model-evaluation pilot are complete.
+MAM-Bench first characterizes one explicit Schelling segregation model, then tests whether separate model-controlled Influence Actors can steer its emergent outcome. Schelling Reference Dataset v2 expands the ordinary-agent landscape across three board sizes while preserving the first influence benchmark.
 
 Read [Benchmarking Self-Organized AI Swarms in Steering Complex Systems](https://joehelbing.net/post/mam-bench) for an illustrated overview of the current pilot.
 
-## Reference Landscape v1
+## Schelling Reference Dataset v2
 
 The frozen profile uses:
 
-- a 20x20 toroidal grid;
+- 20x20, 60x60, and 100x100 toroidal boards;
 - two equally sized groups;
 - a radius-1 Moore neighborhood;
 - exact fractional tolerance over occupied neighbors;
 - stationary satisfied agents;
 - sequential reservation of nearest satisfactory vacancies against a frozen state;
 - staged application of all reserved moves; and
-- equilibrium, blocked, or 500-transition termination.
+- equilibrium, blocked, or 30-transition termination.
 
-The landscape crosses all 23 behaviorally distinct radius-1 tolerance fractions with seven vacancy levels from 0.10 through 0.40. Each of the 161 cells receives 20 paired Landscape Seeds, producing 3,220 runs.
+The landscape crosses all 23 behaviorally distinct radius-1 tolerance fractions with vacancy fractions `1/100`, `1/40`, `1/20`, `1/10`, `1/5`, `1/4`, `3/10`, `2/5`, and `1/2`. Each of the 621 cells receives 50 paired Landscape Seeds, producing 31,050 runs.
 
-This is a modernized profile, not a claim to reproduce Schelling's original checkerboard procedure exactly. See [`docs/schelling-reference-profile-v1.md`](docs/schelling-reference-profile-v1.md) for the complete scientific, randomness, and artifact contract.
+This is a modernized profile, not a claim to reproduce Schelling's original checkerboard procedure exactly. See [`docs/schelling-reference-profile-v2.md`](docs/schelling-reference-profile-v2.md) for the complete scientific, randomness, and artifact contract. The v1 profile remains as historical documentation.
 
 ## Install
 
@@ -39,10 +39,7 @@ If the toolchain is already available, `uv sync` is sufficient.
 
 Modal is used only as a cloud execution adapter. The engine itself runs and tests locally.
 
-The complete validated Reference Dataset ships under
-`data/reference-landscape/v1/`. Ordinary benchmark preparation validates those
-repository-owned files before any Model Runtime call. It never downloads or
-reconstructs the dataset implicitly.
+Compact validated reference data ships under `src/mam_bench/data/schelling-reference-v2/`: a 621-cell aggregate landscape and the fixed Seed 50 evaluation fixture. The simulation loads the fixture with `importlib.resources`; it never downloads or reconstructs reference data implicitly. Full trajectories are developer-only material under ignored `.scratch` and are not included in clones or wheels.
 
 ## Reconstruct the complete sweep on Modal
 
@@ -51,39 +48,49 @@ This is an explicit developer workflow, not part of ordinary benchmark execution
 The Modal CLI must already be authenticated. The adapter runs one CPU task per Landscape Cell and writes each returned artifact locally as it completes. Rerunning the command skips artifacts whose resumable receipts and SHA-256 hashes remain valid.
 
 ```bash
-modal run modal_reference_sweep.py \
-  --output-dir data/reference-landscape/v1
+modal run src/mam_bench/simulations/schelling/utils/modal_reference_sweep.py \
+  --output-dir .scratch/schelling-reference-v2-full \
+  --receipt-path .scratch/schelling-reference-v2-receipt.json
 ```
 
-After all 161 artifacts arrive, use the dataset APIs in
-`mam_bench.simulations.schelling.dataset` to validate every archive, verify paired
-initial grids, and publish the complete manifest. The dataset is not complete
-until `manifest.json` exists and `validate_dataset()` succeeds.
+After all 621 full-trajectory artifacts arrive, validate them and publish only the compact products used by ordinary evaluation and landscape inspection:
+
+```bash
+uv run src/mam_bench/simulations/schelling/utils/publish_reference_data.py
+```
 
 ## Artifact layout
 
 ```text
-data/reference-landscape/v1/
-|-- manifest.json
-`-- cells/
-    |-- t00-v00.npz
-    |-- ...
-    `-- t22-v06.npz
+src/mam_bench/data/schelling-reference-v2/
+|-- landscape.jsonl
+|-- evaluation-reference.json
+`-- evaluation-reference.npz
 ```
 
-Each compressed NPZ archive contains 20 complete cell-type trajectories, stable per-agent location traces, static agent types, trajectory lengths, terminal statuses, seed IDs, and exact parameter metadata. NPZ files are loaded with `allow_pickle=False`. The Pydantic JSON manifest records the complete profile, array schema, code mappings, software provenance, byte sizes, and SHA-256 hashes.
+`landscape.jsonl` contains one aggregate outcome record for each of the 621 Landscape Cells. The evaluation fixture contains only the fixed Seed 50 initial grid, stable locations and types, terminal Counterfactual Reference state, status, rounds, and comparison metrics. Its JSON metadata records the NPZ hash. The selected test set holds vacancy at 25% and uses preference regimes `1/2`, `3/4`, and `6/7`; the current benchmark uses `3/4`.
 
-Optional scientific diagnostics live in the separate, downstream
-`mam_bench_analysis` package. Its analysis modules expose Python APIs for writing
-`final-satisfaction-manifold.json`, `final-satisfaction-manifold.csv`, and model
-evaluation diagnostics. The selected test set holds vacancy at 25% and uses three
-preference regimes: `1/2`, `3/4`, and `6/7`. See ADR 0004 for the rationale.
+The complete 31-state trajectories and their artifact inventory remain under `.scratch/schelling-reference-v2-full/` for local scientific analysis. Because `.scratch` is ignored, preserve them separately if they need to outlive the working copy.
 
-Analysis artifacts are derived outputs, not Run Evidence or Primary Scores. The runtime package never imports the analysis package.
+## Read the Schelling implementation
+
+The runtime path is easiest to read in this order:
+
+1. `simulation.py` selects the fixed case and packaged reference.
+2. `runtime.py` runs rounds, applies moves, scores outcomes, and writes artifacts.
+3. `agent.py` defines the PydanticAI agents, tools, outputs, and request protocol.
+4. `prompt.py` contains the static and dynamic Influence Actor instructions.
+5. `models.py` defines the shared runtime data contracts.
+6. `reference.py` contains the ordinary-agent Schelling mechanics.
+7. `profile.py` fixes the parameter grid and deterministic seed contract.
+
+`fixture.py` loads the compact comparator used at runtime. Everything involved in regenerating or analyzing reference data lives under `utils/`; see `utils/README.md`.
 
 ## Run a benchmark matrix from YAML
 
-The ordinary workflow reads a selection-only YAML file, validates the complete Benchmark Simulation-Model Runtime matrix, executes each pairing, prints scores grouped by Benchmark Simulation, and writes `topline.json` only after all Run Evidence validates:
+The ordinary workflow reads a selection-only YAML file, executes every selected
+simulation-model pairing, prints each score, and writes `topline.json` after all
+pairings finish:
 
 ```bash
 uv run main.py examples/schelling-pilot.yaml
@@ -91,17 +98,22 @@ uv run main.py examples/schelling-pilot.yaml
 
 `main.py` accepts exactly one `.yaml` path. The YAML contract selects built-in
 Benchmark Simulations and Model Runtimes. It cannot change mechanics, objectives,
-prompts, tools, datasets, rounds, or scoring. `examples/schelling-pilot.yaml`
-requires `OPENROUTER_API_KEY` through a secret manager; the configuration names
-required environment variables but never contains credentials.
+prompts, tools, datasets, rounds, or scoring. The configured output directory
+must not already exist; MAM-Bench never overwrites an earlier run.
+Copy `.env.example` to `.env` and set `OPENROUTER_API_KEY` before running the
+OpenRouter example. `OPENROUTER_BASE_URL` defaults to the standard endpoint and
+can be overridden from the environment or `.env`. The ignored `.env` file must
+never be committed. OpenAI-compatible YAML selections name their required API-key
+environment variable directly; benchmark YAML never contains credentials.
 
-The first completed `(3/4, 25%), Seed 22, integration` pilot achieved final
-Directional Lift `0.2450793` and passed the technical artifact gate. Each case
-writes the complete shared transcript to `coordination-board.jsonl`, one stable-ID
-synchronized round per line, in addition to canonical events, private actor
-histories, retained wave checkpoints, and a hashed `evidence-manifest.json`. A
-single case does not establish reliability across seeds, objectives, or baselines.
-See the Influence Profile for the complete mechanics and evidence contract.
+The historical v1 `(3/4, 25%), Seed 22, integration` pilot achieved final
+Directional Lift `0.2450793`. The current benchmark uses the same 20x20 parameter
+cell with held-out Seed 50 from the v2 randomness contract. Each case writes
+`run.json`, `trajectory.npz`,
+`coordination.json`, and `moves.json`. These are direct outputs for inspection,
+not an independent replay or tamper-detection system. A single case does not
+establish reliability across seeds, objectives, or baselines. See the Influence
+Profile for the complete mechanics and artifact contract.
 
 ## Verify the implementation
 

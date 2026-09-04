@@ -1,0 +1,16 @@
+{
+  "profile_version": "schelling-reference-v2",
+  "board_size": 20,
+  "tolerance": "3/4",
+  "vacancy_fraction": "1/4",
+  "vacancy_count": 100,
+  "seed_id": 50,
+  "terminal_status": "equilibrium",
+  "rounds_completed": 20,
+  "masked_agent_count": 284,
+  "masked_final_homophily": 0.9747596153846154,
+  "unmasked_final_homophily": 0.9728260869565217,
+  "ordinary_satisfaction": 1.0,
+  "archive": "evaluation-reference.npz",
+  "archive_sha256": "2080391aef481501dcd05ab2edccb74bedf4fbb3578f059ca9f6f8db1e8ff68e"
+}

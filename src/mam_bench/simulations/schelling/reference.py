@@ -1,13 +1,12 @@
 """Host-neutral engine for the frozen Schelling Reference Profile."""
 
+from dataclasses import dataclass
 from enum import IntEnum
-from typing import Self
 
 import numpy as np
 from numpy.typing import NDArray
-from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .profile import MASTER_SEED_WORDS, PROFILE, LandscapeCell, Rational
+from .profile import MASTER_SEED_WORDS, MAX_TRANSITIONS, LandscapeCell, Rational
 
 CellGrid = NDArray[np.uint8]
 LocationArray = NDArray[np.uint16]
@@ -26,36 +25,17 @@ class TerminalStatus(IntEnum):
     HORIZON_EXHAUSTED = 2
 
 
-class ReferenceTrajectory(BaseModel):
+@dataclass(frozen=True)
+class ReferenceTrajectory:
     """Complete raw states and stable-agent locations for one run."""
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
-
     cell: LandscapeCell
-    seed_id: int = Field(ge=0)
+    seed_id: int
     cell_types: np.ndarray
     agent_locations: np.ndarray
     agent_types: np.ndarray
     terminal_status: TerminalStatus
-    rounds_completed: int = Field(ge=0)
-
-    @model_validator(mode="after")
-    def validate_trajectory(self) -> Self:
-        expected_states = self.rounds_completed + 1
-        expected_agents = self.cell.agent_count
-        if self.cell_types.dtype != np.dtype(np.uint8):
-            raise ValueError("cell_types must use uint8")
-        if self.cell_types.shape != (expected_states, PROFILE.grid_size, PROFILE.grid_size):
-            raise ValueError("cell_types has the wrong shape")
-        if self.agent_locations.dtype != np.dtype(np.uint16):
-            raise ValueError("agent_locations must use uint16")
-        if self.agent_locations.shape != (expected_states, expected_agents):
-            raise ValueError("agent_locations has the wrong shape")
-        if self.agent_types.dtype != np.dtype(np.uint8):
-            raise ValueError("agent_types must use uint8")
-        if self.agent_types.shape != (expected_agents,):
-            raise ValueError("agent_types has the wrong shape")
-        return self
+    rounds_completed: int
 
     @property
     def trajectory_length(self) -> int:
@@ -138,14 +118,21 @@ def _seed_words(
     seed_id: int,
     stream_id: int,
 ) -> list[int]:
-    words = [MASTER_SEED_WORDS[0], MASTER_SEED_WORDS[1], stream_id, cell.vacancy_index]
+    words = [
+        MASTER_SEED_WORDS[0],
+        MASTER_SEED_WORDS[1],
+        stream_id,
+        cell.board_size,
+        cell.vacancy_fraction.numerator,
+        cell.vacancy_fraction.denominator,
+    ]
     if stream_id != 0:
-        words.append(cell.tolerance_index)
+        words.extend((cell.tolerance.numerator, cell.tolerance.denominator))
     words.append(seed_id)
     return words
 
 
-def _rng(cell: LandscapeCell, seed_id: int, stream_id: int) -> np.random.Generator:
+def reference_rng(cell: LandscapeCell, seed_id: int, stream_id: int) -> np.random.Generator:
     seed_sequence = np.random.SeedSequence(_seed_words(cell, seed_id, stream_id))
     return np.random.Generator(np.random.PCG64(seed_sequence))
 
@@ -158,17 +145,17 @@ def _initialize(
     agent_types[:half] = TYPE_A
     agent_types[half:] = TYPE_B
 
-    tokens = np.full(PROFILE.grid_size * PROFILE.grid_size, PAD_LOCATION, dtype=np.uint16)
+    tokens = np.full(cell.board_size * cell.board_size, PAD_LOCATION, dtype=np.uint16)
     tokens[: cell.agent_count] = np.arange(cell.agent_count, dtype=np.uint16)
-    _rng(cell, seed_id, 0).shuffle(tokens)
+    reference_rng(cell, seed_id, 0).shuffle(tokens)
 
     occupied_positions = np.flatnonzero(tokens != PAD_LOCATION).astype(np.uint16)
     agent_locations = np.empty(cell.agent_count, dtype=np.uint16)
     agent_locations[tokens[occupied_positions]] = occupied_positions
 
-    cell_types = np.zeros(PROFILE.grid_size * PROFILE.grid_size, dtype=np.uint8)
+    cell_types = np.zeros(cell.board_size * cell.board_size, dtype=np.uint8)
     cell_types[occupied_positions] = agent_types[tokens[occupied_positions]]
-    return cell_types.reshape((PROFILE.grid_size, PROFILE.grid_size)), agent_locations, agent_types
+    return cell_types.reshape((cell.board_size, cell.board_size)), agent_locations, agent_types
 
 
 def _candidate_mask(
@@ -215,7 +202,7 @@ def _distances(origin: int, destinations: LocationArray, size: int) -> NDArray[n
     return np.maximum(row_distance, column_distance)
 
 
-def _unhappy_agent_ids(
+def unhappy_agent_ids(
     cell_types: CellGrid, agent_locations: LocationArray, tolerance: Rational
 ) -> NDArray[np.int64]:
     satisfied_cells = evaluate_satisfaction(cell_types, tolerance)
@@ -233,7 +220,7 @@ def _choose_nearest_index(nearest_indices: NDArray[np.int64], tie_rng: np.random
     return int(nearest_indices[int(tie_rng.integers(len(nearest_indices)))])
 
 
-def _reserve_destinations(
+def reserve_ordinary_destinations(
     cell_types: CellGrid,
     agent_locations: LocationArray,
     agent_types: NDArray[np.uint8],
@@ -313,7 +300,7 @@ def _terminal_status(
     agent_types: NDArray[np.uint8],
     tolerance: Rational,
 ) -> TerminalStatus:
-    unhappy_ids = _unhappy_agent_ids(cell_types, agent_locations, tolerance)
+    unhappy_ids = unhappy_agent_ids(cell_types, agent_locations, tolerance)
     if len(unhappy_ids) == 0:
         return TerminalStatus.EQUILIBRIUM
     if not _has_possible_move(cell_types, agent_locations, agent_types, unhappy_ids, tolerance):
@@ -321,79 +308,32 @@ def _terminal_status(
     return TerminalStatus.HORIZON_EXHAUSTED
 
 
-def initialize_population(
-    cell: LandscapeCell, seed_id: int
-) -> tuple[CellGrid, LocationArray, NDArray[np.uint8]]:
-    """Initialize stable identities for a Reference or Influence run."""
-
-    return _initialize(cell, seed_id)
-
-
-def reference_rng(cell: LandscapeCell, seed_id: int, stream_id: int) -> np.random.Generator:
-    """Return one deterministic Reference Profile random stream."""
-
-    return _rng(cell, seed_id, stream_id)
-
-
-def unhappy_agent_ids(
-    cell_types: CellGrid, agent_locations: LocationArray, tolerance: Rational
-) -> NDArray[np.int64]:
-    """Return stable IDs whose occupied cells do not satisfy tolerance."""
-
-    return _unhappy_agent_ids(cell_types, agent_locations, tolerance)
-
-
-def reserve_ordinary_destinations(
-    cell_types: CellGrid,
-    agent_locations: LocationArray,
-    agent_types: NDArray[np.uint8],
-    unhappy_ids: NDArray[np.int64],
-    tolerance: Rational,
-    order_rng: np.random.Generator,
-    tie_rng: np.random.Generator,
-    *,
-    unavailable_destinations: LocationArray | None = None,
-) -> tuple[NDArray[np.int64], LocationArray]:
-    """Reserve Ordinary Agent destinations against one frozen state."""
-
-    return _reserve_destinations(
-        cell_types,
-        agent_locations,
-        agent_types,
-        unhappy_ids,
-        tolerance,
-        order_rng,
-        tie_rng,
-        unavailable_destinations=unavailable_destinations,
-    )
-
-
 def run_reference(
     cell: LandscapeCell,
     seed_id: int,
     *,
-    max_transitions: int = PROFILE.max_transitions,
+    max_transitions: int = MAX_TRANSITIONS,
 ) -> ReferenceTrajectory:
     """Run one deterministic Reference Profile trajectory."""
 
     if seed_id < 0:
         raise ValueError("seed_id cannot be negative")
-    if max_transitions < 0 or max_transitions > PROFILE.max_transitions:
-        raise ValueError(f"max_transitions must be between 0 and {PROFILE.max_transitions}")
+    if max_transitions < 0 or max_transitions > MAX_TRANSITIONS:
+        raise ValueError(f"max_transitions must be between 0 and {MAX_TRANSITIONS}")
 
     cell_types, agent_locations, agent_types = _initialize(cell, seed_id)
     cell_states = [cell_types.copy()]
     location_states = [agent_locations.copy()]
-    order_rng = _rng(cell, seed_id, 1)
-    tie_rng = _rng(cell, seed_id, 2)
+    order_rng = reference_rng(cell, seed_id, 1)
+    tie_rng = reference_rng(cell, seed_id, 2)
     terminal_status: TerminalStatus | None = None
 
     for _ in range(max_transitions):
-        unhappy_ids = _unhappy_agent_ids(cell_types, agent_locations, cell.tolerance)
+        unhappy_ids = unhappy_agent_ids(cell_types, agent_locations, cell.tolerance)
         if len(unhappy_ids) == 0:
             terminal_status = TerminalStatus.EQUILIBRIUM
             break
-        moving_agents, destinations = _reserve_destinations(
+        moving_agents, destinations = reserve_ordinary_destinations(
             cell_types,
             agent_locations,
             agent_types,

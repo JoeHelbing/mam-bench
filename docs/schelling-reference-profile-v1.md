@@ -1,5 +1,7 @@
 # Schelling Reference Profile v1
 
+> Superseded by [Schelling Reference Dataset v2](schelling-reference-profile-v2.md). The v1 raw dataset is retained in Git history but is no longer packaged.
+
 This document freezes the ordinary-agent system used to generate MAM-Bench's first Reference Landscape. It defines one modernized Schelling model and its raw dataset contract; model-controlled agents, steering objectives, derived segregation metrics, and Representative Region selection are out of scope.
 
 ## Historical callout
@@ -176,4 +178,4 @@ The manifest is complete only after all 161 artifacts pass schema, hash, state-c
 
 ## Modal execution
 
-The host-neutral engine is tested locally before cloud execution. Modal receives 161 independent CPU tasks, one per Landscape Cell; each task runs its 20 seeds and returns one compressed artifact. The local runner writes each artifact atomically, validates it, and can skip already valid cells when resuming. The final dataset lives under `data/reference-landscape/v1/`; Modal function results or remote storage are not the sole durable copy.
+The host-neutral engine is tested locally before cloud execution. Modal receives 161 independent CPU tasks, one per Landscape Cell; each task runs its 20 seeds and returns one compressed artifact. The local runner writes each artifact atomically, validates it, and can skip already valid cells when resuming. The historical dataset lived under `data/reference-landscape/v1/`; Modal function results or remote storage were not the sole durable copy.

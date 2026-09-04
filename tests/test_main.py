@@ -1,97 +1,52 @@
+import io
 import tempfile
 import unittest
-from contextlib import redirect_stderr
-from io import StringIO
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
-import main as application
+import main as benchmark_main
 
-from mam_bench.benchmark import BenchmarkTopline, EvidenceReceipt, PrimaryScore, ToplineEntry
+from mam_bench.benchmark import BenchmarkTopline, PrimaryScore, ToplineEntry
 
 
 class MainTests(unittest.TestCase):
-    def test_requires_exactly_one_yaml_path(self) -> None:
-        for arguments in ((), ("one.yaml", "two.yaml"), ("benchmark.yml",)):
-            with self.subTest(arguments=arguments):
-                stderr = StringIO()
-                with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
-                    application.main(arguments)
+    def test_rejects_non_yaml_configuration_path(self) -> None:
+        with self.assertRaises(SystemExit):
+            benchmark_main.main(["benchmark.json"])
 
-                self.assertEqual(raised.exception.code, 2)
-                self.assertTrue(stderr.getvalue())
-
-    def test_unknown_simulation_fails_without_creating_output(self) -> None:
+    def test_loads_runs_and_prints_one_topline(self) -> None:
+        topline = BenchmarkTopline(
+            entries=(
+                ToplineEntry(
+                    simulation_id="simulation-a",
+                    simulation_version="v1",
+                    model_id="model-a",
+                    provider="openrouter",
+                    model="vendor/model",
+                    primary_score=PrimaryScore(name="score", value=0.125, unit="points"),
+                ),
+            )
+        )
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            config = root / "benchmark.yaml"
-            config.write_text(
-                """\
-simulations: [unknown-simulation]
+            path = Path(directory) / "benchmark.yaml"
+            path.write_text(
+                """simulations: [schelling-influence-pilot-v1]
 models:
-  - id: model-a
-    runtime: openrouter
-    model: provider/model
-    provider: provider-a
-output:
-  directory: results
+  - {id: model-a, runtime: openrouter, model: vendor/model, provider: provider-a}
+output_directory: results
 """,
                 encoding="utf-8",
             )
-            stderr = StringIO()
+            output = io.StringIO()
+            with (
+                patch.object(benchmark_main, "run_benchmark", AsyncMock(return_value=topline)),
+                redirect_stdout(output),
+            ):
+                status = benchmark_main.main([str(path)])
 
-            with redirect_stderr(stderr):
-                result = application.main((str(config),))
-
-            self.assertEqual(result, 2)
-            self.assertIn("unknown-simulation", stderr.getvalue())
-            self.assertFalse((root / "results").exists())
-
-    def test_formats_scores_grouped_by_simulation(self) -> None:
-        topline = BenchmarkTopline(
-            entries=(
-                self._entry("simulation-a", "score_a", 1.25, "points", "a"),
-                self._entry("simulation-b", "score_b", 2.5, "ratio", "b"),
-            )
-        )
-
-        self.assertEqual(
-            application.format_topline(topline),
-            "simulation-a\n"
-            "  model-a  score_a = 1.250000 points\n"
-            "\n"
-            "simulation-b\n"
-            "  model-a  score_b = 2.500000 ratio",
-        )
-
-    @staticmethod
-    def _entry(
-        simulation_id: str,
-        score_name: str,
-        score_value: float,
-        unit: str,
-        digest_character: str,
-    ) -> ToplineEntry:
-        return ToplineEntry(
-            simulation_id=simulation_id,
-            simulation_version=f"{simulation_id}-v1",
-            model_id="model-a",
-            runtime="fake",
-            provider="test",
-            model="test/model-a",
-            primary_score=PrimaryScore(
-                name=score_name,
-                value=score_value,
-                objective=f"increase {score_name}",
-                meaning=f"{score_name} score",
-                unit=unit,
-                semantics_version=f"{score_name}-v1",
-            ),
-            evidence=EvidenceReceipt(
-                relative_directory=f"runs/{simulation_id}/model-a",
-                manifest_path="evidence-manifest.json",
-                manifest_sha256=digest_character * 64,
-            ),
-        )
+        self.assertEqual(status, 0)
+        self.assertEqual(output.getvalue(), "simulation-a / model-a: 0.125000 points\n")
 
 
 if __name__ == "__main__":

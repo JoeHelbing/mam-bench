@@ -37,7 +37,7 @@ The all-or-nothing validation of every configured Benchmark Simulation and Model
 _Avoid_: dry run, capability negotiation, graceful degradation
 
 **Schelling Reference Profile**:
-The single, versioned set of Schelling dynamics used to generate the first reference data. It is one explicit model, not every implementation commonly called a Schelling model.
+A versioned set of Schelling dynamics and parameter coordinates used to generate a Reference Dataset. It is one explicit model, not every implementation commonly called a Schelling model.
 _Avoid_: canonical Schelling model, original Schelling model
 
 **Staged Round**:
@@ -45,7 +45,7 @@ One Reference Profile transition in which agents evaluate satisfaction from one 
 _Avoid_: simultaneous update, sequential update
 
 **Reference Dataset**:
-Versioned, validated ordinary-behavior data that a Benchmark Simulation uses to define or evaluate benchmark conditions. The Schelling Reference Landscape v1 is one Reference Dataset.
+Versioned, validated ordinary-behavior data that a Benchmark Simulation uses to define or evaluate benchmark conditions. Schelling Reference Dataset v2 is one Reference Dataset.
 _Avoid_: baseline dataset, comparison dataset, generated artifacts
 
 **Reference Landscape**:
@@ -53,15 +53,19 @@ The outcome distribution produced by ordinary rule-based agents across the Schel
 _Avoid_: comparison dataset, baseline dataset
 
 **Reference Trajectory**:
-The complete ordered sequence of cell-type grids and agent locations for one Reference Landscape run, including its initialized and terminal states.
+The complete ordered sequence of cell-type grids and agent locations for one Reference Landscape run, including its initialized and terminal states. Full Schelling Reference Trajectories are developer analysis material and are not packaged.
 _Avoid_: run data, history
+
+**Evaluation Reference Fixture**:
+The compact packaged projection of one held-out Counterfactual Reference needed by a Benchmark Simulation: fixed parameters, initial identities and state, terminal state, termination facts, and comparison metrics. It excludes unused intermediate Reference Trajectory states.
+_Avoid_: full dataset, replay log
 
 **Agent Trace**:
 The ordered location sequence of one stable agent identity within a Reference Trajectory. Agent type is static metadata rather than repeated in every state.
 _Avoid_: second grid, occupant grid
 
 **Landscape Cell**:
-One exact tolerance-vacancy parameter pair in the Reference Landscape. Each Landscape Cell contains repeated seeded runs rather than a single outcome.
+One exact board-size, tolerance, and vacancy coordinate in the Reference Landscape. Each Landscape Cell contains repeated seeded runs rather than a single outcome.
 _Avoid_: parameter point, configuration
 
 **Landscape Seed**:

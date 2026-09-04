@@ -57,15 +57,6 @@ ModelSelection = Annotated[
 SimulationSelection = Annotated[str, Field(pattern=_SAFE_ID_PATTERN)]
 
 
-class OutputSelection(BaseModel):
-    """Cross-simulation output policy only."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    directory: Path
-    retain_diagnostic_artifacts: bool = False
-
-
 class BenchmarkConfig(BaseModel):
     """Configuration for choosing which simulations and models to run."""
 
@@ -73,7 +64,7 @@ class BenchmarkConfig(BaseModel):
 
     simulations: tuple[SimulationSelection, ...] = Field(min_length=1)
     models: tuple[ModelSelection, ...] = Field(min_length=1)
-    output: OutputSelection
+    output_directory: Path
 
     @model_validator(mode="after")
     def require_unique_selections(self) -> BenchmarkConfig:
@@ -91,12 +82,7 @@ def load_benchmark_config(path: Path) -> BenchmarkConfig:
     with path.open("rb") as config_file:
         document = yaml.safe_load(config_file)
     config = BenchmarkConfig.model_validate(document)
-    directory = config.output.directory
-    if not directory.is_absolute():
-        directory = path.resolve().parent / directory
-    directory = directory.resolve()
-    if directory.exists() and (not directory.is_dir() or any(directory.iterdir())):
-        raise ValueError("output.directory must be new or empty")
-    return config.model_copy(
-        update={"output": config.output.model_copy(update={"directory": directory})}
-    )
+    output_directory = config.output_directory
+    if not output_directory.is_absolute():
+        output_directory = path.resolve().parent / output_directory
+    return config.model_copy(update={"output_directory": output_directory.resolve()})

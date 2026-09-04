@@ -20,7 +20,7 @@ run = "uv run --frozen python -m unittest discover -s tests -v"
 
 [tasks.lint]
 description = "Run Ruff lint checks"
-run = "uv run --frozen ruff check src tests main.py modal_reference_sweep.py"
+run = "uv run --frozen ruff check src tests main.py"
 
 [tasks.typecheck]
 description = "Run strict Pyright checks"

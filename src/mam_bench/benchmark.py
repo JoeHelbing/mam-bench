@@ -1,149 +1,141 @@
-"""Shared Benchmark Simulation results and interfaces."""
+"""Benchmark interfaces, results, and PydanticAI model construction."""
 
-from pathlib import Path, PurePosixPath
-from typing import Literal, Protocol, Self
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal, Protocol
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    ValidationInfo,
-    field_validator,
-    model_validator,
-)
+from openai import AsyncOpenAI
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic_ai.models import Model
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.providers.openrouter import OpenRouterProvider
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from mam_bench.runtime import ModelRuntime, RuntimeDescriptor, RuntimeRequirements
-
-
-class SimulationDescriptor(BaseModel):
-    """Stable identity and topline contract for one Benchmark Simulation."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    simulation_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]*$")
-    simulation_version: str = Field(min_length=1)
-    title: str = Field(min_length=1)
-    primary_score_name: str = Field(min_length=1)
+from mam_bench.config import ModelSelection, OpenAICompatibleModel
 
 
-class PreflightIssue(BaseModel):
-    """One deterministic Compatibility Preflight failure."""
+class AgentSettings(BaseModel):
+    """How MAM-Bench calls PydanticAI agents."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True)
 
-    simulation_id: str
-    model_id: str | None
-    code: str
-    message: str
+    temperature: float = 1.0
+    top_p: float = 0.95
+    top_k: int = 20
+    reasoning_effort: str = "medium"
+    max_completion_tokens: int = 32_768
+    concurrency: int = 4
+    timeout_seconds: float = 3_600.0
+
+
+class RuntimeInfo(BaseModel):
+    """Model, provider, and agent settings saved with benchmark results."""
+
+    model_config = ConfigDict(frozen=True)
+
+    model_id: str
+    provider: Literal["openrouter", "openai-compatible"]
+    model: str
+    endpoint: str
+    routing_provider: str | None = None
+    agent_settings: AgentSettings = AgentSettings()
+
+
+@dataclass(frozen=True)
+class ModelRuntime:
+    """A PydanticAI model paired with its benchmark metadata."""
+
+    info: RuntimeInfo
+    model: Model
+
+
+class OpenRouterSettings(BaseSettings):
+    """OpenRouter connection settings loaded from the environment or `.env`."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="OPENROUTER_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        frozen=True,
+    )
+
+    base_url: str = "https://openrouter.ai/api/v1"
+    api_key: SecretStr = Field(min_length=1)
+
+
+def create_runtime(selection: ModelSelection) -> ModelRuntime:
+    """Create the PydanticAI model selected in YAML."""
+
+    if isinstance(selection, OpenAICompatibleModel):
+        endpoint = selection.base_url
+        provider_name = "openai-compatible"
+        routing_provider = None
+        provider = OpenAIProvider(
+            base_url=endpoint,
+            api_key=os.environ[selection.api_key_env],
+        )
+    else:
+        settings = OpenRouterSettings()  # pyright: ignore[reportCallIssue]
+        endpoint = settings.base_url
+        provider_name = "openrouter"
+        routing_provider = selection.provider
+        provider = OpenRouterProvider(
+            openai_client=AsyncOpenAI(
+                base_url=settings.base_url,
+                api_key=settings.api_key.get_secret_value(),
+                default_headers={"X-Title": "MAM-Bench"},
+            )
+        )
+
+    return ModelRuntime(
+        info=RuntimeInfo(
+            model_id=selection.id,
+            provider=provider_name,
+            model=selection.model,
+            endpoint=endpoint,
+            routing_provider=routing_provider,
+        ),
+        model=OpenAIChatModel(selection.model, provider=provider),
+    )
 
 
 class PrimaryScore(BaseModel):
-    """A simulation-native, higher-is-better topline score."""
+    """The main score produced by one simulation run."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    name: str = Field(min_length=1)
-    value: float = Field(allow_inf_nan=False)
-    higher_is_better: Literal[True] = True
-    objective: str = Field(min_length=1)
-    meaning: str = Field(min_length=1)
-    unit: str = Field(min_length=1)
-    semantics_version: str = Field(min_length=1)
-
-
-class EvidenceReceipt(BaseModel):
-    """Location and hash of simulation-validated Run Evidence."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    relative_directory: str
-    manifest_path: str
-    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-
-    @field_validator("relative_directory", "manifest_path")
-    @classmethod
-    def validate_relative_path(cls, value: str, info: ValidationInfo) -> str:
-        del cls
-        path = PurePosixPath(value)
-        if path.is_absolute() or ".." in path.parts:
-            raise ValueError("evidence paths must be relative and cannot escape the run")
-        if value == "" or (value == "." and info.field_name == "manifest_path"):
-            raise ValueError("evidence paths cannot be empty")
-        return value
-
-
-class SimulationResult(BaseModel):
-    """Validated scored result returned by one Benchmark Simulation."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    simulation: SimulationDescriptor
-    runtime: RuntimeDescriptor
-    primary_score: PrimaryScore
-    evidence: EvidenceReceipt
-    diagnostic_artifacts_retained: bool
-
-    @model_validator(mode="after")
-    def validate_primary_score_name(self) -> Self:
-        if self.primary_score.name != self.simulation.primary_score_name:
-            raise ValueError("Primary Score name does not match the simulation descriptor")
-        return self
+    name: str
+    value: float
+    unit: str
+    higher_is_better: bool = True
 
 
 class ToplineEntry(BaseModel):
-    """One Benchmark Simulation-Model Runtime score in the topline."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    """The score and model details for one simulation-model run."""
 
     simulation_id: str
     simulation_version: str
     model_id: str
-    runtime: str
     provider: str
     model: str
     primary_score: PrimaryScore
-    evidence: EvidenceReceipt
 
 
 class BenchmarkTopline(BaseModel):
-    """Complete non-aggregated benchmark results in deterministic order."""
+    """All scores from a benchmark run, in execution order."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: Literal["mam-bench.topline.v1"] = "mam-bench.topline.v1"
-    status: Literal["complete"] = "complete"
     entries: tuple[ToplineEntry, ...]
 
 
-class PreparedSimulation(Protocol):
-    """Model-independent prepared state for one Benchmark Simulation."""
+class BenchmarkSimulation(Protocol):
+    """Interface every built-in simulation implements."""
 
-    @property
-    def descriptor(self) -> SimulationDescriptor: ...
+    simulation_id: str
+    simulation_version: str
 
-    @property
-    def runtime_requirements(self) -> RuntimeRequirements: ...
-
-    async def execute(
+    async def run(
         self,
-        *,
         runtime: ModelRuntime,
         output_directory: Path,
-        retain_diagnostic_artifacts: bool,
-    ) -> None: ...
-
-
-class BenchmarkSimulation(Protocol):
-    """Deep simulation seam used by the benchmark runner."""
-
-    @property
-    def descriptor(self) -> SimulationDescriptor: ...
-
-    def prepare(self) -> PreparedSimulation: ...
-
-    def validate(
-        self,
-        *,
-        output_directory: Path,
-        runtime: RuntimeDescriptor,
-    ) -> SimulationResult: ...
+    ) -> PrimaryScore: ...

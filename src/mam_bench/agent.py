@@ -9,13 +9,22 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import cast
+from typing import Literal, cast
 
 from anyio import Lock
-from pydantic_ai import Agent, AgentRunResult, ModelMessage, RunUsage, UsageLimits, UserContent
+from pydantic_ai import (
+    Agent,
+    AgentRunResult,
+    ModelMessage,
+    ModelRetry,
+    RunUsage,
+    UsageLimits,
+    UserContent,
+)
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import KnownModelName, Model, ModelRequestContext, ModelRequestParameters
@@ -32,6 +41,9 @@ from pydantic_ai_harness import (
 from pydantic_ai_harness.memory import InMemoryStore
 
 from mam_bench.benchmark import AgentSettings
+
+MEMORY_FILE_CHARS = 65_536
+_MEMORY_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
 
 
 @dataclass(frozen=True)
@@ -234,6 +246,109 @@ class CompletedWork[ItemT, ResultT]:
     completion_sequence: int
 
 
+@dataclass(frozen=True)
+class NotebookMutationResult:
+    """Content-free result from one action-bound notebook mutation."""
+
+    file: str
+    status: Literal["created", "appended", "updated", "deleted", "not_found"]
+
+
+class SessionNotebook:
+    """Commit action-bound notebook edits to staged and canonical session stores."""
+
+    def __init__(
+        self,
+        staged_store_resolver: Callable[[], InMemoryStore],
+        canonical_store_resolver: Callable[[], InMemoryStore],
+        snapshot_recorder: Callable[[str, str | None], None],
+        scope: str,
+    ) -> None:
+        self._staged_store_resolver = staged_store_resolver
+        self._canonical_store_resolver = canonical_store_resolver
+        self._snapshot_recorder = snapshot_recorder
+        self._scope = scope
+
+    async def write(
+        self,
+        content: str,
+        *,
+        file: str = "MEMORY.md",
+        old_text: str | None = None,
+    ) -> NotebookMutationResult:
+        """Append content or replace one unique passage in a session notebook file."""
+        name = _normalize_memory_filename(file)
+        if old_text is None and not content.strip():
+            raise ModelRetry("Nothing to write; append non-empty text or provide old_text")
+        staged_store = self._staged_store_resolver()
+        canonical_store = self._canonical_store_resolver()
+        path = f"{self._scope}/{name}"
+        staged = await staged_store.read(path, max_chars=MEMORY_FILE_CHARS)
+        if staged is not None and staged.truncated:
+            raise ModelRetry(f"{name!r} exceeds the notebook edit limit")
+        existing = None if staged is None else staged.content
+        if old_text is None:
+            updated = (
+                f"{content.rstrip()}\n"
+                if existing is None or not existing.strip()
+                else f"{existing.rstrip()}\n{content.rstrip()}\n"
+            )
+            status: Literal["created", "appended", "updated"] = (
+                "created" if existing is None or not existing.strip() else "appended"
+            )
+        else:
+            if existing is None or not old_text:
+                raise ModelRetry(f"old_text was not found in {name!r}")
+            occurrences = existing.count(old_text)
+            if occurrences == 0:
+                raise ModelRetry(f"old_text was not found in {name!r}")
+            if occurrences > 1:
+                raise ModelRetry(f"old_text must occur exactly once in {name!r}")
+            updated = existing.replace(old_text, content, 1)
+            status = "updated"
+        if len(updated) > MEMORY_FILE_CHARS:
+            raise ModelRetry(
+                f"{name!r} would grow to {len(updated)} characters; "
+                f"the limit is {MEMORY_FILE_CHARS}"
+            )
+        canonical = await canonical_store.read(path, max_chars=MEMORY_FILE_CHARS)
+        if canonical is not None and canonical.truncated:
+            raise ModelRetry(f"{name!r} exceeds the notebook edit limit")
+        self._snapshot_recorder(path, None if canonical is None else canonical.content)
+        await staged_store.write(
+            path,
+            updated,
+            expected_version=None if staged is None else staged.version,
+        )
+        if canonical is None or canonical.content != updated:
+            await canonical_store.write(
+                path,
+                updated,
+                expected_version=None if canonical is None else canonical.version,
+            )
+        return NotebookMutationResult(file=name, status=status)
+
+    async def delete(self, file: str) -> NotebookMutationResult:
+        """Delete one permitted session notebook file."""
+        name = _normalize_memory_filename(file)
+        if name == "MEMORY.md":
+            raise ModelRetry("The main notebook cannot be deleted")
+        staged_store = self._staged_store_resolver()
+        canonical_store = self._canonical_store_resolver()
+        path = f"{self._scope}/{name}"
+        staged = await staged_store.read(path, max_chars=1)
+        canonical = await canonical_store.read(path, max_chars=MEMORY_FILE_CHARS)
+        if staged is not None or canonical is not None:
+            self._snapshot_recorder(path, None if canonical is None else canonical.content)
+        if staged is not None:
+            await staged_store.delete(path, expected_version=staged.version)
+        if canonical is not None:
+            await canonical_store.delete(path, expected_version=canonical.version)
+        if staged is None:
+            return NotebookMutationResult(file=name, status="not_found")
+        return NotebookMutationResult(file=name, status="deleted")
+
+
 class AgentSessionRuntime[AgentDepsT, OutputDataT, SharedPayloadT = object]:
     """Run one reusable PydanticAI agent through isolated persistent sessions.
 
@@ -253,6 +368,8 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT, SharedPayloadT = object]:
         self._store = InMemoryStore()
         self._states: dict[str, _SessionState] = {}
         self._locks: dict[str, Lock] = {}
+        self._active_stores: dict[str, InMemoryStore] = {}
+        self._active_notebook_snapshots: dict[str, dict[str, str | None]] = {}
         self._usage = RunUsage()
         self._model_requests = 0
         self._cost_complete = True
@@ -290,6 +407,21 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT, SharedPayloadT = object]:
         """Return the session's normalized PydanticAI message history."""
         return tuple(self._state(session_id).history)
 
+    def notebook(self, session_id: str) -> SessionNotebook:
+        """Return the action-bound notebook editor for this session's active run."""
+        _validate_identity(session_id, name="session_id")
+        scope = f"{self._namespace(session_id)}/agent"
+        return SessionNotebook(
+            lambda: self._active_store(session_id),
+            lambda: self._store,
+            lambda path, content: self._record_notebook_snapshot(
+                session_id,
+                path,
+                content,
+            ),
+            scope,
+        )
+
     async def run(
         self,
         session_id: str,
@@ -298,6 +430,7 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT, SharedPayloadT = object]:
         deps: AgentDepsT,
         model_settings: ModelSettings | None = None,
         usage_limits: UsageLimits | None = None,
+        capabilities: Sequence[AgentCapability[AgentDepsT]] = (),
     ) -> AgentRunResult[OutputDataT]:
         """Run one turn and retain successful history, notebook, and usage.
 
@@ -311,34 +444,44 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT, SharedPayloadT = object]:
             staged_store = self._staged_memory(session_id)
             model_tracker: _RequestTracker[AgentDepsT] = _RequestTracker()
             summary_tracker = _SummaryTracker()
-            capabilities: tuple[AgentCapability[AgentDepsT], ...] = (
+            run_capabilities: tuple[AgentCapability[AgentDepsT], ...] = (
                 self._compaction(summary_tracker),
                 self._memory(session_id, staged_store),
+                *capabilities,
                 model_tracker,
             )
-            result = await self._agent.run(
-                user_prompt,
-                message_history=state.history,
-                deps=deps,
-                model_settings=model_settings,
-                usage_limits=usage_limits,
-                capabilities=capabilities,
-            )
-            run_usage = result.usage
-            summary_requests = run_usage.requests - model_tracker.requests
-            if summary_requests != summary_tracker.requests:
-                raise RuntimeError("session usage could not distinguish summary requests")
+            self._active_stores[session_id] = staged_store
+            self._active_notebook_snapshots[session_id] = {}
+            try:
+                result = await self._agent.run(
+                    user_prompt,
+                    message_history=state.history,
+                    deps=deps,
+                    model_settings=model_settings,
+                    usage_limits=usage_limits,
+                    capabilities=run_capabilities,
+                )
+                run_usage = result.usage
+                summary_requests = run_usage.requests - model_tracker.requests
+                if summary_requests != summary_tracker.requests:
+                    raise RuntimeError("session usage could not distinguish summary requests")
 
-            await self._commit_memory(session_id, staged_store)
-            state.history = result.all_messages()
-            state.usage.incr(run_usage)
-            state.model_requests += model_tracker.requests
-            if not model_tracker.cost_complete or not summary_tracker.cost_complete:
-                state.cost_complete = False
-                self._cost_complete = False
-            self._usage.incr(run_usage)
-            self._model_requests += model_tracker.requests
-            return result
+                await self._commit_memory(session_id, staged_store)
+                state.history = result.all_messages()
+                state.usage.incr(run_usage)
+                state.model_requests += model_tracker.requests
+                if not model_tracker.cost_complete or not summary_tracker.cost_complete:
+                    state.cost_complete = False
+                    self._cost_complete = False
+                self._usage.incr(run_usage)
+                self._model_requests += model_tracker.requests
+                return result
+            except BaseException:
+                await self._rollback_action_memory(session_id)
+                raise
+            finally:
+                self._active_stores.pop(session_id, None)
+                self._active_notebook_snapshots.pop(session_id, None)
 
     async def run_rolling[ItemT, ResultT](
         self,
@@ -398,6 +541,41 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT, SharedPayloadT = object]:
     def _state(self, session_id: str) -> _SessionState:
         _validate_identity(session_id, name="session_id")
         return self._states.setdefault(session_id, _SessionState())
+
+    def _active_store(self, session_id: str) -> InMemoryStore:
+        try:
+            return self._active_stores[session_id]
+        except KeyError:
+            raise RuntimeError("session notebook edits require an active Agent run") from None
+
+    def _record_notebook_snapshot(
+        self,
+        session_id: str,
+        path: str,
+        content: str | None,
+    ) -> None:
+        try:
+            snapshots = self._active_notebook_snapshots[session_id]
+        except KeyError:
+            raise RuntimeError("session notebook edits require an active Agent run") from None
+        if path not in snapshots:
+            snapshots[path] = content
+
+    async def _rollback_action_memory(self, session_id: str) -> None:
+        snapshots = self._active_notebook_snapshots[session_id]
+        for path, original in reversed(snapshots.items()):
+            current = await self._store.read(path, max_chars=MEMORY_FILE_CHARS)
+            if original is None:
+                if current is not None:
+                    await self._store.delete(path, expected_version=current.version)
+                continue
+            if current is not None and not current.truncated and current.content == original:
+                continue
+            await self._store.write(
+                path,
+                original,
+                expected_version=None if current is None else current.version,
+            )
 
     def _namespace(self, session_id: str) -> str:
         return f"session-{hashlib.sha256(session_id.encode()).hexdigest()}"
@@ -474,6 +652,15 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT, SharedPayloadT = object]:
 def _validate_identity(value: str, *, name: str) -> None:
     if not value:
         raise ValueError(f"{name} must not be empty")
+
+
+def _normalize_memory_filename(file: str) -> str:
+    name = file.strip()
+    if name and not name.endswith(".md"):
+        name = f"{name}.md"
+    if not _MEMORY_FILENAME.fullmatch(name) or ".." in name:
+        raise ModelRetry("Use a short notebook filename with no slashes or parent traversal")
+    return name
 
 
 def _usage_snapshot(

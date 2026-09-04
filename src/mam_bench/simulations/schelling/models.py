@@ -7,10 +7,10 @@ fixture loader, and developer utilities. Execution belongs in ``runtime.py``.
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal, Protocol, Self
+from typing import Annotated, Literal, Protocol, Self
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mam_bench.benchmark import RuntimeInfo
 
@@ -113,19 +113,65 @@ class ActorTurnContext:
     neighborhood: tuple[NeighborObservation, ...]
 
 
+class AppendMemory(BaseModel):
+    """Append content to one Harness-permitted actor notebook file."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    operation: Literal["append"]
+    content: str = Field(min_length=1)
+    file: str = "MEMORY.md"
+
+    @field_validator("content")
+    @classmethod
+    def require_nonblank_content(cls, content: str) -> str:
+        if not content.strip():
+            raise ValueError("memory append content must not be blank")
+        return content
+
+
+class ReplaceMemory(BaseModel):
+    """Replace one unique passage in an actor notebook file."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    operation: Literal["replace"]
+    old_text: str = Field(min_length=1)
+    content: str
+    file: str = "MEMORY.md"
+
+
+class DeleteMemory(BaseModel):
+    """Delete one permitted non-main actor notebook file."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    operation: Literal["delete"]
+    file: str
+
+
+type ActorMemoryMutation = Annotated[
+    AppendMemory | ReplaceMemory | DeleteMemory,
+    Field(discriminator="operation"),
+]
+
+
 class SubmitMove(BaseModel):
     """One terminal v2 request to move the calling Influence Actor."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    row: int
-    column: int
+    row: int = Field(ge=0, lt=20)
+    column: int = Field(ge=0, lt=20)
+    memory: ActorMemoryMutation | None = None
 
 
 class Stay(BaseModel):
     """One terminal v2 request to leave the calling Influence Actor in place."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+    memory: ActorMemoryMutation | None = None
 
 
 type ActorTerminalAction = SubmitMove | Stay
@@ -137,6 +183,9 @@ class ActorTurnResult:
 
     actor_id: int
     action: ActorTerminalAction
+    accepted_call_count: int = 0
+    policy_rejections: tuple[str, ...] = ()
+    forced_stay: bool = False
 
 
 @dataclass(frozen=True)
@@ -178,7 +227,34 @@ class ActorTurnCoordinator(Protocol):
 
     async def read_document(self, actor_id: int) -> DocumentRead: ...
 
-    async def post_message(self, actor_id: int, text: str) -> PostReceipt: ...
+    async def post_message(
+        self,
+        actor_id: int,
+        text: str,
+        memory: ActorMemoryMutation | None = None,
+        notebook: ActorNotebook | None = None,
+    ) -> PostReceipt: ...
+
+    async def commit_terminal(
+        self,
+        actor_id: int,
+        action: ActorTerminalAction,
+        notebook: ActorNotebook,
+    ) -> ActorTerminalAction: ...
+
+
+class ActorNotebook(Protocol):
+    """Minimal action-bound notebook interface used by Schelling commits."""
+
+    async def write(
+        self,
+        content: str,
+        *,
+        file: str = "MEMORY.md",
+        old_text: str | None = None,
+    ) -> object: ...
+
+    async def delete(self, file: str) -> object: ...
 
 
 @dataclass
@@ -187,6 +263,7 @@ class ActorTurnDependencies:
 
     context: ActorTurnContext
     coordinator: ActorTurnCoordinator
+    notebook: ActorNotebook
 
 
 class MoveDecision(BaseModel):

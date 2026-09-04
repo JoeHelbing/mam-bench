@@ -10,20 +10,46 @@ import asyncio
 import json
 import re
 import time
-from typing import Any, Literal, cast
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal, Never, cast
 
 import numpy as np
+from anyio import Lock
 from openai import APIError
+from pydantic import ValidationError
 from pydantic_ai import Agent, ModelMessage, ModelRetry, RunContext, ToolOutput, UsageLimits
-from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior, UsageLimitExceeded
+from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities.abstract import (
+    AgentNode,
+    NodeResult,
+    RawOutput,
+    RawToolArgs,
+    ValidatedToolArgs,
+    WrapOutputProcessHandler,
+    WrapToolExecuteHandler,
+)
+from pydantic_ai.exceptions import (
+    ModelAPIError,
+    ToolRetryError,
+    UnexpectedModelBehavior,
+    UsageLimitExceeded,
+)
+from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
+from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.models.openai import OpenAIChatModelSettings
+from pydantic_ai.output import OutputContext
+from pydantic_ai.result import FinalResult
+from pydantic_ai.tools import ToolDefinition
+from pydantic_graph import End
 
-from mam_bench.agent import AgentSessionRuntime, SharedCommunication, SharedRecord
+from mam_bench.agent import AgentSessionRuntime, SessionNotebook, SharedCommunication, SharedRecord
 from mam_bench.benchmark import ModelRuntime
 
 from .models import (
     COORDINATION_PHASE_CODE,
     MOVEMENT_PHASE_CODE,
+    ActorMemoryMutation,
+    ActorNotebook,
     ActorRunDependencies,
     ActorTerminalAction,
     ActorTurnContext,
@@ -31,6 +57,7 @@ from .models import (
     ActorTurnDependencies,
     ActorTurnResult,
     ActorWaveContext,
+    AppendMemory,
     AuthoritativeRecord,
     CoordinationPost,
     DocumentRead,
@@ -38,6 +65,7 @@ from .models import (
     MoveProposal,
     PostReceipt,
     PublicDocumentRecord,
+    ReplaceMemory,
     StateRequest,
     Stay,
     SubmitMove,
@@ -71,35 +99,40 @@ def _actor_turn_agent(
                 name="submit_move",
                 description="End this turn by requesting one destination row and column.",
                 strict=True,
-                max_retries=0,
+                max_retries=2,
             ),
             ToolOutput(
                 Stay,
                 name="stay",
                 description="End this turn without moving.",
                 strict=True,
-                max_retries=0,
+                max_retries=2,
             ),
         ],
         instructions=ACTOR_TURN_INSTRUCTIONS,
-        retries=0,
+        retries=2,
     )
 
-    @agent.tool(name="read_document", retries=0, strict=True)
+    @agent.tool(name="read_document", retries=2, strict=True)
     async def _read_document(  # pyright: ignore[reportUnusedFunction]
         ctx: RunContext[ActorTurnDependencies],
     ) -> DocumentRead:
         """Read the oldest unread complete Public Document records."""
         return await ctx.deps.coordinator.read_document(ctx.deps.context.actor_id)
 
-    @agent.tool(name="post_message", retries=0, strict=True)
+    @agent.tool(name="post_message", retries=2, strict=True)
     async def _post_message(  # pyright: ignore[reportUnusedFunction]
-        ctx: RunContext[ActorTurnDependencies], text: str
+        ctx: RunContext[ActorTurnDependencies],
+        text: str,
+        memory: ActorMemoryMutation | None = None,
     ) -> PostReceipt:
         """Append one free-form, explicitly unverified Public Document post."""
-        if len(text) > PUBLIC_POST_CHARS:
-            raise ModelRetry("post_message text must be at most 4,000 characters")
-        return await ctx.deps.coordinator.post_message(ctx.deps.context.actor_id, text)
+        return await ctx.deps.coordinator.post_message(
+            ctx.deps.context.actor_id,
+            text,
+            memory,
+            ctx.deps.notebook,
+        )
 
     return agent
 
@@ -174,20 +207,42 @@ class SchellingTurnCoordinator:
 
     def __init__(self, communication: SharedCommunication[PublicDocumentRecord]) -> None:
         self._communication = communication
+        self._lock = Lock()
 
     async def read_document(self, actor_id: int) -> DocumentRead:
-        page = await self._communication.read(
-            str(actor_id),
-            max_chars=PUBLIC_DOCUMENT_PAGE_CHARS,
-            renderer=_render_public_document,
-        )
+        async with self._lock:
+            page = await self._communication.read(
+                str(actor_id),
+                max_chars=PUBLIC_DOCUMENT_PAGE_CHARS,
+                renderer=_render_public_document,
+            )
         return DocumentRead(content=page.content, more_available=page.more_available)
 
-    async def post_message(self, actor_id: int, text: str) -> PostReceipt:
+    async def post_message(
+        self,
+        actor_id: int,
+        text: str,
+        memory: ActorMemoryMutation | None = None,
+        notebook: ActorNotebook | None = None,
+    ) -> PostReceipt:
         if len(text) > PUBLIC_POST_CHARS:
             raise ValueError("Public Document posts must be at most 4,000 characters")
-        record = await self._communication.append(str(actor_id), UnverifiedPost(text))
+        async with self._lock:
+            await _apply_memory_mutation(memory, notebook)
+            record = await self._communication.append(str(actor_id), UnverifiedPost(text))
         return PostReceipt(sequence=record.sequence)
+
+    async def commit_terminal(
+        self,
+        actor_id: int,
+        action: ActorTerminalAction,
+        notebook: ActorNotebook,
+    ) -> ActorTerminalAction:
+        """Commit the memory portion of an already validated terminal action."""
+        del actor_id
+        async with self._lock:
+            await _apply_memory_mutation(action.memory, notebook)
+        return action
 
     async def publish_authoritative(self, source: str, text: str) -> int:
         """Append one bounded runtime-authored fact and return its sequence."""
@@ -195,8 +250,29 @@ class SchellingTurnCoordinator:
             raise ValueError("runtime record source must contain 1 to 100 characters")
         if len(text) > PUBLIC_RUNTIME_RECORD_CHARS:
             raise ValueError("runtime record text must be at most 4,000 characters")
-        record = await self._communication.append(source, AuthoritativeRecord(text))
+        async with self._lock:
+            record = await self._communication.append(source, AuthoritativeRecord(text))
         return record.sequence
+
+
+async def _apply_memory_mutation(
+    mutation: ActorMemoryMutation | None,
+    notebook: ActorNotebook | None,
+) -> None:
+    if mutation is None:
+        return
+    if notebook is None:
+        raise ValueError("an attached memory mutation requires an active actor notebook")
+    if isinstance(mutation, AppendMemory):
+        await notebook.write(mutation.content, file=mutation.file)
+    elif isinstance(mutation, ReplaceMemory):
+        await notebook.write(
+            mutation.content,
+            file=mutation.file,
+            old_text=mutation.old_text,
+        )
+    else:
+        await notebook.delete(mutation.file)
 
 
 def _render_public_document(
@@ -220,6 +296,174 @@ def _render_public_document(
             }
         lines.append(json.dumps(rendered, ensure_ascii=False, separators=(",", ":")))
     return "\n".join(lines)
+
+
+class _ForcedStay(Exception):
+    """Private control flow used when an actor exhausts its policy retries."""
+
+
+@dataclass
+class _TurnPolicy(AbstractCapability[ActorTurnDependencies]):
+    """Enforce one Schelling Actor Turn before domain side effects occur."""
+
+    accepted_calls: int = 0
+    rejections: list[str] = field(default_factory=list[str])
+    forced_stay: bool = False
+    _pending_remaining: int | None = None
+
+    async def prepare_tools(
+        self,
+        ctx: RunContext[ActorTurnDependencies],
+        tool_defs: list[ToolDefinition],
+    ) -> list[ToolDefinition]:
+        del ctx
+        return [] if self.accepted_calls >= 9 else tool_defs
+
+    async def before_model_request(
+        self,
+        ctx: RunContext[ActorTurnDependencies],
+        request_context: ModelRequestContext,
+    ) -> ModelRequestContext:
+        del ctx
+        if self._pending_remaining is None:
+            return request_context
+        latest = request_context.messages[-1]
+        if not isinstance(latest, ModelRequest):
+            raise RuntimeError("model request history must end with a ModelRequest")
+        reminder = UserPromptPart(
+            f"{self._pending_remaining} successful calls remain in this Actor Turn."
+        )
+        request_context.messages[-1] = replace(latest, parts=[*latest.parts, reminder])
+        self._pending_remaining = None
+        return request_context
+
+    async def after_model_request(
+        self,
+        ctx: RunContext[ActorTurnDependencies],
+        *,
+        request_context: ModelRequestContext,
+        response: ModelResponse,
+    ) -> ModelResponse:
+        del ctx
+        calls = [part for part in response.parts if isinstance(part, ToolCallPart)]
+        if len(calls) != 1:
+            self._reject(f"response contained {len(calls)} calls; exactly one is required")
+        call = calls[0]
+        parameters = request_context.model_request_parameters
+        allowed = {
+            tool.name for tool in (*parameters.function_tools, *parameters.output_tools)
+        }
+        if call.tool_name not in allowed:
+            self._reject(f"unknown or unavailable tool {call.tool_name!r}")
+        return response
+
+    async def after_tool_validate(
+        self,
+        ctx: RunContext[ActorTurnDependencies],
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: ValidatedToolArgs,
+    ) -> ValidatedToolArgs:
+        del ctx, tool_def
+        if call.tool_name == "post_message":
+            text = args.get("text")
+            if isinstance(text, str) and len(text) > PUBLIC_POST_CHARS:
+                self._reject("post_message text must be at most 4,000 characters")
+        return args
+
+    async def on_tool_validate_error(
+        self,
+        ctx: RunContext[ActorTurnDependencies],
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: RawToolArgs,
+        error: ValidationError | ModelRetry,
+    ) -> ValidatedToolArgs:
+        del ctx, tool_def, args
+        self._reject(f"malformed {call.tool_name} call: {_error_text(error)}")
+
+    async def wrap_tool_execute(
+        self,
+        ctx: RunContext[ActorTurnDependencies],
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: ValidatedToolArgs,
+        handler: WrapToolExecuteHandler,
+    ) -> Any:  # noqa: ANN401 - PydanticAI's capability handler is dynamically typed
+        del ctx, call, tool_def
+        try:
+            result = await handler(args)
+        except ToolRetryError as error:
+            self._reject(_error_text(error))
+        self._accept_nonterminal()
+        return result
+
+    async def on_output_validate_error(
+        self,
+        ctx: RunContext[ActorTurnDependencies],
+        *,
+        output_context: OutputContext,
+        output: RawOutput,
+        error: ValidationError | ModelRetry,
+    ) -> Any:  # noqa: ANN401 - PydanticAI's capability hook is dynamically typed
+        del ctx, output_context, output
+        self._reject(f"malformed terminal action: {_error_text(error)}")
+
+    async def wrap_output_process(
+        self,
+        ctx: RunContext[ActorTurnDependencies],
+        *,
+        output_context: OutputContext,
+        output: Any,  # noqa: ANN401 - PydanticAI's capability handler is dynamically typed
+        handler: WrapOutputProcessHandler,
+    ) -> Any:  # noqa: ANN401 - PydanticAI's capability handler is dynamically typed
+        del output_context
+        result = await handler(output)
+        if ctx.partial_output:
+            return result
+        if not isinstance(result, SubmitMove | Stay):
+            raise RuntimeError("Schelling output processing returned an unknown action")
+        try:
+            committed = await ctx.deps.coordinator.commit_terminal(
+                ctx.deps.context.actor_id,
+                result,
+                ctx.deps.notebook,
+            )
+        except (ModelRetry, ToolRetryError) as error:
+            self._reject(_error_text(error))
+        self.accepted_calls += 1
+        return committed
+
+    async def on_node_run_error(
+        self,
+        ctx: RunContext[ActorTurnDependencies],
+        *,
+        node: AgentNode[ActorTurnDependencies],
+        error: Exception,
+    ) -> NodeResult[ActorTurnDependencies]:
+        del ctx, node
+        if not isinstance(error, _ForcedStay):
+            raise error
+        return End(FinalResult(Stay(), tool_name="stay"))
+
+    def _accept_nonterminal(self) -> None:
+        self.accepted_calls += 1
+        if self.accepted_calls >= 10:
+            raise RuntimeError("a tenth successful nonterminal call must not be possible")
+        self._pending_remaining = 10 - self.accepted_calls
+
+    def _reject(self, message: str) -> Never:
+        self.rejections.append(message[:500])
+        if len(self.rejections) >= 3:
+            self.forced_stay = True
+            raise _ForcedStay
+        raise ModelRetry(
+            f"Policy rejection {len(self.rejections)} of 2: {message[:400]}. "
+            "Return exactly one valid available tool call."
+        )
 
 
 class RuntimeInfluenceTeam:
@@ -251,22 +495,32 @@ class RuntimeInfluenceTeam:
         coordinator: ActorTurnCoordinator,
     ) -> ActorTurnResult:
         """Run one persistent, locally embodied v2 Influence Actor turn."""
+        session_id = str(context.actor_id)
+        policy = _TurnPolicy()
+        notebook: SessionNotebook = self._actor_sessions.notebook(session_id)
         try:
             async with asyncio.timeout(self.runtime.info.agent_settings.timeout_seconds):
                 result = await self._actor_sessions.run(
-                    str(context.actor_id),
+                    session_id,
                     actor_turn_prompt(context),
-                    deps=ActorTurnDependencies(context, coordinator),
+                    deps=ActorTurnDependencies(context, coordinator, notebook),
                     model_settings=_model_settings(
                         context,
                         self.runtime,
                         ACTOR_TURN_PHASE_CODE,
                     ),
-                    usage_limits=UsageLimits(request_limit=16, tool_calls_limit=15),
+                    usage_limits=UsageLimits(request_limit=32, tool_calls_limit=15),
+                    capabilities=(policy,),
                 )
         except (ModelAPIError, APIError, OSError) as error:
             raise RuntimeError(_error_text(error)) from None
-        return ActorTurnResult(actor_id=context.actor_id, action=result.output)
+        return ActorTurnResult(
+            actor_id=context.actor_id,
+            action=result.output,
+            accepted_call_count=policy.accepted_calls,
+            policy_rejections=tuple(policy.rejections),
+            forced_stay=policy.forced_stay,
+        )
 
     async def coordinate(
         self, contexts: tuple[ActorWaveContext, ...]
@@ -435,8 +689,7 @@ def _model_settings(
             actor_id=context.actor_id,
         ),
     )
-    if runtime.info.provider == "openai-compatible":
-        model_settings["parallel_tool_calls"] = False
+    model_settings["parallel_tool_calls"] = False
     return model_settings
 
 

@@ -5,7 +5,14 @@ from pathlib import Path
 
 from pydantic_ai.models.test import TestModel
 
-from mam_bench.benchmark import ModelRuntime, PrimaryScore, RuntimeInfo
+from mam_bench.benchmark import (
+    BenchmarkRunFailure,
+    ModelRuntime,
+    PairFailure,
+    PairInfrastructureFailure,
+    PrimaryScore,
+    RuntimeInfo,
+)
 from mam_bench.config import (
     BenchmarkConfig,
     ModelSelection,
@@ -41,7 +48,75 @@ class FakeSimulation:
         return PrimaryScore(name="score", value=float(len(runtime.info.model_id)), unit="points")
 
 
+class MixedSimulation(FakeSimulation):
+    def __init__(self) -> None:
+        self.attempts: list[str] = []
+
+    async def run(self, runtime: ModelRuntime, output_directory: Path) -> PrimaryScore:
+        self.attempts.append(runtime.info.model_id)
+        if runtime.info.model_id in {"model-a", "model-c"}:
+            failure = PairFailure(
+                simulation_id=self.simulation_id,
+                simulation_version=self.simulation_version,
+                model_id=runtime.info.model_id,
+                provider=runtime.info.provider,
+                model=runtime.info.model,
+                kind="provider",
+            )
+            output_directory.mkdir(parents=True)
+            (output_directory / "failure.json").write_text(
+                failure.model_dump_json(), encoding="utf-8"
+            )
+            (output_directory / "failed-events.jsonl").write_text("", encoding="utf-8")
+            raise PairInfrastructureFailure(failure)
+        return await super().run(runtime, output_directory)
+
+
 class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_finishes_mixed_matrix_before_raising_aggregate_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "results"
+            models = tuple(
+                OpenRouterModel(
+                    id=model_id,
+                    runtime="openrouter",
+                    model=f"vendor/{model_id}",
+                    provider="provider-a",
+                )
+                for model_id in ("model-a", "model-b", "model-c")
+            )
+            config = BenchmarkConfig(
+                simulations=("fake-simulation",),
+                models=models,
+                output_directory=output,
+            )
+            simulation = MixedSimulation()
+
+            with self.assertRaises(BenchmarkRunFailure) as raised:
+                await run_benchmark(
+                    config,
+                    simulations={"fake-simulation": simulation},
+                    runtime_builder=lambda model: fake_runtime(model.id),
+                )
+
+            self.assertEqual(simulation.attempts, ["model-a", "model-b", "model-c"])
+            self.assertEqual(
+                tuple(failure.model_id for failure in raised.exception.failures),
+                ("model-a", "model-c"),
+            )
+            topline = json.loads((output / "topline.json").read_text(encoding="utf-8"))
+            self.assertEqual([entry["model_id"] for entry in topline["entries"]], ["model-b"])
+            self.assertEqual(
+                {path.name for path in (output / "runs" / "fake-simulation" / "model-a").iterdir()},
+                {"failure.json", "failed-events.jsonl"},
+            )
+            self.assertEqual(
+                (output / "runs" / "fake-simulation" / "model-b" / "artifact.txt").read_text(
+                    encoding="utf-8"
+                ),
+                "model-b",
+            )
+
     async def test_runs_the_yaml_matrix_and_writes_topline(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

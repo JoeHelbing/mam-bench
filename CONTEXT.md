@@ -16,6 +16,10 @@ _Avoid_: prompt, agent loop
 The provider and model execution capability bound to a Benchmark Simulation for one benchmark run. It returns auditable model responses but does not define the Model Interaction Protocol.
 _Avoid_: model, provider, controller
 
+**Agent Session Runtime**:
+The model-agnostic runtime for one trial's isolated persistent agent sessions and shared communication, leaving each Model Interaction Protocol to its Benchmark Simulation. Its lifetime ends permanently when the trial fails.
+_Avoid_: simulation runtime, agent framework, controller
+
 **Primary Score**:
 A Benchmark Simulation's designated higher-is-better topline measure for comparing models within that simulation. Primary Score magnitudes are not comparable or aggregated across Benchmark Simulations.
 _Avoid_: overall score, universal score, composite score
@@ -31,10 +35,6 @@ _Avoid_: evidence, run record
 **Scientific Analysis**:
 Optional machine-readable derivation from a Reference Dataset or validated Run Evidence used to characterize, audit, or improve a benchmark. Scientific Analysis is downstream of execution: it never changes a Primary Score, completes Run Evidence, or enters the runtime dependency direction.
 _Avoid_: report, dashboard, score
-
-**Compatibility Preflight**:
-The all-or-nothing validation of every configured Benchmark Simulation and Model Runtime pairing before any model call. It rejects the benchmark configuration when a Model Runtime cannot satisfy a Model Interaction Protocol.
-_Avoid_: dry run, capability negotiation, graceful degradation
 
 **Schelling Reference Profile**:
 A versioned set of Schelling dynamics and parameter coordinates used to generate a Reference Dataset. It is one explicit model, not every implementation commonly called a Schelling model.
@@ -93,7 +93,7 @@ A held-out random replicate used only after Representative Regions have been sel
 _Avoid_: landscape seed, trial
 
 **Schelling Influence Profile**:
-The single, versioned Model Evaluation contract that layers globally informed Influence Actors onto the Schelling Reference Profile.
+The single, versioned Model Evaluation contract that layers persistent, locally embodied Influence Actors onto the Schelling Reference Profile.
 _Avoid_: agent variant, LLM Schelling model
 
 **Ordinary Agent**:
@@ -108,13 +108,33 @@ _Avoid_: AI agent, controlled ordinary agent, model agent
 The fraction of undirected toroidal Moore-neighbor edges between scored Ordinary Agents that join the same type. Influence Actors, and the corresponding would-be actor identities in a counterfactual reference run, are excluded from the edge set.
 _Avoid_: segregation index, satisfaction
 
-**Coordination Board**:
-The persistent shared text transcript through which Influence Actors coordinate. Each actor can publish unrestricted prose during a synchronized coordination wave, after which every actor sees the complete wave before choosing a move.
-_Avoid_: chat room, controller, planner
+**Public Document**:
+The append-only ordered communication surface shared by Influence Actors. Actor posts are unverified free text; runtime-authored facts use a distinct authoritative record type; each actor reads through an independent cursor.
+_Avoid_: chat room, coordination board, controller
 
-**Round Window**:
-The current round plus the two preceding rounds that an Influence Actor can retrieve through read-only state tools. Complete older state remains in the evaluation record but is outside model-visible context.
-_Avoid_: context window, memory
+**Actor Notebook**:
+One Influence Actor's private persistent Harness memory within a single trial, isolated from other actors and reset before the next trial.
+_Avoid_: public document, shared memory, transcript
+
+**Actor Turn**:
+One persistent model run for one Influence Actor in one Staged Round, beginning with a frozen local observation and ending with an accepted move, stay, or runtime-authored forced stay.
+_Avoid_: wave, request, round
+
+**Successful Call**:
+A function tool that executed successfully or a terminal output that committed successfully during an Actor Turn. Rejected attempts and model requests are not Successful Calls.
+_Avoid_: request, attempt, tool emission
+
+**Policy Rejection**:
+A model response or proposed action rejected by the active Model Interaction Protocol before its public, reservation, or memory side effects commit. It is distinct from infrastructure failure.
+_Avoid_: provider error, failed pair, invalid score
+
+**Reservation Record**:
+An authoritative Public Document entry written when an Influence Actor atomically claims a beginning-of-round vacancy.
+_Avoid_: actor post, move result, proposal
+
+**Pair Infrastructure Failure**:
+A provider, network, timeout, memory, unsupported-context, compaction, or evidence-publication failure that ends one simulation/model pair, leaves it unscored, and preserves redacted failure evidence without stopping independent pairs. A new attempt starts a fresh trial rather than resuming the failed one.
+_Avoid_: policy rejection, stay, zero score
 
 **Counterfactual Reference**:
 The all-Ordinary-Agent run for the same Test Spot and Evaluation Seed as a Model Evaluation. It supplies the algorithmic endpoint and same-seed outcome comparator.

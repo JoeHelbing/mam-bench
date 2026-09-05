@@ -1,8 +1,11 @@
 ---
-status: accepted
+status: superseded
 ---
 
 # Use globally informed typed Influence Actors
+
+Superseded by [Schelling Influence Profile v2](../schelling-influence-profile-v2.md).
+The body below records the retired v1 decision.
 
 The first Model Evaluation replaces 16 fixed Ordinary Agent identities with 16 separate model-controlled Influence Actors: type A IDs `0..7` and type B IDs `150..157`. Their fixed exterior types remain visible to Ordinary Agents, but Influence Actors have no tolerance or satisfaction and are excluded from scored outcomes. All 16 receive global board visibility through bounded read tools and coordinate through a persistent free-text Coordination Board before choosing moves. This deliberately supersedes the earlier provisional partial-observation and bounded-communication direction: the first experiment asks whether a decentralized team can steer the whole system when information is not the bottleneck.
 

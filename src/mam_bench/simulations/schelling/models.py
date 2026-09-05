@@ -5,20 +5,21 @@ runtime protocol, and serialized result models shared by the Schelling runtime,
 fixture loader, and developer utilities. Execution belongs in ``runtime.py``.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Annotated, Literal, Protocol, Self
+from typing import Annotated, Literal, Protocol
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from numpy.typing import NDArray
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic_ai_harness.memory import MemoryToolset
 
 from mam_bench.benchmark import RuntimeInfo
+from mam_bench.communication import CompletedWork
+from mam_bench.usage import AgentSessionUsage, session_usage_data
 
 from .profile import LandscapeCell
 from .reference import CellGrid, LocationArray, TerminalStatus
-
-COORDINATION_PHASE_CODE = 0
-MOVEMENT_PHASE_CODE = 1
 
 
 class SteeringObjective(StrEnum):
@@ -54,20 +55,6 @@ class CounterfactualReference:
     masked_final_homophily: float
     unmasked_final_homophily: float
     ordinary_satisfaction: float
-
-
-@dataclass(frozen=True)
-class CoordinationPost:
-    """One Influence Actor's public message for a coordination wave."""
-
-    actor_id: int
-    text: str
-    policy_error: str | None = None
-    request_count: int = 0
-    input_tokens: int = 0
-    output_tokens: int = 0
-    latency_seconds: float = 0.0
-    round_number: int = 0
 
 
 @dataclass(frozen=True)
@@ -161,8 +148,8 @@ class SubmitMove(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    row: int = Field(ge=0, lt=20)
-    column: int = Field(ge=0, lt=20)
+    row: int = Field(strict=True, ge=0, lt=20)
+    column: int = Field(strict=True, ge=0, lt=20)
     memory: ActorMemoryMutation | None = None
 
 
@@ -185,7 +172,9 @@ class ActorTurnResult:
     action: ActorTerminalAction
     accepted_call_count: int = 0
     policy_rejections: tuple[str, ...] = ()
+    memory_operation_count: int = 0
     forced_stay: bool = False
+    latency_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -242,6 +231,12 @@ class ActorTurnCoordinator(Protocol):
         notebook: ActorNotebook,
     ) -> ActorTerminalAction: ...
 
+    async def start_round(self, round_number: int, cell_types: CellGrid) -> None: ...
+
+    async def remaining_unreserved_vacancies(self) -> int: ...
+
+    async def reserved_actor_moves(self) -> tuple[tuple[int, int], ...]: ...
+
 
 class ActorNotebook(Protocol):
     """Minimal action-bound notebook interface used by Schelling commits."""
@@ -263,52 +258,13 @@ class ActorTurnDependencies:
 
     context: ActorTurnContext
     coordinator: ActorTurnCoordinator
-    notebook: ActorNotebook
-
-
-class MoveDecision(BaseModel):
-    """One stay or relocation choice returned through a strict output tool."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    stay: bool
-    row: int | None
-    column: int | None
-
-    @model_validator(mode="after")
-    def validate_shape(self) -> Self:
-        if self.stay and (self.row is not None or self.column is not None):
-            raise ValueError("a stay decision cannot include a destination")
-        if not self.stay and (self.row is None or self.column is None):
-            raise ValueError("a move decision requires row and column")
-        return self
-
-    @classmethod
-    def stay_put(cls) -> MoveDecision:
-        return cls(stay=True, row=None, column=None)
-
-
-@dataclass(frozen=True)
-class MoveProposal:
-    """One Influence Actor's requested movement and model-call accounting."""
-
-    actor_id: int
-    decision: MoveDecision
-    policy_error: str | None = None
-    request_count: int = 0
-    input_tokens: int = 0
-    output_tokens: int = 0
-    latency_seconds: float = 0.0
-    round_number: int = 0
+    notebook: MemoryToolset[ActorTurnDependencies]
 
 
 type MoveReason = Literal[
     "accepted",
     "stay",
     "policy_error",
-    "out_of_bounds",
-    "occupied",
-    "collision",
 ]
 
 
@@ -325,27 +281,18 @@ class MoveOutcome:
 
 
 @dataclass(frozen=True)
-class ActorWaveContext:
-    """One actor's bounded view of the current evaluation round."""
+class StagedRoundResult:
+    """One settled v2 Staged Round in authoritative completion order."""
 
-    config: InfluenceEvaluationConfig
-    reference: CounterfactualReference
-    actor_id: int
-    actor_type: int
-    actor_location: int
-    round_number: int
-    cell_type_states: tuple[np.ndarray, ...]
-    location_states: tuple[np.ndarray, ...]
-    coordination_posts: tuple[CoordinationPost, ...]
-    move_outcomes: tuple[MoveOutcome, ...]
-
-    @property
-    def current_cell_types(self) -> CellGrid:
-        return self.cell_type_states[-1]
-
-    @property
-    def current_agent_locations(self) -> LocationArray:
-        return self.location_states[-1]
+    actor_admission_order: tuple[int, ...]
+    actor_turns: tuple[CompletedWork[int, ActorTurnResult], ...]
+    actor_move_outcomes: tuple[MoveOutcome, ...]
+    moving_actor_ids: NDArray[np.int64]
+    actor_destinations: LocationArray
+    moving_ordinary_agent_ids: NDArray[np.int64]
+    ordinary_destinations: LocationArray
+    cell_types: CellGrid
+    agent_locations: LocationArray
 
 
 class InfluenceTeam(Protocol):
@@ -361,17 +308,35 @@ class InfluenceTeam(Protocol):
     ) -> ActorTurnResult: ...
 
 
-class LegacyInfluenceTeam(Protocol):
-    """Existing two-wave team retained until the complete v2 runtime replaces it."""
+class EvaluationInfluenceTeam(InfluenceTeam, Protocol):
+    """Turn-oriented team that exposes aggregate usage for a full evaluation."""
 
     @property
-    def runtime_info(self) -> RuntimeInfo: ...
+    def usage(self) -> AgentSessionUsage: ...
 
-    async def coordinate(
-        self, contexts: tuple[ActorWaveContext, ...]
-    ) -> tuple[CoordinationPost, ...]: ...
 
-    async def move(self, contexts: tuple[ActorWaveContext, ...]) -> tuple[MoveProposal, ...]: ...
+@dataclass(frozen=True)
+class EvaluationUsage:
+    """Actor calls and policy retries paired with normalized session usage."""
+
+    session: AgentSessionUsage = field(default_factory=AgentSessionUsage)
+    accepted_calls: int = 0
+    policy_rejections: int = 0
+    memory_operations: int = 0
+
+    def as_dict(self) -> dict[str, object]:
+        """Keep the flat artifact schema independent of native usage internals."""
+        return {
+            **session_usage_data(self.session, details_as_pairs=True),
+            "accepted_calls": self.accepted_calls,
+            "policy_rejections": self.policy_rejections,
+            "memory_operations": self.memory_operations,
+        }
+
+
+@dataclass(frozen=True)
+class RoundUsage(EvaluationUsage):
+    """Evaluation usage accumulated during one round."""
 
 
 @dataclass(frozen=True)
@@ -387,24 +352,27 @@ class ModelEvaluationResult:
     agent_types: np.ndarray
     ordinary_homophily: np.ndarray
     ordinary_satisfaction: np.ndarray
-    coordination_posts: tuple[CoordinationPost, ...]
-    move_outcomes: tuple[MoveOutcome, ...]
     actor_invalid_action_count: int
-    actor_collision_count: int
     final_directional_lift: float
     directional_trajectory_area: float
     round_actor_invalid_actions: np.ndarray
-    round_actor_collisions: np.ndarray
     round_accepted_actor_moves: np.ndarray
     round_request_counts: np.ndarray
     round_input_tokens: np.ndarray
     round_output_tokens: np.ndarray
     round_model_latency_seconds: np.ndarray
+    simulation_id: str = "schelling-influence-pilot-v1"
+    simulation_version: str = "schelling-influence-v2"
+    best_directional_lift: float = 0.0
+    usage: EvaluationUsage = field(default_factory=EvaluationUsage)
+    round_usage: tuple[RoundUsage, ...] = ()
 
 
 class ModelEvaluationSummary(BaseModel):
     """Small JSON summary saved as ``run.json``."""
 
+    simulation_id: str
+    simulation_version: str
     config: InfluenceEvaluationConfig
     runtime: RuntimeInfo
     reference_terminal_status: TerminalStatus
@@ -421,22 +389,10 @@ class ModelEvaluationSummary(BaseModel):
     input_tokens: int
     output_tokens: int
     model_latency_seconds: float
+    usage: EvaluationUsage
+    stochastic_trial_count: int = 1
+    confidence_interval: None = None
 
-
-class StateRequest(BaseModel):
-    """One bounded global-state selection passed to ``inspect_state``."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    board_round_offset: Literal[0, 1, 2]
-    coordination_round_offset: Literal[0, 1, 2]
-    include_reference: bool
-
-
-@dataclass
-class ActorRunDependencies:
-    """Typed state available to agent instructions, tools, and validators."""
-
-    context: ActorWaveContext
-    phase_code: int
-    inspection_count: int = 0
+    @field_serializer("usage")
+    def serialize_usage(self, usage: EvaluationUsage) -> dict[str, object]:
+        return usage.as_dict()

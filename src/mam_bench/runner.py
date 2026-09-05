@@ -1,11 +1,16 @@
 """Run every simulation and model selected in a benchmark YAML file."""
 
+import tempfile
 from collections.abc import Callable, Mapping
+from pathlib import Path
 
 from mam_bench.benchmark import (
+    BenchmarkRunFailure,
     BenchmarkSimulation,
     BenchmarkTopline,
     ModelRuntime,
+    PairFailure,
+    PairInfrastructureFailure,
     ToplineEntry,
     create_runtime,
 )
@@ -30,13 +35,18 @@ async def run_benchmark(
     config.output_directory.mkdir(parents=True)
 
     entries: list[ToplineEntry] = []
+    failures: list[PairFailure] = []
     for simulation in selected_simulations:
         for model in config.models:
             runtime = runtime_builder(model)
             output_directory = (
                 config.output_directory / "runs" / simulation.simulation_id / runtime.info.model_id
             )
-            score = await simulation.run(runtime, output_directory)
+            try:
+                score = await simulation.run(runtime, output_directory)
+            except PairInfrastructureFailure as error:
+                failures.append(error.failure)
+                continue
             entries.append(
                 ToplineEntry(
                     simulation_id=simulation.simulation_id,
@@ -49,8 +59,27 @@ async def run_benchmark(
             )
 
     topline = BenchmarkTopline(entries=tuple(entries))
-    (config.output_directory / "topline.json").write_text(
-        f"{topline.model_dump_json(indent=2)}\n",
-        encoding="utf-8",
-    )
+    _write_topline(config.output_directory / "topline.json", topline)
+    if failures:
+        raise BenchmarkRunFailure(tuple(failures))
     return topline
+
+
+def _write_topline(path: Path, topline: BenchmarkTopline) -> None:
+    """Atomically publish the completed matrix's success-only topline."""
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=".topline.",
+            suffix=".json",
+            dir=path.parent,
+            delete=False,
+        ) as temporary:
+            temporary.write(f"{topline.model_dump_json(indent=2)}\n")
+            temporary_path = Path(temporary.name)
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)

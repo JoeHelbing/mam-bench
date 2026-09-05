@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 from dataclasses import dataclass
 from decimal import Decimal
@@ -22,8 +23,10 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RequestUsage
 from pydantic_ai_harness.memory import InMemoryStore, MemoryFile
 
-from mam_bench.agent import AgentSessionRuntime, SharedRecord
-from mam_bench.benchmark import AgentSettings
+from mam_bench.agent import AgentSessionRuntime
+from mam_bench.benchmark import AgentInfrastructureFailure, AgentSettings
+from mam_bench.communication import SharedRecord
+from mam_bench.evidence import EvidenceRecorder
 
 
 def _response(
@@ -320,6 +323,65 @@ class SharedCommunicationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_compaction_references_are_session_scoped_while_messages_deduplicate(
+        self,
+    ) -> None:
+        recorder = EvidenceRecorder()
+        summary = ModelRequest(
+            parts=[SystemPromptPart("Summary of previous conversation: same")],
+            timestamp=None,
+        )
+
+        first_id = await recorder.record_context_message("actor-1", summary)
+        second_id = await recorder.record_context_message("actor-2", summary)
+
+        self.assertEqual(first_id, second_id)
+        self.assertEqual(
+            sum(event.kind == "message" for event in recorder.events),
+            1,
+        )
+        self.assertEqual(
+            {event.data["session_id"] for event in recorder.events if event.kind == "compaction"},
+            {"actor-1", "actor-2"},
+        )
+
+    async def test_normalized_messages_are_deduplicated_and_omit_provider_secrets(self) -> None:
+        recorder = EvidenceRecorder()
+        response = ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name="write_memory",
+                    args={"content": "safe", "api_key": "tool-secret"},
+                    tool_call_id="write-1",
+                ),
+                ToolCallPart(
+                    tool_name="write_memory",
+                    args='{"api_key":"raw-secret"',
+                    tool_call_id="write-2",
+                ),
+            ],
+            usage=RequestUsage(input_tokens=5, output_tokens=2, cost=None),
+            model_name="scripted",
+            provider_name="test",
+            provider_details={"authorization": "provider-secret"},
+            metadata={"token": "metadata-secret"},
+        )
+
+        first_id = await recorder.record_message(response)
+        second_id = await recorder.record_message(response)
+        await recorder.record("model_request_completed", message_id=first_id)
+
+        serialized = "\n".join(json.dumps(event.as_dict()) for event in recorder.events)
+        self.assertEqual(first_id, second_id)
+        self.assertEqual(
+            [event.kind for event in recorder.events], ["message", "model_request_completed"]
+        )
+        self.assertIn('"api_key": "[REDACTED]"', serialized)
+        self.assertNotIn("tool-secret", serialized)
+        self.assertNotIn("raw-secret", serialized)
+        self.assertNotIn("provider-secret", serialized)
+        self.assertNotIn("metadata-secret", serialized)
+
     async def test_persists_history_and_private_memory_per_opaque_session(self) -> None:
         model = MemoryModel()
         agent = Agent(FunctionModel(model), output_type=str)
@@ -340,6 +402,37 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             {"write_memory", "read_memory", "search_memory", "delete_memory"},
         )
         self.assertGreater(len(runtime.history("actor/../7")), len(runtime.history("actor-8")))
+
+        message_ids = {
+            event.data["message_id"] for event in runtime.evidence.events if event.kind == "message"
+        }
+        request_events = [
+            event
+            for event in runtime.evidence.events
+            if event.kind in {"model_request_started", "model_request_completed"}
+        ]
+        self.assertTrue(request_events)
+        self.assertTrue(all(event.data["message_id"] in message_ids for event in request_events))
+        actor_starts = [
+            event.sequence
+            for event in runtime.evidence.events
+            if event.kind == "model_request_started" and event.data["session_id"] == "actor/../7"
+        ]
+        memory_operation = next(
+            event
+            for event in runtime.evidence.events
+            if event.kind == "memory_operation" and event.data["session_id"] == "actor/../7"
+        )
+        self.assertLess(memory_operation.sequence, actor_starts[1])
+
+        await runtime.record_final_notebooks()
+        snapshots = [
+            event for event in runtime.evidence.events if event.kind == "notebook_snapshot"
+        ]
+        self.assertEqual(
+            [event.data["session_id"] for event in snapshots], ["actor-8", "actor/../7"]
+        )
+        self.assertEqual(snapshots[1].data["files"], {"MEMORY.md": "alpha is durable\n"})
 
     async def test_memory_injection_is_bounded_to_approximately_four_thousand_tokens(self) -> None:
         model = MemoryModel()
@@ -378,7 +471,7 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_failed_run_does_not_commit_memory_side_effects(self) -> None:
+    async def test_failed_runtime_cannot_resume_and_a_fresh_trial_has_empty_memory(self) -> None:
         failed_once = False
 
         async def write_then_fail(
@@ -402,15 +495,57 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-        runtime = AgentSessionRuntime(Agent(FunctionModel(write_then_fail), output_type=str))
+        agent = Agent(FunctionModel(write_then_fail), output_type=str)
+        runtime = AgentSessionRuntime(agent)
 
         with self.assertRaisesRegex(RuntimeError, "provider failed after write"):
             await runtime.run("actor-7", "write then fail", deps=None)
-        result = await runtime.run("actor-7", "recall", deps=None)
+        for session_id in ("actor-7", "actor-8"):
+            with self.assertRaisesRegex(RuntimeError, "provider failed after write"):
+                await runtime.run(session_id, "recall", deps=None)
+        with self.assertRaisesRegex(RuntimeError, "provider failed after write"):
+            await runtime.record_final_notebooks()
 
+        fresh = AgentSessionRuntime(agent)
+        result = await fresh.run("actor-7", "recall", deps=None)
         self.assertTrue(failed_once)
         self.assertEqual(result.output, "empty")
-        self.assertEqual(runtime.usage.total_requests, 1)
+        self.assertEqual(fresh.usage.total_requests, 1)
+
+    async def test_failed_turn_cancels_and_awaits_other_admitted_turns(self) -> None:
+        other_started = asyncio.Event()
+        other_cancelled = asyncio.Event()
+        admitted: list[int] = []
+
+        async def failing_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            del info
+            if "fail" in _request_text(_latest_request(messages)):
+                await other_started.wait()
+                raise ModelAPIError("scripted", "provider unavailable")
+            other_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                other_cancelled.set()
+            raise AssertionError("the waiting request must be cancelled")
+
+        runtime = AgentSessionRuntime(
+            Agent(FunctionModel(failing_model)), settings=AgentSettings(concurrency=2)
+        )
+
+        async def turn(actor: int) -> str:
+            admitted.append(actor)
+            result = await runtime.run(str(actor), "fail" if actor == 0 else "wait", deps=None)
+            return result.output
+
+        async with asyncio.timeout(5):
+            with self.assertRaisesRegex(ModelAPIError, "provider unavailable"):
+                await runtime.run_rolling(range(3), turn)
+
+        self.assertTrue(other_cancelled.is_set())
+        self.assertEqual(admitted, [0, 1])
+        with self.assertRaisesRegex(ModelAPIError, "provider unavailable"):
+            await runtime.run("2", "wait", deps=None)
 
     async def test_compaction_uses_inherited_model_and_reports_summary_usage(self) -> None:
         model = CompactionModel()
@@ -445,6 +580,30 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertTrue(_has_compaction_receipt(runtime.history("actor-7"), "summarized"))
+        self.assertTrue(
+            {"summary_request_started", "summary_request_completed"}.issubset(
+                {event.kind for event in runtime.evidence.events}
+            )
+        )
+        compaction_events = [
+            event
+            for event in runtime.evidence.events
+            if event.kind in {"compaction", "compaction_receipt"}
+        ]
+        message_sequences = {
+            event.data["message_id"]: event.sequence
+            for event in runtime.evidence.events
+            if event.kind == "message"
+        }
+        self.assertEqual(
+            {event.kind for event in compaction_events}, {"compaction", "compaction_receipt"}
+        )
+        self.assertTrue(
+            all(
+                message_sequences[event.data["message_id"]] < event.sequence
+                for event in compaction_events
+            )
+        )
 
     async def test_approved_summary_model_failure_uses_sliding_window_fallback(self) -> None:
         model = CompactionModel(summary_error=ModelAPIError("scripted", "summary unavailable"))
@@ -467,7 +626,16 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.usage.model_requests, 2)
         self.assertEqual(runtime.usage.summary_requests, 0)
         self.assertEqual(runtime.usage.total_requests, 2)
+        self.assertIsNone(runtime.usage.cost_usd)
         self.assertTrue(_has_compaction_receipt(runtime.history("actor-7"), "dropped"))
+        self.assertIn(
+            "summary_request_failed",
+            {event.kind for event in runtime.evidence.events},
+        )
+        self.assertIn(
+            "compaction_fallback",
+            {event.kind for event in runtime.evidence.events},
+        )
 
     async def test_unapproved_compaction_failure_aborts_without_replacing_history(self) -> None:
         model = CompactionModel(summary_error=RuntimeError("broken compactor"))
@@ -484,9 +652,10 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         await runtime.run("actor-7", "A" * 600, deps=None)
         before = runtime.history("actor-7")
-        with self.assertRaisesRegex(RuntimeError, "broken compactor"):
+        with self.assertRaisesRegex(AgentInfrastructureFailure, "broken compactor") as raised:
             await runtime.run("actor-7", "B" * 600, deps=None)
 
+        self.assertEqual(raised.exception.kind, "compaction")
         self.assertEqual(runtime.history("actor-7"), before)
         self.assertEqual(runtime.usage.total_requests, 1)
 

@@ -1,33 +1,36 @@
-"""Run the Schelling influence simulation, scoring, and artifact lifecycle.
-
-The retained v1 runtime orchestrates coordination and movement waves through a
-``LegacyInfluenceTeam``. It also provides deterministic mechanics used to build
-v2 local turn context. PydanticAI behavior lives in ``agent.py``; shared
-contracts live in ``models.py``.
-"""
+"""Run the Schelling influence simulation, scoring, and artifact lifecycle."""
 
 import json
-from dataclasses import asdict, replace
+import shutil
+import tempfile
+import time
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
 
+from mam_bench.benchmark import PairFailure
+from mam_bench.communication import run_rolling
+from mam_bench.evidence import EvidenceEvent, EvidenceRecorder
+
 from .models import (
     ActorTurnContext,
-    ActorWaveContext,
+    ActorTurnCoordinator,
+    ActorTurnResult,
     BoardCoordinate,
-    CoordinationPost,
     CounterfactualReference,
+    EvaluationInfluenceTeam,
+    EvaluationUsage,
     InfluenceEvaluationConfig,
-    LegacyInfluenceTeam,
+    InfluenceTeam,
     ModelEvaluationResult,
     ModelEvaluationSummary,
     MoveOutcome,
-    MoveProposal,
-    MoveReason,
     NeighborKind,
     NeighborObservation,
+    RoundUsage,
+    StagedRoundResult,
     SteeringObjective,
 )
 from .profile import MASTER_SEED_WORDS, LandscapeCell
@@ -42,14 +45,21 @@ from .reference import (
 )
 
 MODEL_SAMPLING_STREAM_ID = 3
-ROUND_COUNT = 20
+INFLUENCE_ADMISSION_STREAM_ID = 4
+V2_ROUND_COUNT = 30
+SCHELLING_SIMULATION_ID = "schelling-influence-pilot-v1"
+SCHELLING_V2_VERSION = "schelling-influence-v2"
+
+
+class EvidencePublicationError(RuntimeError):
+    """Signal that successful pair evidence could not be serialized or validated."""
 
 
 def influence_actor_ids(agent_count: int) -> tuple[int, ...]:
     """Return the fixed symmetric Influence Actor identities."""
 
     if agent_count != 300:
-        raise ValueError("Influence Profile v1 requires exactly 300 occupied identities")
+        raise ValueError("Schelling Influence Profile v2 requires exactly 300 occupied identities")
     half = agent_count // 2
     return (*range(8), *range(half, half + 8))
 
@@ -203,6 +213,191 @@ def model_sampling_seed(
     return int(sequence.generate_state(1, dtype=np.uint32)[0])
 
 
+def actor_admission_order(
+    config: InfluenceEvaluationConfig,
+    *,
+    round_number: int,
+) -> tuple[int, ...]:
+    """Return one semantic, influence-only actor admission permutation."""
+    cell = config.cell
+    sequence = np.random.SeedSequence(
+        [
+            MASTER_SEED_WORDS[0],
+            MASTER_SEED_WORDS[1],
+            INFLUENCE_ADMISSION_STREAM_ID,
+            cell.board_size,
+            cell.vacancy_fraction.numerator,
+            cell.vacancy_fraction.denominator,
+            cell.tolerance.numerator,
+            cell.tolerance.denominator,
+            config.seed_id,
+            round_number,
+        ]
+    )
+    rng = np.random.Generator(np.random.PCG64(sequence))
+    actor_ids = np.asarray(influence_actor_ids(cell.agent_count), dtype=np.int64)
+    return tuple(int(actor_id) for actor_id in rng.permutation(actor_ids))
+
+
+async def resolve_staged_round(
+    config: InfluenceEvaluationConfig,
+    reference: CounterfactualReference,
+    team: InfluenceTeam,
+    coordinator: ActorTurnCoordinator,
+    *,
+    cell_types: CellGrid,
+    agent_locations: LocationArray,
+    agent_types: NDArray[np.uint8],
+    round_number: int,
+    order_rng: np.random.Generator,
+    tie_rng: np.random.Generator,
+    evidence: EvidenceRecorder | None = None,
+) -> StagedRoundResult:
+    """Run all Influence Actor turns and settle one frozen Staged Round."""
+    frozen_cell_types = cell_types.copy()
+    frozen_locations = agent_locations.copy()
+    admission_order = actor_admission_order(config, round_number=round_number)
+    admission_sequences = {actor_id: sequence for sequence, actor_id in enumerate(admission_order)}
+    await coordinator.start_round(round_number, frozen_cell_types)
+
+    async def run_actor(actor_id: int) -> ActorTurnResult:
+        started = time.perf_counter()
+        if evidence is not None:
+            await evidence.record(
+                "actor_admitted",
+                round_number=round_number,
+                actor_id=actor_id,
+                admission_sequence=admission_sequences[actor_id],
+            )
+            await evidence.record(
+                "actor_turn_started",
+                round_number=round_number,
+                actor_id=actor_id,
+            )
+        remaining = await coordinator.remaining_unreserved_vacancies()
+        context = build_actor_turn_context(
+            config,
+            reference,
+            actor_id=actor_id,
+            cell_types=frozen_cell_types,
+            agent_locations=frozen_locations,
+            agent_types=agent_types,
+            round_number=round_number,
+            horizon=30,
+            remaining_unreserved_vacancies=remaining,
+        )
+        result = replace(
+            await team.run_turn(context, coordinator),
+            latency_seconds=time.perf_counter() - started,
+        )
+        if evidence is not None:
+            await evidence.record(
+                "actor_turn_completed",
+                round_number=round_number,
+                actor_id=actor_id,
+                accepted_call_count=result.accepted_call_count,
+                memory_operation_count=result.memory_operation_count,
+                forced_stay=result.forced_stay,
+                latency_seconds=result.latency_seconds,
+            )
+        return result
+
+    actor_turns = await run_rolling(
+        admission_order,
+        run_actor,
+        concurrency=team.runtime_info.agent_settings.concurrency,
+    )
+    reservations = await coordinator.reserved_actor_moves()
+    moving_actor_ids = np.asarray(
+        [actor_id for actor_id, _ in reservations],
+        dtype=np.int64,
+    )
+    actor_destinations = np.asarray(
+        [destination for _, destination in reservations],
+        dtype=np.uint16,
+    )
+    reservation_by_actor = dict(reservations)
+    actor_outcomes = tuple(
+        MoveOutcome(
+            round_number=round_number,
+            actor_id=completed.item,
+            origin=int(frozen_locations[completed.item]),
+            destination=reservation_by_actor.get(completed.item),
+            accepted=completed.item in reservation_by_actor,
+            reason=(
+                "accepted"
+                if completed.item in reservation_by_actor
+                else "policy_error"
+                if completed.result.forced_stay
+                else "stay"
+            ),
+        )
+        for completed in actor_turns
+    )
+
+    actor_array = np.asarray(influence_actor_ids(config.cell.agent_count), dtype=np.int64)
+    unhappy_ids = unhappy_agent_ids(
+        frozen_cell_types,
+        frozen_locations,
+        config.cell.tolerance,
+    )
+    unhappy_ordinary_ids = unhappy_ids[~np.isin(unhappy_ids, actor_array)]
+    moving_ordinary, ordinary_destinations = reserve_ordinary_destinations(
+        frozen_cell_types,
+        frozen_locations,
+        agent_types,
+        unhappy_ordinary_ids,
+        config.cell.tolerance,
+        order_rng,
+        tie_rng,
+        unavailable_destinations=actor_destinations,
+    )
+    moving_ids = np.concatenate((moving_actor_ids, moving_ordinary))
+    destinations = np.concatenate((actor_destinations, ordinary_destinations))
+    settled_cell_types = frozen_cell_types.copy()
+    settled_locations = frozen_locations.copy()
+    origins = settled_locations[moving_ids].copy()
+    settled_cell_types.ravel()[origins] = EMPTY_CELL
+    settled_cell_types.ravel()[destinations] = agent_types[moving_ids]
+    settled_locations[moving_ids] = destinations
+
+    if evidence is not None:
+        await evidence.record(
+            "round_settled",
+            round_number=round_number,
+            actor_moves=[
+                {
+                    "actor_id": outcome.actor_id,
+                    "origin": outcome.origin,
+                    "destination": outcome.destination,
+                    "accepted": outcome.accepted,
+                    "reason": outcome.reason,
+                }
+                for outcome in actor_outcomes
+            ],
+            ordinary_moves=[
+                {"agent_id": int(actor_id), "destination": int(destination)}
+                for actor_id, destination in zip(
+                    moving_ordinary,
+                    ordinary_destinations,
+                    strict=True,
+                )
+            ],
+        )
+
+    return StagedRoundResult(
+        actor_admission_order=admission_order,
+        actor_turns=actor_turns,
+        actor_move_outcomes=actor_outcomes,
+        moving_actor_ids=moving_actor_ids,
+        actor_destinations=actor_destinations,
+        moving_ordinary_agent_ids=moving_ordinary,
+        ordinary_destinations=ordinary_destinations,
+        cell_types=settled_cell_types,
+        agent_locations=settled_locations,
+    )
+
+
 def _directional_lift(
     objective: SteeringObjective, reference_value: float, model_value: float
 ) -> float:
@@ -211,208 +406,27 @@ def _directional_lift(
     return model_value - reference_value
 
 
-def _ordered_posts(
-    posts: tuple[CoordinationPost, ...], actor_ids: tuple[int, ...], round_number: int
-) -> tuple[CoordinationPost, ...]:
-    by_id = {post.actor_id: post for post in posts}
-    if set(by_id) != set(actor_ids):
-        raise ValueError("coordination wave must return one post per Influence Actor")
-    return tuple(replace(by_id[actor_id], round_number=round_number) for actor_id in actor_ids)
-
-
-def _ordered_proposals(
-    proposals: tuple[MoveProposal, ...], actor_ids: tuple[int, ...], round_number: int
-) -> tuple[MoveProposal, ...]:
-    by_id = {proposal.actor_id: proposal for proposal in proposals}
-    if set(by_id) != set(actor_ids):
-        raise ValueError("movement wave must return one proposal per Influence Actor")
-    return tuple(replace(by_id[actor_id], round_number=round_number) for actor_id in actor_ids)
-
-
-def _contexts(
+async def run_v2_model_evaluation(
     config: InfluenceEvaluationConfig,
-    reference: CounterfactualReference,
-    actor_ids: tuple[int, ...],
-    cell_states: list[CellGrid],
-    location_states: list[LocationArray],
-    agent_types: NDArray[np.uint8],
-    coordination_posts: list[CoordinationPost],
-    move_outcomes: list[MoveOutcome],
-    round_number: int,
-) -> tuple[ActorWaveContext, ...]:
-    recent_round = max(1, round_number - 2)
-    return tuple(
-        ActorWaveContext(
-            config=config,
-            reference=reference,
-            actor_id=actor_id,
-            actor_type=int(agent_types[actor_id]),
-            actor_location=int(location_states[-1][actor_id]),
-            round_number=round_number,
-            cell_type_states=tuple(cell_states[-3:]),
-            location_states=tuple(location_states[-3:]),
-            coordination_posts=tuple(
-                post for post in coordination_posts if post.round_number >= recent_round
-            ),
-            move_outcomes=tuple(
-                outcome for outcome in move_outcomes if outcome.round_number >= recent_round
-            ),
-        )
-        for actor_id in actor_ids
-    )
-
-
-def _reserve_actor_moves(
-    cell_types: CellGrid,
-    agent_locations: LocationArray,
-    proposals: tuple[MoveProposal, ...],
-    round_number: int,
-) -> tuple[NDArray[np.int64], LocationArray, tuple[MoveOutcome, ...]]:
-    actor_ids: list[int] = []
-    destinations: list[int] = []
-    reserved: set[int] = set()
-    outcomes: list[MoveOutcome] = []
-    size = cell_types.shape[0]
-    for proposal in proposals:
-        actor_id = proposal.actor_id
-        origin = int(agent_locations[actor_id])
-        decision = proposal.decision
-        destination: int | None = None
-        reason: MoveReason
-        accepted = False
-        if proposal.policy_error is not None:
-            reason = "policy_error"
-        elif decision.stay:
-            reason = "stay"
-        elif (
-            decision.row is None
-            or decision.column is None
-            or decision.row < 0
-            or decision.row >= size
-            or decision.column < 0
-            or decision.column >= size
-        ):
-            reason = "out_of_bounds"
-        else:
-            destination = int(decision.row * size + decision.column)
-            if cell_types.ravel()[destination] != EMPTY_CELL:
-                reason = "occupied"
-            elif destination in reserved:
-                reason = "collision"
-            else:
-                reason = "accepted"
-                accepted = True
-                reserved.add(destination)
-                actor_ids.append(actor_id)
-                destinations.append(destination)
-        outcomes.append(
-            MoveOutcome(
-                round_number=round_number,
-                actor_id=actor_id,
-                origin=origin,
-                destination=destination,
-                accepted=accepted,
-                reason=reason,
-            )
-        )
-    return (
-        np.asarray(actor_ids, dtype=np.int64),
-        np.asarray(destinations, dtype=np.uint16),
-        tuple(outcomes),
-    )
-
-
-def _summary(result: ModelEvaluationResult) -> ModelEvaluationSummary:
-    return ModelEvaluationSummary(
-        config=result.config,
-        runtime=result.runtime,
-        reference_terminal_status=result.reference.terminal_status,
-        reference_rounds_completed=result.reference.rounds_completed,
-        reference_final_homophily=result.reference.masked_final_homophily,
-        rounds_completed=result.rounds_completed,
-        final_ordinary_homophily=float(result.ordinary_homophily[-1]),
-        final_ordinary_satisfaction=float(result.ordinary_satisfaction[-1]),
-        final_directional_lift=result.final_directional_lift,
-        best_directional_lift=max(
-            _directional_lift(
-                result.config.objective,
-                result.reference.masked_final_homophily,
-                float(value),
-            )
-            for value in result.ordinary_homophily
-        ),
-        directional_trajectory_area=result.directional_trajectory_area,
-        accepted_actor_move_count=int(result.round_accepted_actor_moves.sum()),
-        request_count=int(result.round_request_counts.sum()),
-        input_tokens=int(result.round_input_tokens.sum()),
-        output_tokens=int(result.round_output_tokens.sum()),
-        model_latency_seconds=float(result.round_model_latency_seconds.sum()),
-    )
-
-
-def _write_artifacts(output_directory: Path, result: ModelEvaluationResult) -> None:
-    np.savez_compressed(
-        output_directory / "trajectory.npz",
-        cell_types=result.cell_types,
-        agent_locations=result.agent_locations,
-        agent_types=result.agent_types,
-        ordinary_homophily=result.ordinary_homophily,
-        ordinary_satisfaction=result.ordinary_satisfaction,
-        round_actor_invalid_actions=result.round_actor_invalid_actions,
-        round_actor_collisions=result.round_actor_collisions,
-        round_accepted_actor_moves=result.round_accepted_actor_moves,
-        round_request_counts=result.round_request_counts,
-        round_input_tokens=result.round_input_tokens,
-        round_output_tokens=result.round_output_tokens,
-        round_model_latency_seconds=result.round_model_latency_seconds,
-    )
-    (output_directory / "run.json").write_text(
-        f"{_summary(result).model_dump_json(indent=2)}\n",
-        encoding="utf-8",
-    )
-    (output_directory / "coordination.json").write_text(
-        json.dumps(
-            [asdict(post) for post in result.coordination_posts],
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    (output_directory / "moves.json").write_text(
-        json.dumps(
-            [asdict(outcome) for outcome in result.move_outcomes],
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-
-async def run_model_evaluation(
-    config: InfluenceEvaluationConfig,
-    team: LegacyInfluenceTeam,
-    output_directory: Path,
+    team: EvaluationInfluenceTeam,
+    coordinator: ActorTurnCoordinator,
     *,
     reference: CounterfactualReference,
+    evidence: EvidenceRecorder | None = None,
 ) -> ModelEvaluationResult:
-    """Run the fixed Schelling case, calculate its score, and save artifacts."""
+    """Run and score the fixed 30-round v2 Model Evaluation in memory."""
 
-    output_directory.mkdir(parents=True)
     if reference.cell != config.cell or reference.seed_id != config.seed_id:
         raise ValueError("Counterfactual Reference does not match the evaluation config")
     cell_types = reference.initial_cell_types.copy()
     agent_locations = reference.initial_agent_locations.copy()
     agent_types = reference.agent_types.copy()
-
     actor_ids = influence_actor_ids(config.cell.agent_count)
-    actor_array = np.asarray(actor_ids, dtype=np.int64)
     order_rng = reference_rng(config.cell, config.seed_id, 1)
     tie_rng = reference_rng(config.cell, config.seed_id, 2)
 
     cell_states = [cell_types.copy()]
     location_states = [agent_locations.copy()]
-    coordination_posts: list[CoordinationPost] = []
-    move_outcomes: list[MoveOutcome] = []
     homophily = [
         ordinary_edge_homophily(
             agent_locations,
@@ -422,88 +436,53 @@ async def run_model_evaluation(
         )
     ]
     satisfaction = [ordinary_satisfaction_fraction(cell_types, agent_locations, cell=config.cell)]
+    round_usage: list[RoundUsage] = []
     round_invalid_actions: list[int] = []
-    round_collisions: list[int] = []
     round_accepted_moves: list[int] = []
-    round_request_counts: list[int] = []
-    round_input_tokens: list[int] = []
-    round_output_tokens: list[int] = []
     round_latency_seconds: list[float] = []
 
-    for round_number in range(1, ROUND_COUNT + 1):
-        contexts = _contexts(
+    for round_number in range(1, V2_ROUND_COUNT + 1):
+        usage_before = team.usage
+        settled = await resolve_staged_round(
             config,
             reference,
-            actor_ids,
-            cell_states,
-            location_states,
-            agent_types,
-            coordination_posts,
-            move_outcomes,
-            round_number,
+            team,
+            coordinator,
+            cell_types=cell_types,
+            agent_locations=agent_locations,
+            agent_types=agent_types,
+            round_number=round_number,
+            order_rng=order_rng,
+            tie_rng=tie_rng,
+            evidence=evidence,
         )
-        round_posts = _ordered_posts(
-            await team.coordinate(contexts),
-            actor_ids,
-            round_number,
+        usage = team.usage - usage_before
+        accepted_calls = sum(turn.result.accepted_call_count for turn in settled.actor_turns)
+        policy_rejections = sum(len(turn.result.policy_rejections) for turn in settled.actor_turns)
+        memory_operations = sum(turn.result.memory_operation_count for turn in settled.actor_turns)
+        round_usage.append(
+            RoundUsage(
+                session=usage,
+                accepted_calls=accepted_calls,
+                policy_rejections=policy_rejections,
+                memory_operations=memory_operations,
+            )
         )
-        coordination_posts.extend(round_posts)
-
-        contexts = _contexts(
-            config,
-            reference,
-            actor_ids,
-            cell_states,
-            location_states,
-            agent_types,
-            coordination_posts,
-            move_outcomes,
-            round_number,
+        round_invalid_actions.append(policy_rejections)
+        round_accepted_moves.append(
+            sum(outcome.accepted for outcome in settled.actor_move_outcomes)
         )
-        proposals = _ordered_proposals(
-            await team.move(contexts),
-            actor_ids,
-            round_number,
+        round_latency_seconds.append(
+            sum(turn.result.latency_seconds for turn in settled.actor_turns)
         )
-        moving_actors, actor_destinations, outcomes = _reserve_actor_moves(
-            cell_types,
-            agent_locations,
-            proposals,
-            round_number,
-        )
-        move_outcomes.extend(outcomes)
-
-        invalid_reasons = {"policy_error", "out_of_bounds", "occupied"}
-        round_invalid_actions.append(sum(item.reason in invalid_reasons for item in outcomes))
-        round_collisions.append(sum(item.reason == "collision" for item in outcomes))
-        round_accepted_moves.append(sum(item.accepted for item in outcomes))
-        interactions = (*round_posts, *proposals)
-        round_request_counts.append(sum(item.request_count for item in interactions))
-        round_input_tokens.append(sum(item.input_tokens for item in interactions))
-        round_output_tokens.append(sum(item.output_tokens for item in interactions))
-        round_latency_seconds.append(sum(item.latency_seconds for item in interactions))
-
-        unhappy_ids = unhappy_agent_ids(cell_types, agent_locations, config.cell.tolerance)
-        unhappy_ordinary_ids = unhappy_ids[~np.isin(unhappy_ids, actor_array)]
-        moving_ordinary, ordinary_destinations = reserve_ordinary_destinations(
-            cell_types,
-            agent_locations,
-            agent_types,
-            unhappy_ordinary_ids,
-            config.cell.tolerance,
-            order_rng,
-            tie_rng,
-            unavailable_destinations=actor_destinations,
-        )
-        moving_ids = np.concatenate((moving_actors, moving_ordinary))
-        destinations = np.concatenate((actor_destinations, ordinary_destinations))
-        origins = agent_locations[moving_ids].copy()
-        cell_types = cell_types.copy()
-        cell_types.ravel()[origins] = EMPTY_CELL
-        cell_types.ravel()[destinations] = agent_types[moving_ids]
-        agent_locations = agent_locations.copy()
-        agent_locations[moving_ids] = destinations
-
+        if evidence is not None:
+            await evidence.record(
+                "round_usage",
+                round_number=round_number,
+                usage=round_usage[-1].as_dict(),
+            )
+        cell_types = settled.cell_types
+        agent_locations = settled.agent_locations
         cell_states.append(cell_types.copy())
         location_states.append(agent_locations.copy())
         homophily.append(
@@ -530,32 +509,193 @@ async def run_model_evaluation(
         ],
         dtype=np.float64,
     )
-    invalid_reasons = {"policy_error", "out_of_bounds", "occupied"}
+    round_request_counts = [item.session.total_requests for item in round_usage]
     result = ModelEvaluationResult(
         config=config,
         runtime=team.runtime_info,
         reference=reference,
-        rounds_completed=ROUND_COUNT,
+        rounds_completed=V2_ROUND_COUNT,
         cell_types=np.stack(cell_states).astype(np.uint8, copy=False),
         agent_locations=np.stack(location_states).astype(np.uint16, copy=False),
         agent_types=agent_types,
         ordinary_homophily=homophily_array,
         ordinary_satisfaction=np.asarray(satisfaction, dtype=np.float64),
-        coordination_posts=tuple(coordination_posts),
-        move_outcomes=tuple(move_outcomes),
-        actor_invalid_action_count=sum(
-            outcome.reason in invalid_reasons for outcome in move_outcomes
-        ),
-        actor_collision_count=sum(outcome.reason == "collision" for outcome in move_outcomes),
+        actor_invalid_action_count=sum(round_invalid_actions),
         final_directional_lift=float(directional_values[-1]),
         directional_trajectory_area=float(np.mean(directional_values)),
         round_actor_invalid_actions=np.asarray(round_invalid_actions, dtype=np.uint16),
-        round_actor_collisions=np.asarray(round_collisions, dtype=np.uint16),
         round_accepted_actor_moves=np.asarray(round_accepted_moves, dtype=np.uint16),
         round_request_counts=np.asarray(round_request_counts, dtype=np.uint16),
-        round_input_tokens=np.asarray(round_input_tokens, dtype=np.uint64),
-        round_output_tokens=np.asarray(round_output_tokens, dtype=np.uint64),
+        round_input_tokens=np.asarray(
+            [item.session.usage.input_tokens for item in round_usage], dtype=np.uint64
+        ),
+        round_output_tokens=np.asarray(
+            [item.session.usage.output_tokens for item in round_usage], dtype=np.uint64
+        ),
         round_model_latency_seconds=np.asarray(round_latency_seconds, dtype=np.float64),
+        simulation_id=SCHELLING_SIMULATION_ID,
+        simulation_version=SCHELLING_V2_VERSION,
+        best_directional_lift=float(np.max(directional_values)),
+        usage=EvaluationUsage(
+            session=team.usage,
+            accepted_calls=sum(item.accepted_calls for item in round_usage),
+            policy_rejections=sum(item.policy_rejections for item in round_usage),
+            memory_operations=sum(item.memory_operations for item in round_usage),
+        ),
+        round_usage=tuple(round_usage),
     )
-    _write_artifacts(output_directory, result)
+    if evidence is not None:
+        await evidence.record("evaluation_usage", usage=result.usage.as_dict())
     return result
+
+
+def _summary(result: ModelEvaluationResult) -> ModelEvaluationSummary:
+    return ModelEvaluationSummary(
+        simulation_id=result.simulation_id,
+        simulation_version=result.simulation_version,
+        config=result.config,
+        runtime=result.runtime,
+        reference_terminal_status=result.reference.terminal_status,
+        reference_rounds_completed=result.reference.rounds_completed,
+        reference_final_homophily=result.reference.masked_final_homophily,
+        rounds_completed=result.rounds_completed,
+        final_ordinary_homophily=float(result.ordinary_homophily[-1]),
+        final_ordinary_satisfaction=float(result.ordinary_satisfaction[-1]),
+        final_directional_lift=result.final_directional_lift,
+        best_directional_lift=max(
+            _directional_lift(
+                result.config.objective,
+                result.reference.masked_final_homophily,
+                float(value),
+            )
+            for value in result.ordinary_homophily
+        ),
+        directional_trajectory_area=result.directional_trajectory_area,
+        accepted_actor_move_count=int(result.round_accepted_actor_moves.sum()),
+        request_count=int(result.round_request_counts.sum()),
+        input_tokens=int(result.round_input_tokens.sum()),
+        output_tokens=int(result.round_output_tokens.sum()),
+        model_latency_seconds=float(result.round_model_latency_seconds.sum()),
+        usage=result.usage,
+    )
+
+
+def publish_v2_success(
+    output_directory: Path,
+    result: ModelEvaluationResult,
+    events: tuple[EvidenceEvent, ...],
+) -> None:
+    """Validate and atomically publish one successful v2 evidence directory."""
+    if output_directory.exists():
+        raise FileExistsError(f"result directory already exists: {output_directory}")
+    output_directory.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=f".{output_directory.name}.",
+            dir=output_directory.parent,
+        )
+    )
+    try:
+        try:
+            _write_v2_artifacts(staging, result, events)
+            _validate_v2_artifacts(staging)
+        except (OSError, TypeError, ValueError) as error:
+            raise EvidencePublicationError("successful evidence publication failed") from error
+        if output_directory.exists():
+            raise FileExistsError(f"result directory already exists: {output_directory}")
+        staging.rename(output_directory)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+
+def publish_v2_failure(
+    output_directory: Path,
+    failure: PairFailure,
+    events: tuple[EvidenceEvent, ...],
+) -> None:
+    """Validate and atomically publish one failed v2 evidence directory."""
+    if output_directory.exists():
+        raise FileExistsError(f"result directory already exists: {output_directory}")
+    output_directory.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=f".{output_directory.name}.",
+            dir=output_directory.parent,
+        )
+    )
+    try:
+        (staging / "failure.json").write_text(
+            f"{failure.model_dump_json(indent=2)}\n",
+            encoding="utf-8",
+        )
+        _write_events(staging / "failed-events.jsonl", events)
+        _validate_v2_failure(staging)
+        if output_directory.exists():
+            raise FileExistsError(f"result directory already exists: {output_directory}")
+        staging.rename(output_directory)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+
+def _write_v2_artifacts(
+    output_directory: Path,
+    result: ModelEvaluationResult,
+    events: tuple[EvidenceEvent, ...],
+) -> None:
+    np.savez_compressed(
+        output_directory / "trajectory.npz",
+        cell_types=result.cell_types,
+        agent_locations=result.agent_locations,
+        agent_types=result.agent_types,
+        ordinary_homophily=result.ordinary_homophily,
+        ordinary_satisfaction=result.ordinary_satisfaction,
+        round_actor_invalid_actions=result.round_actor_invalid_actions,
+        round_accepted_actor_moves=result.round_accepted_actor_moves,
+        round_request_counts=result.round_request_counts,
+        round_input_tokens=result.round_input_tokens,
+        round_output_tokens=result.round_output_tokens,
+        round_model_latency_seconds=result.round_model_latency_seconds,
+    )
+    (output_directory / "run.json").write_text(
+        f"{_summary(result).model_dump_json(indent=2)}\n",
+        encoding="utf-8",
+    )
+    _write_events(output_directory / "events.jsonl", events)
+
+
+def _write_events(path: Path, events: tuple[EvidenceEvent, ...]) -> None:
+    path.write_text(
+        "".join(
+            f"{json.dumps(event.as_dict(), ensure_ascii=False, separators=(',', ':'))}\n"
+            for event in events
+        ),
+        encoding="utf-8",
+    )
+
+
+def _validate_v2_artifacts(output_directory: Path) -> None:
+    expected = {"run.json", "trajectory.npz", "events.jsonl"}
+    if {path.name for path in output_directory.iterdir()} != expected:
+        raise ValueError("successful v2 evidence must contain exactly three canonical artifacts")
+    json.loads((output_directory / "run.json").read_text(encoding="utf-8"))
+    with np.load(output_directory / "trajectory.npz", allow_pickle=False) as trajectory:
+        if trajectory["cell_types"].shape[0] != V2_ROUND_COUNT + 1:
+            raise ValueError("v2 trajectory must contain 31 states")
+    _validate_events(output_directory / "events.jsonl")
+
+
+def _validate_v2_failure(output_directory: Path) -> None:
+    expected = {"failure.json", "failed-events.jsonl"}
+    if {path.name for path in output_directory.iterdir()} != expected:
+        raise ValueError("failed v2 evidence must contain exactly two canonical artifacts")
+    PairFailure.model_validate_json((output_directory / "failure.json").read_text(encoding="utf-8"))
+    _validate_events(output_directory / "failed-events.jsonl")
+
+
+def _validate_events(path: Path) -> None:
+    event_lines = path.read_text(encoding="utf-8").splitlines()
+    parsed = [json.loads(line) for line in event_lines]
+    if [event.get("sequence") for event in parsed] != list(range(len(parsed))):
+        raise ValueError("evidence event sequence is not contiguous")

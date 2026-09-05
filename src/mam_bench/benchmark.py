@@ -8,9 +8,11 @@ from typing import Literal, Protocol, Self
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_ai.models import Model
-from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
+from pydantic_ai.models.openrouter import OpenRouterModel, OpenRouterModelSettings
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
+from pydantic_ai.settings import ModelSettings
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from mam_bench.config import ModelSelection, OpenAICompatibleModel
@@ -24,7 +26,7 @@ class AgentSettings(BaseModel):
     temperature: float = 1.0
     top_p: float = 0.95
     top_k: int = 20
-    reasoning_effort: str = "medium"
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] = "medium"
     max_completion_tokens: int = 32_768
     concurrency: int = Field(default=4, gt=0)
     timeout_seconds: float = 3_600.0
@@ -80,27 +82,56 @@ class OpenRouterSettings(BaseSettings):
 
 
 def create_runtime(selection: ModelSelection) -> ModelRuntime:
-    """Create the PydanticAI model selected in YAML."""
+    """Create a model whose request defaults also apply to history summaries."""
+
+    agent_settings = AgentSettings()
+    request_settings = ModelSettings(
+        temperature=agent_settings.temperature,
+        top_p=agent_settings.top_p,
+        max_tokens=agent_settings.max_completion_tokens,
+        timeout=agent_settings.timeout_seconds,
+        parallel_tool_calls=False,
+        extra_body={"top_k": agent_settings.top_k},
+    )
 
     if isinstance(selection, OpenAICompatibleModel):
         endpoint = selection.base_url
         provider_name = "openai-compatible"
         routing_provider = None
-        provider = OpenAIProvider(
-            base_url=endpoint,
-            api_key=os.environ[selection.api_key_env],
+        model = OpenAIChatModel(
+            selection.model,
+            provider=OpenAIProvider(
+                base_url=endpoint,
+                api_key=os.environ[selection.api_key_env],
+            ),
+            settings=OpenAIChatModelSettings(
+                **request_settings,
+                openai_reasoning_effort=agent_settings.reasoning_effort,
+            ),
         )
     else:
         settings = OpenRouterSettings()  # pyright: ignore[reportCallIssue]
         endpoint = settings.base_url
         provider_name = "openrouter"
         routing_provider = selection.provider
-        provider = OpenRouterProvider(
-            openai_client=AsyncOpenAI(
-                base_url=settings.base_url,
-                api_key=settings.api_key.get_secret_value(),
-                default_headers={"X-Title": "MAM-Bench"},
-            )
+        model = OpenRouterModel(
+            selection.model,
+            provider=OpenRouterProvider(
+                openai_client=AsyncOpenAI(
+                    base_url=settings.base_url,
+                    api_key=settings.api_key.get_secret_value(),
+                    default_headers={"X-Title": "MAM-Bench"},
+                )
+            ),
+            settings=OpenRouterModelSettings(
+                **request_settings,
+                openrouter_provider={
+                    "only": [selection.provider],
+                    "allow_fallbacks": False,
+                    "require_parameters": True,
+                },
+                openrouter_reasoning={"effort": agent_settings.reasoning_effort},
+            ),
         )
 
     return ModelRuntime(
@@ -110,8 +141,9 @@ def create_runtime(selection: ModelSelection) -> ModelRuntime:
             model=selection.model,
             endpoint=endpoint,
             routing_provider=routing_provider,
+            agent_settings=agent_settings,
         ),
-        model=OpenAIChatModel(selection.model, provider=provider),
+        model=model,
     )
 
 
@@ -139,6 +171,57 @@ class BenchmarkTopline(BaseModel):
     """All scores from a benchmark run, in execution order."""
 
     entries: tuple[ToplineEntry, ...]
+
+
+type PairFailureKind = Literal[
+    "provider",
+    "network",
+    "timeout",
+    "memory_store",
+    "unsupported_context",
+    "compaction",
+    "evidence_publication",
+]
+
+
+class AgentInfrastructureFailure(RuntimeError):
+    """Abort a pair after an unrecoverable agent runtime failure."""
+
+    def __init__(self, kind: PairFailureKind, message: str) -> None:
+        self.kind: PairFailureKind = kind
+        super().__init__(message)
+
+
+class PairFailure(BaseModel):
+    """Redacted identity and failure category for one unscored pair."""
+
+    model_config = ConfigDict(frozen=True)
+
+    simulation_id: str
+    simulation_version: str
+    model_id: str
+    provider: str
+    model: str
+    kind: PairFailureKind
+
+
+class PairInfrastructureFailure(RuntimeError):
+    """Signal that one pair failed after publishing its failure evidence."""
+
+    def __init__(self, failure: PairFailure) -> None:
+        self.failure = failure
+        super().__init__(f"{failure.simulation_id} / {failure.model_id} ({failure.kind})")
+
+
+class BenchmarkRunFailure(RuntimeError):
+    """Report all pair failures after the matrix and topline are complete."""
+
+    def __init__(self, failures: tuple[PairFailure, ...]) -> None:
+        self.failures = failures
+        pairs = ", ".join(
+            f"{failure.simulation_id} / {failure.model_id} ({failure.kind})" for failure in failures
+        )
+        super().__init__(f"benchmark failed pairs: {pairs}")
 
 
 class BenchmarkSimulation(Protocol):

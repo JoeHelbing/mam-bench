@@ -28,7 +28,7 @@ This is a modernized profile, not a claim to reproduce Schelling's original chec
 
 ## Install
 
-The project uses Python 3.14, NumPy, Pydantic 2, PydanticAI, PyYAML, and uv. The checked-in mise configuration pins the development toolchain and provides common tasks:
+The project uses Python 3.14, NumPy, Pydantic 2, PydanticAI, PydanticAI Harness, PyYAML, and uv. The checked-in mise configuration pins the development toolchain and provides common tasks:
 
 ```bash
 mise install
@@ -76,21 +76,30 @@ The complete 31-state trajectories and their artifact inventory remain under `.s
 
 The runtime path is easiest to read in this order:
 
-1. `simulation.py` selects the fixed case and packaged reference.
-2. `runtime.py` runs rounds, applies moves, scores outcomes, and writes artifacts.
-3. `agent.py` defines the PydanticAI agents, tools, outputs, and request protocol.
-4. `prompt.py` contains the static and dynamic Influence Actor instructions.
-5. `models.py` defines the shared runtime data contracts.
-6. `reference.py` contains the ordinary-agent Schelling mechanics.
-7. `profile.py` fixes the parameter grid and deterministic seed contract.
+1. `benchmark.py` constructs the selected model and its shared request settings.
+2. `simulation.py` selects the fixed case and packaged reference.
+3. `runtime.py` runs rounds, applies moves, scores outcomes, and writes evidence.
+4. `agent.py` under `simulations/schelling/` defines the Schelling tools,
+   terminal outputs, and turn policy.
+5. `prompt.py` contains the Influence Actor instructions.
+6. `models.py` defines the shared Schelling runtime data contracts.
+7. `reference.py` contains the ordinary-agent Schelling mechanics.
+8. `profile.py` fixes the parameter grid and deterministic seed contract.
+
+The supporting modules at the package root have separate responsibilities:
+`agent.py` owns persistent sessions, private Harness notebooks, and compaction;
+`communication.py` owns ordered shared records and rolling admission;
+`evidence.py` records normalized messages and events; and `usage.py` aggregates
+native PydanticAI usage before serializing the benchmark's evidence fields.
 
 `fixture.py` loads the compact comparator used at runtime. Everything involved in regenerating or analyzing reference data lives under `utils/`; see `utils/README.md`.
 
 ## Run a benchmark matrix from YAML
 
-The ordinary workflow reads a selection-only YAML file, executes every selected
-simulation-model pairing, prints each score, and writes `topline.json` after all
-pairings finish:
+The ordinary workflow reads a selection-only YAML file, attempts every selected
+simulation-model pairing, and writes `topline.json` after all pairings finish.
+It prints scores when the full matrix succeeds; after a partial failure it
+prints the aggregate failure while the successful scores remain in the topline:
 
 ```bash
 uv run main.py examples/schelling-pilot.yaml
@@ -106,14 +115,20 @@ can be overridden from the environment or `.env`. The ignored `.env` file must
 never be committed. OpenAI-compatible YAML selections name their required API-key
 environment variable directly; benchmark YAML never contains credentials.
 
-The historical v1 `(3/4, 25%), Seed 22, integration` pilot achieved final
-Directional Lift `0.2450793`. The current benchmark uses the same 20x20 parameter
-cell with held-out Seed 50 from the v2 randomness contract. Each case writes
-`run.json`, `trajectory.npz`,
-`coordination.json`, and `moves.json`. These are direct outputs for inspection,
-not an independent replay or tamper-detection system. A single case does not
-establish reliability across seeds, objectives, or baselines. See the Influence
-Profile for the complete mechanics and artifact contract.
+Schelling Influence v2 uses the same 20x20 parameter cell with held-out Seed 50
+from the Reference Dataset v2 randomness contract. Each selected model receives
+one stochastic 30-round trial that retains 31 states. A successful pair writes
+`run.json`, `trajectory.npz`, and canonical `events.jsonl`; a failed pair writes
+`failure.json` and redacted `failed-events.jsonl` and remains unscored.
+
+Independent pairs continue after a failure. `topline.json` contains successful
+pairs only, and the command exits nonzero after the matrix if any pair failed.
+A failed pair cancels and awaits its remaining actors, retains failure evidence,
+and discards its runtime. It cannot resume; rerunning starts a fresh trial in a
+new output directory. A partial topline therefore does not mean the complete
+matrix passed. One trial is one sample, not a reliability estimate or confidence
+interval. See the Influence Profile for the complete protocol, scoring, and
+evidence contract.
 
 ## Verify the implementation
 
@@ -121,13 +136,16 @@ Profile for the complete mechanics and artifact contract.
 mise run check
 ```
 
-The individual `test`, `lint`, and `typecheck` tasks are also available through `mise run`.
+The individual `test`, `lint`, and `typecheck` tasks are also available through
+`mise run`. Tests use fake, scripted, or function-backed models and make no live
+provider calls.
 
 ## Documentation
 
 - [`CONTEXT.md`](CONTEXT.md): canonical project language.
-- [`docs/schelling-reference-profile-v1.md`](docs/schelling-reference-profile-v1.md): frozen reference scientific and data contract.
-- [`docs/schelling-influence-profile-v1.md`](docs/schelling-influence-profile-v1.md): frozen Influence Actor evaluation contract.
+- [`docs/schelling-reference-profile-v2.md`](docs/schelling-reference-profile-v2.md): current reference scientific and data contract.
+- [`docs/schelling-influence-profile-v2.md`](docs/schelling-influence-profile-v2.md): current Influence Actor evaluation contract.
+- [`docs/schelling-reference-profile-v1.md`](docs/schelling-reference-profile-v1.md): historical reference contract.
 - [`docs/adr/0001-use-a-modernized-schelling-reference-profile.md`](docs/adr/0001-use-a-modernized-schelling-reference-profile.md)
 - [`docs/adr/0002-map-behaviorally-distinct-tolerance-vacancy-cells.md`](docs/adr/0002-map-behaviorally-distinct-tolerance-vacancy-cells.md)
 - [`docs/adr/0003-generate-the-reference-landscape-on-modal.md`](docs/adr/0003-generate-the-reference-landscape-on-modal.md)

@@ -94,7 +94,10 @@ The 540 MiB full dataset lives under ignored `.scratch/schelling-reference-v2-fu
 - `evaluation-reference.json`: readable fixed-case parameters, comparator metrics, and the NPZ hash; and
 - `evaluation-reference.npz`: Seed 50 initial grid, stable locations and types, and terminal Counterfactual Reference grid and locations.
 
-These files are sufficient to explain Test Spot selection, initialize the fixed evaluation, expose its reference endpoint to Influence Actors, and score against the frozen comparator. Intermediate Counterfactual Reference states are not used by evaluation.
+These files are sufficient to explain Test Spot selection, initialize the fixed
+evaluation, and score against the frozen comparator. Influence Actors receive
+the fixed final masked homophily scalar, not the reference board or intermediate
+states.
 
 ## Generation
 
@@ -114,4 +117,13 @@ uv run src/mam_bench/simulations/schelling/utils/publish_reference_data.py
 
 ## Influence benchmark integration
 
-The existing `schelling-influence-pilot-v1` simulation selects the v2 cell with board size 20, tolerance `3/4`, and vacancy `1/4`. Landscape Seeds are `0..49`, so held-out Evaluation Seed `50` supplies its same-seed Counterfactual Reference.
+The stable YAML identifier `schelling-influence-pilot-v1` selects the v2 cell
+with board size 20, tolerance `3/4`, and vacancy `1/4`. Landscape Seeds are
+`0..49`, so held-out Evaluation Seed `50` supplies its same-seed Counterfactual
+Reference. Result metadata separately identifies the current Model Interaction
+Protocol as `schelling-influence-v2`.
+
+Reference termination does not control the Influence evaluation horizon. The
+packaged Counterfactual Reference reached equilibrium after 20 transitions;
+each Influence v2 trial independently starts from the shared initial state and
+runs all 30 Staged Rounds. It does not resume or extend the reference trajectory.

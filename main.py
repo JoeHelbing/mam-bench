@@ -2,10 +2,11 @@
 
 import argparse
 import asyncio
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from mam_bench.benchmark import BenchmarkTopline
+from mam_bench.benchmark import BenchmarkRunFailure, BenchmarkTopline
 from mam_bench.config import load_benchmark_config
 from mam_bench.runner import run_benchmark
 
@@ -31,7 +32,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=yaml_path)
     config = load_benchmark_config(parser.parse_args(arguments).config)
-    topline = asyncio.run(run_benchmark(config))
+    try:
+        topline = asyncio.run(run_benchmark(config))
+    except BenchmarkRunFailure as error:
+        print(error, file=sys.stderr)
+        return 1
     print(format_topline(topline))
     return 0
 

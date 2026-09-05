@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 from urllib.parse import urlsplit
 
 import yaml
@@ -80,7 +80,10 @@ def load_benchmark_config(path: Path) -> BenchmarkConfig:
     """Load one YAML document without constructing runtime objects."""
 
     with path.open("rb") as config_file:
-        document = yaml.safe_load(config_file)
+        document = cast(
+            object,
+            yaml.safe_load(config_file),  # pyright: ignore[reportUnknownMemberType]
+        )
     config = BenchmarkConfig.model_validate(document)
     output_directory = config.output_directory
     if not output_directory.is_absolute():

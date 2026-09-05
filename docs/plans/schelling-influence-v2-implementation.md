@@ -75,6 +75,7 @@ It does not show satisfaction, reservation markers, the global board, reference 
 - Standalone memory operations each consume one accepted call.
 - A successful `post_message`, `submit_move`, or `stay` may carry one full memory mutation at no additional call cost: append, unique replacement, or deletion against any Harness-permitted notebook file.
 - A rejected enclosing action must not mutate memory. For a scored trial, the action and attached mutation commit consistently at the authoritative coordinator boundary.
+- Use Harness's public `MemoryToolset` for attached edits with the actual tool or output `RunContext`. Keep one trial-local store; completed writes need no rollback because an infrastructure failure permanently ends the runtime.
 
 ### Concurrency and movement
 
@@ -105,6 +106,12 @@ Do not add provider-native compaction, `ClearToolResults`, `ClampOversizedMessag
 
 Compaction requests, tokens, latency, and provider-reported/computable cost count in usage evidence but not in the actor's ten-call budget. Cost remains nullable when an endpoint supplies no trustworthy price.
 
+Construct native `OpenRouterModel` or generic `OpenAIChatModel` instances with
+shared provider, sampling, and timeout defaults. Both actor and summary requests
+inherit those defaults; the actor adds its advisory seed and the summary keeps
+its separate 16,000-token completion ceiling. Preserve the configured endpoint
+and routing restrictions.
+
 ### Evidence and matrix failures
 
 A successful pair contains exactly:
@@ -122,7 +129,11 @@ An aborted pair publishes exactly:
 - `failure.json`; and
 - `failed-events.jsonl`.
 
-The failure metadata is redacted and the pair remains unscored. Continue later matrix pairs, write `topline.json` with successful entries only, then exit nonzero with a concise list of all failed pairs.
+The failure metadata is redacted and the pair remains unscored. Stop admission,
+cancel and await the pair's remaining actors, and discard its runtime. Failed
+histories and notebooks cannot be reused; a new attempt starts a fresh trial.
+Continue later matrix pairs, write `topline.json` with successful entries only,
+then exit nonzero with a concise list of all failed pairs.
 
 The pilot runs one stochastic trial per selected model. Its topline score is one sample and has no confidence interval.
 
@@ -153,11 +164,16 @@ uv sync --frozen
 
 Files:
 
-- `src/mam_bench/agent.py` (new)
+- `src/mam_bench/agent.py`
+- `src/mam_bench/communication.py`
+- `src/mam_bench/evidence.py`
+- `src/mam_bench/usage.py`
 - `src/mam_bench/benchmark.py`
 - `tests/test_agent.py` (new)
 
-Keep this as one deep, model-agnostic module rather than a generic framework. It owns:
+Keep one model-agnostic session runtime with a small interface. Separate ordered
+communication, canonical evidence, and usage accounting into cohesive modules.
+Together they own:
 
 - persistent PydanticAI message histories keyed by opaque session ID;
 - a fresh per-trial Harness `InMemoryStore` and application-resolved memory namespaces;
@@ -171,7 +187,12 @@ It must not know about Schelling actor types, board coordinates, objectives, hom
 
 Add the explicit 260,000-token context contract to generic Agent Settings. Keep the 70-percent compaction trigger, 40,000-token tail, 16,000-token summary limit, and 4,000-token memory injection as v2 protocol configuration passed to the shared runtime rather than hidden Schelling implementations of Harness behavior.
 
-Gate: package-level tests prove session isolation, trial reset, bounded memory injection, shared-record ordering/paging, compaction/fallback accounting, normalized message capture, and rolling admission without importing Schelling.
+Use native `RunUsage` for internal accumulation and snapshot deltas. Keep the
+benchmark's request counters and cost-completeness flag alongside it, and
+serialize the existing flat evidence fields in one place. Input tokens already
+include cached input; total tokens are input plus output.
+
+Gate: package-level tests prove session isolation, trial reset, bounded memory injection, shared-record ordering/paging, compaction/fallback accounting, normalized message capture, rolling admission, and refusal to reuse a failed runtime without importing Schelling.
 
 ### 3. Replace the Schelling interaction contracts
 
@@ -219,7 +240,13 @@ Create a per-trial coordinator that owns only Schelling policy and state:
 
 Authoritative Schelling operations are document reads, posts, move reservations, and stays. Delegate generic document storage/cursors, notebook operations, message evidence, and usage to the package-level Agent Session Runtime.
 
-For attached mutations, hold the coordinator lock, validate the Schelling action and current reservation state first, invoke the shared runtime's isolated memory mutation, then perform the already-validated non-failing reservation/document update. If a memory/store operation fails, abort the pair before publishing a scored result. Do not claim a cross-process transaction the in-memory Harness store does not provide.
+For attached mutations, hold the coordinator lock, validate the Schelling action
+and current reservation state first, invoke `MemoryToolset.write_memory` or
+`delete_memory` through the shared runtime, then perform the already-validated
+non-failing reservation/document update. Pass the actual `RunContext` so Harness
+retains its operation identity and conflict behavior. If a memory/store operation
+fails, abort the pair before publishing a scored result. No store copies,
+dual writes, or rollback are needed for a runtime that cannot resume.
 
 Add an influence-only semantic RNG helper for admission permutations. Keep ordinary movement helpers and RNG streams unchanged.
 
@@ -355,8 +382,8 @@ Test groups:
 6. Public post limits, deceptive content preservation, authoritative reservation records, 40,000-character document paging, empty reads, cursor linearization, and `more_available`.
 7. Randomized semantic admission independent of ordinary RNG.
 8. Completion-order posts/reservations and collision retries.
-9. Attached-memory consistency, full mutation variants, strict store failure, actor isolation, and trial reset.
-10. Harness compaction threshold, inherited model, incremental summary, default prompt, receipt, usage accounting, approved sliding fallback, and unsupported-context pair failure.
+9. Attached-memory consistency, full mutation variants, strict store failure, actor isolation, trial reset, cancellation cleanup, and refusal to resume a failed runtime.
+10. Harness compaction threshold, inherited model and provider defaults, incremental summary, default prompt, receipt, native usage accounting, approved sliding fallback, and unsupported-context pair failure.
 11. Staged actor/ordinary settlement, actor-origin exclusion, 30 rounds/31 states, masked scoring, and unchanged reference fixture.
 12. Normalized event deduplication, redaction, exact artifact sets, no overwrite, mixed-matrix continuation, partial topline, and aggregate nonzero failure.
 

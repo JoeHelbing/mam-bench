@@ -1,0 +1,128 @@
+[
+  {
+    "case": [
+      20,
+      0,
+      1,
+      1,
+      4,
+      0,
+      30
+    ],
+    "status": 0,
+    "rounds": 0,
+    "arrays": {
+      "cell_types": "64088cddc8daeabd374506317f4ceb4ff9659db4ff6dce5918f24e368c03221d",
+      "agent_locations": "938c77f87e995875b03b151bb53266046686f64f9ea27f06d7a32c99e15dd0cd",
+      "agent_types": "7bfd7e025acfb998d6e0cc1bb6535c50a82c59f407ea5f5979005a21850bfb16"
+    }
+  },
+  {
+    "case": [
+      20,
+      1,
+      1,
+      1,
+      10,
+      0,
+      30
+    ],
+    "status": 1,
+    "rounds": 1,
+    "arrays": {
+      "cell_types": "f45a44e4f38fd5da24267ec6a691f60b6479c45bab9be292d3da4be6e07c50b5",
+      "agent_locations": "edea9b1ae7404413acd30743958e6aeef9f13d8167da7d14e9a9e2dc5267b82d",
+      "agent_types": "f1d6d156d15558649869423f08b8cea14a3779061d4de632b46001774af2dd56"
+    }
+  },
+  {
+    "case": [
+      20,
+      1,
+      2,
+      1,
+      4,
+      7,
+      10
+    ],
+    "status": 0,
+    "rounds": 5,
+    "arrays": {
+      "cell_types": "c1a994e463535d4b71784b4a7c1a9710eb59513f5990245f00fc0c575a66e169",
+      "agent_locations": "06a2182b078296ab30161a2bec00b3baf84756bf105863dc3d1215db720a1b64",
+      "agent_types": "7bfd7e025acfb998d6e0cc1bb6535c50a82c59f407ea5f5979005a21850bfb16"
+    }
+  },
+  {
+    "case": [
+      20,
+      3,
+      4,
+      1,
+      4,
+      50,
+      30
+    ],
+    "status": 0,
+    "rounds": 20,
+    "arrays": {
+      "cell_types": "908f3a7c4bc6e3d7a6b260187a63f8966166fc02c1ff93e110c995539d2a5041",
+      "agent_locations": "34f641597d01cb2172834b6719c62cb22d662f2d76a397d7359d2c2b24e4e9d3",
+      "agent_types": "7bfd7e025acfb998d6e0cc1bb6535c50a82c59f407ea5f5979005a21850bfb16"
+    }
+  },
+  {
+    "case": [
+      20,
+      2,
+      3,
+      1,
+      4,
+      2,
+      5
+    ],
+    "status": 2,
+    "rounds": 5,
+    "arrays": {
+      "cell_types": "3693f56f57cd660f0ed709e0105a6ae55f9c7c928c82af22c4d173e7e2d0e89c",
+      "agent_locations": "e9d7fbfe78c69372d4700f0deeff74e415321bda89b8616280c38ac5552e46ca",
+      "agent_types": "7bfd7e025acfb998d6e0cc1bb6535c50a82c59f407ea5f5979005a21850bfb16"
+    }
+  },
+  {
+    "case": [
+      60,
+      1,
+      2,
+      1,
+      4,
+      0,
+      2
+    ],
+    "status": 2,
+    "rounds": 2,
+    "arrays": {
+      "cell_types": "cfc3899175145ba86c18e81c5c7dfc4a42c1e4104fb3a54632b212e8ea8acfdf",
+      "agent_locations": "eb628e3af554f6a26ae054bc71cce670eefb9e0c4f33499563975edb1163e6ab",
+      "agent_types": "d8355df9fb0242c6e36146ba9b5d92d5e625acb5300518d7e78f489f94b37e72"
+    }
+  },
+  {
+    "case": [
+      100,
+      1,
+      2,
+      1,
+      4,
+      0,
+      2
+    ],
+    "status": 2,
+    "rounds": 2,
+    "arrays": {
+      "cell_types": "6f990bc0ed062353f3a811cc9d41966196920b4027eb8691e9f96a03f1b143d6",
+      "agent_locations": "e1d7d49b078defc9290c891febff81ed906f10262e503ba78c0604cdb1c1725c",
+      "agent_types": "ed8737820af7a9a112e4411f052e4d227e58a7f75313c9c6efff7a2bee0e5821"
+    }
+  }
+]

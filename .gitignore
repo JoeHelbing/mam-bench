@@ -11,3 +11,4 @@ data/reference-landscape/*/analysis/
 examples/assets/
 examples/*.html
 /tmp/playground/
+docs/

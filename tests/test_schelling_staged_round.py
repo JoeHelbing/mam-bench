@@ -2,312 +2,119 @@ import asyncio
 import unittest
 
 import numpy as np
-from pydantic_ai import ModelRetry
+from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
+from pydantic_ai.models.function import AgentInfo
 
-from mam_bench.benchmark import AgentSettings, RuntimeInfo
-from mam_bench.communication import SharedCommunication
-from mam_bench.simulations.schelling.agent import SchellingTurnCoordinator
-from mam_bench.simulations.schelling.models import (
-    ActorTurnContext,
-    ActorTurnCoordinator,
-    ActorTurnResult,
-    AppendMemory,
-    InfluenceEvaluationConfig,
-    PublicDocumentRecord,
-    Stay,
-    SteeringObjective,
-    SubmitMove,
-)
-from mam_bench.simulations.schelling.profile import LandscapeCell, Rational
-from mam_bench.simulations.schelling.reference import (
-    EMPTY_CELL,
-    reference_rng,
-    reserve_ordinary_destinations,
-    unhappy_agent_ids,
-)
-from mam_bench.simulations.schelling.runtime import (
-    actor_admission_order,
-    influence_actor_ids,
-    resolve_staged_round,
-)
-from mam_bench.simulations.schelling.utils.reference_data import build_evaluation_reference
+from mam_bench.simulations.schelling import ModelControlledAgent, SchellingSim
+from schelling_support import identity, runtime_for
 
 
-class CountingNotebook:
-    def __init__(self) -> None:
-        self.write_count = 0
+class RoundTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rolling_reservations_collisions_and_frozen_settlement(self) -> None:
+        release = asyncio.Event()
+        admitted = asyncio.Event()
+        calls: dict[int, int] = {}
+        order: list[int] = []
+        active = 0
+        maximum = 0
 
-    async def write(
-        self,
-        content: str,
-        *,
-        file: str = "MEMORY.md",
-        old_text: str | None = None,
-    ) -> object:
-        del content, file, old_text
-        self.write_count += 1
-        return object()
+        async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal active, maximum
+            _, agent_id = identity(messages)
+            if agent_id not in calls:
+                order.append(agent_id)
+            calls[agent_id] = calls.get(agent_id, 0) + 1
+            slot = order.index(agent_id)
+            active += 1
+            maximum = max(maximum, active)
+            try:
+                if slot == 0:
+                    await release.wait()
+                if len(order) == 16:
+                    admitted.set()
+                if slot == 1:
+                    destination = vacancies[0]
+                elif slot == 2:
+                    destination = vacancies[0] if calls[agent_id] == 1 else vacancies[1]
+                elif slot == 3 and calls[agent_id] == 1:
+                    destination = origin
+                else:
+                    return ModelResponse(parts=[ToolCallPart("stay", {})])
+                row, column = divmod(int(destination), 20)
+                return ModelResponse(parts=[ToolCallPart("move", {"row": row, "column": column})])
+            finally:
+                active -= 1
 
-    async def delete(self, file: str) -> object:
-        del file
-        return object()
-
-
-class ControlledRoundTeam:
-    runtime_info = RuntimeInfo(
-        model_id="controlled-round",
-        provider="openrouter",
-        model="test/controlled-round",
-        endpoint="https://example.test/v1",
-        agent_settings=AgentSettings(concurrency=2),
-    )
-
-    def __init__(
-        self,
-        admission_order: tuple[int, ...],
-        *,
-        first_destination: int,
-        retry_destination: int,
-        actor_origin: int,
-        size: int,
-    ) -> None:
-        self._admission_index = {actor_id: index for index, actor_id in enumerate(admission_order)}
-        self._first_destination = first_destination
-        self._retry_destination = retry_destination
-        self._actor_origin = actor_origin
-        self._size = size
-        self._release_first = asyncio.Event()
-        self.first_started = asyncio.Event()
-        self.third_started = asyncio.Event()
-        self.other_turns_completed = asyncio.Event()
-        self.active = 0
-        self.maximum_active = 0
-        self.completed_other_turns = 0
-        self.contexts: dict[int, ActorTurnContext] = {}
-        self.notebooks: dict[int, CountingNotebook] = {}
-
-    def release_first(self) -> None:
-        self._release_first.set()
-
-    async def run_turn(
-        self,
-        context: ActorTurnContext,
-        coordinator: ActorTurnCoordinator,
-    ) -> ActorTurnResult:
-        index = self._admission_index[context.actor_id]
-        notebook = self.notebooks.setdefault(context.actor_id, CountingNotebook())
-        self.contexts[context.actor_id] = context
-        self.active += 1
-        self.maximum_active = max(self.maximum_active, self.active)
-        if index == 0:
-            self.first_started.set()
-        if index == 2:
-            self.third_started.set()
+        sim = SchellingSim.for_model(runtime_for(script, concurrency=2))
+        initial = sim.snapshot()
+        vacancies = np.flatnonzero(initial.cell_types.ravel() == 0)
+        origin = int(initial.agent_locations[sim.controlled_agent_ids[0]])
+        task = asyncio.create_task(sim.step())
         try:
-            if index == 0:
-                await self._release_first.wait()
-            await coordinator.post_message(context.actor_id, f"actor-{context.actor_id}")
-            rejections: tuple[str, ...] = ()
-            if index == 1:
-                action = self._move(self._first_destination)
-            elif index == 2:
-                rejected = self._move(
-                    self._first_destination,
-                    memory=AppendMemory(operation="append", content="must not persist"),
-                )
-                try:
-                    await coordinator.commit_terminal(context.actor_id, rejected, notebook)
-                except ModelRetry as error:
-                    rejections = (str(error),)
-                action = self._move(self._retry_destination)
-            elif index == 3:
-                rejected = self._move(self._actor_origin)
-                try:
-                    await coordinator.commit_terminal(context.actor_id, rejected, notebook)
-                except ModelRetry as error:
-                    rejections = (str(error),)
-                action = Stay()
-            else:
-                action = Stay()
-            committed = await coordinator.commit_terminal(
-                context.actor_id,
-                action,
-                notebook,
-            )
-            return ActorTurnResult(
-                actor_id=context.actor_id,
-                action=committed,
-                accepted_call_count=1,
-                policy_rejections=rejections,
-            )
+            await asyncio.wait_for(admitted.wait(), 10)
+            np.testing.assert_array_equal(sim.snapshot().cell_types, initial.cell_types)
+            np.testing.assert_array_equal(sim.snapshot().agent_locations, initial.agent_locations)
+            self.assertEqual(sim.remaining_vacancies, 98)
         finally:
-            self.active -= 1
-            if index != 0:
-                self.completed_other_turns += 1
-                if self.completed_other_turns == 15:
-                    self.other_turns_completed.set()
-
-    def _move(
-        self,
-        destination: int,
-        *,
-        memory: AppendMemory | None = None,
-    ) -> SubmitMove:
-        row, column = divmod(destination, self._size)
-        return SubmitMove(row=row, column=column, memory=memory)
-
-
-class StagedRoundTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
-        self.cell = LandscapeCell(20, Rational(3, 4), Rational(1, 4))
-        self.config = InfluenceEvaluationConfig(
-            cell=self.cell,
-            seed_id=50,
-            objective=SteeringObjective.INTEGRATION,
+            release.set()
+        result = await asyncio.wait_for(task, 10)
+        assert result is not None
+        self.assertEqual(maximum, 2)
+        self.assertEqual(result.admission_order, tuple(order))
+        self.assertEqual(
+            result.controlled_moves, ((order[1], vacancies[0]), (order[2], vacancies[1]))
         )
-        self.reference = build_evaluation_reference(self.cell, self.config.seed_id)
+        self.assertEqual(calls[order[2]], 2)
+        self.assertEqual(calls[order[3]], 2)
+        destinations = [d for _, d in (*result.controlled_moves, *result.ordinary_moves)]
+        self.assertEqual(len(destinations), len(set(destinations)))
+        self.assertTrue(all(initial.cell_types.flat[d] == 0 for d in destinations))
+        for agent in sim.agents:
+            self.assertEqual(agent.position, result.agent_locations[agent.agent_id])
 
-    def test_actor_admission_has_its_own_semantic_rng_stream(self) -> None:
-        first = actor_admission_order(self.config, round_number=1)
-        repeated = actor_admission_order(self.config, round_number=1)
-        second = actor_admission_order(self.config, round_number=2)
+    async def test_retry_exhaustion_stays_and_sessions_continue(self) -> None:
+        async def invalid(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[ToolCallPart("move", {"row": -1, "column": 0})])
 
-        self.assertEqual(first, repeated)
-        self.assertEqual(set(first), set(influence_actor_ids(self.cell.agent_count)))
-        self.assertNotEqual(first, second)
+        sim = SchellingSim.for_model(runtime_for(invalid))
+        initial = sim.snapshot()
+        first = await sim.step()
+        assert first is not None and sim.sessions is not None
+        self.assertEqual(first.controlled_moves, ())
+        history = len(sim.sessions.history("0"))
+        second = await sim.step()
+        assert second is not None
+        self.assertEqual(second.controlled_moves, ())
+        self.assertGreater(len(sim.sessions.history("0")), history)
+        for agent_id in sim.controlled_agent_ids:
+            self.assertEqual(sim.agent_position(agent_id), initial.agent_locations[agent_id])
 
-        order_rng = reference_rng(self.cell, self.config.seed_id, 1)
-        tie_rng = reference_rng(self.cell, self.config.seed_id, 2)
-        order_control = reference_rng(self.cell, self.config.seed_id, 1)
-        tie_control = reference_rng(self.cell, self.config.seed_id, 2)
-        actor_admission_order(self.config, round_number=3)
-        np.testing.assert_array_equal(
-            order_rng.integers(100, size=8),
-            order_control.integers(100, size=8),
-        )
-        np.testing.assert_array_equal(
-            tie_rng.integers(100, size=8),
-            tie_control.integers(100, size=8),
-        )
-
-    async def test_resolves_one_completion_ordered_concurrent_staged_round(self) -> None:
-        initial_cell_types = self.reference.initial_cell_types.copy()
-        initial_locations = self.reference.initial_agent_locations.copy()
-        admission = actor_admission_order(self.config, round_number=1)
-        vacancies = np.flatnonzero(initial_cell_types.ravel() == EMPTY_CELL)
-        second_actor = admission[1]
-        second_location = int(initial_locations[second_actor])
-        second_row, second_column = divmod(second_location, self.cell.board_size)
-        nearby = {
-            ((second_row + row_delta) % self.cell.board_size) * self.cell.board_size
-            + ((second_column + column_delta) % self.cell.board_size)
-            for row_delta in (-1, 0, 1)
-            for column_delta in (-1, 0, 1)
-        }
-        far_vacancies = [int(item) for item in vacancies if int(item) not in nearby]
-        first_destination, retry_destination = far_vacancies[:2]
-        excluded_origin = int(initial_locations[admission[4]])
-        team = ControlledRoundTeam(
-            admission,
-            first_destination=first_destination,
-            retry_destination=retry_destination,
-            actor_origin=excluded_origin,
-            size=self.cell.board_size,
-        )
-        communication: SharedCommunication[PublicDocumentRecord] = SharedCommunication()
-        coordinator = SchellingTurnCoordinator(communication)
-
-        round_task = asyncio.create_task(
-            resolve_staged_round(
-                self.config,
-                self.reference,
-                team,
-                coordinator,
-                cell_types=initial_cell_types,
-                agent_locations=initial_locations,
-                agent_types=self.reference.agent_types,
-                round_number=1,
-                order_rng=reference_rng(self.cell, self.config.seed_id, 1),
-                tie_rng=reference_rng(self.cell, self.config.seed_id, 2),
+    async def test_terminal_stay_skips_batched_post_and_observation_is_local(self) -> None:
+        async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart("post_message", {"text": "must not be posted"}),
+                    ToolCallPart("stay", {}),
+                ]
             )
-        )
-        await team.first_started.wait()
-        await team.third_started.wait()
-        await team.other_turns_completed.wait()
 
-        np.testing.assert_array_equal(initial_cell_types, self.reference.initial_cell_types)
-        np.testing.assert_array_equal(initial_locations, self.reference.initial_agent_locations)
-        self.assertFalse(round_task.done())
-        team.release_first()
-        result = await round_task
-
-        self.assertEqual(team.maximum_active, 2)
-        self.assertEqual(result.actor_admission_order, admission)
-        self.assertEqual(result.actor_turns[-1].item, admission[0])
+        sim = SchellingSim.for_model(runtime_for(script))
+        agent = sim.agents[0]
+        assert isinstance(agent, ModelControlledAgent)
+        snapshot = sim.snapshot()
+        observation = agent.observe()
+        self.assertEqual(len(observation.neighborhood), 8)
+        row, col = divmod(agent.position, 20)
+        expected = {
+            ((row + dr) % 20, (col + dc) % 20) for dr in (-1, 0, 1) for dc in (-1, 0, 1) if dr or dc
+        }
         self.assertEqual(
-            [completed.completion_sequence for completed in result.actor_turns],
-            list(range(16)),
+            {(n.location.row, n.location.column) for n in observation.neighborhood}, expected
         )
-        self.assertEqual(len(team.contexts), 16)
-        self.assertNotIn(
-            first_destination,
-            {
-                item.location.row * self.cell.board_size + item.location.column
-                for item in team.contexts[second_actor].neighborhood
-            },
-        )
-
-        collision_result = next(
-            completed.result for completed in result.actor_turns if completed.item == admission[2]
-        )
-        origin_result = next(
-            completed.result for completed in result.actor_turns if completed.item == admission[3]
-        )
-        self.assertEqual(len(collision_result.policy_rejections), 1)
-        self.assertEqual(len(origin_result.policy_rejections), 1)
-        self.assertEqual(team.notebooks[admission[2]].write_count, 0)
-        self.assertEqual(
-            set(result.actor_destinations.tolist()),
-            {first_destination, retry_destination},
-        )
-
-        records = communication.records
-        self.assertEqual(records[0].author_session_id, str(admission[1]))
-        self.assertEqual(records[-1].author_session_id, str(admission[0]))
-        authoritative = [
-            record for record in records if record.author_session_id == "schelling-runtime"
-        ]
-        self.assertEqual(len(authoritative), 2)
-
-        unhappy = unhappy_agent_ids(
-            self.reference.initial_cell_types,
-            self.reference.initial_agent_locations,
-            self.cell.tolerance,
-        )
-        ordinary_ids = unhappy[
-            ~np.isin(unhappy, np.asarray(influence_actor_ids(self.cell.agent_count)))
-        ]
-        expected_agents, expected_destinations = reserve_ordinary_destinations(
-            self.reference.initial_cell_types,
-            self.reference.initial_agent_locations,
-            self.reference.agent_types,
-            ordinary_ids,
-            self.cell.tolerance,
-            reference_rng(self.cell, self.config.seed_id, 1),
-            reference_rng(self.cell, self.config.seed_id, 2),
-            unavailable_destinations=np.asarray(
-                [first_destination, retry_destination], dtype=np.uint16
-            ),
-        )
-        np.testing.assert_array_equal(result.moving_ordinary_agent_ids, expected_agents)
-        np.testing.assert_array_equal(result.ordinary_destinations, expected_destinations)
-        all_destinations = np.concatenate((result.actor_destinations, result.ordinary_destinations))
-        self.assertEqual(len(np.unique(all_destinations)), len(all_destinations))
-        for completed in result.actor_turns:
-            if isinstance(completed.result.action, SubmitMove):
-                origin = int(initial_locations[completed.item])
-                self.assertEqual(result.cell_types.ravel()[origin], EMPTY_CELL)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertEqual(observation.current_homophily, sim.metrics().ordinary_homophily)
+        self.assertFalse(hasattr(observation, "cell_types"))
+        await sim.step()
+        assert sim.sessions is not None
+        self.assertEqual((await sim.sessions.board.read("inspector")).content, "")
+        for agent_id in sim.controlled_agent_ids:
+            self.assertEqual(sim.agent_position(agent_id), snapshot.agent_locations[agent_id])

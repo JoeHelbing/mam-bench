@@ -1,24 +1,28 @@
 """Run every simulation and model selected in a benchmark YAML file."""
 
+import logging
 import tempfile
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 
 from mam_bench.benchmark import (
     BenchmarkRunFailure,
     BenchmarkSimulation,
     BenchmarkTopline,
-    ModelRuntime,
     PairFailure,
     PairInfrastructureFailure,
     ToplineEntry,
-    create_runtime,
 )
 from mam_bench.config import BenchmarkConfig, ModelSelection
-from mam_bench.simulations.schelling.simulation import SchellingBenchmarkSimulation
+from mam_bench.model import ModelRuntime, create_runtime
+from mam_bench.simulations.schelling.simulation import SchellingSim
+
+logger = logging.getLogger(__name__)
 
 SIMULATIONS: Mapping[str, BenchmarkSimulation] = {
-    "schelling-influence-pilot-v1": SchellingBenchmarkSimulation(),
+    "schelling-influence-pilot-v1": SchellingSim(),
 }
 RuntimeBuilder = Callable[[ModelSelection], ModelRuntime]
 
@@ -28,25 +32,80 @@ async def run_benchmark(
     *,
     simulations: Mapping[str, BenchmarkSimulation] = SIMULATIONS,
     runtime_builder: RuntimeBuilder = create_runtime,
+    on_output_directory: Callable[[Path], None] | None = None,
 ) -> BenchmarkTopline:
-    """Run the selected simulation-model combinations and save their scores."""
+    """Run a fresh matrix in a unique child of the configured output root.
 
+    Notify the caller of the allocated directory before starting simulations,
+    so its output remains discoverable even if execution fails.
+    """
+
+    unknown = tuple(name for name in config.simulations if name not in simulations)
+    if unknown:
+        raise ValueError(
+            f"Unknown simulations: {', '.join(map(repr, unknown))}. "
+            f"Available simulations: {', '.join(sorted(simulations)) or '(none)'}"
+        )
     selected_simulations = tuple(simulations[simulation_id] for simulation_id in config.simulations)
-    config.output_directory.mkdir(parents=True)
 
+    runtimes: list[ModelRuntime] = []
+    for model in config.models:
+        try:
+            runtime = runtime_builder(model)
+        except Exception as error:
+            # Provider exceptions can include credentials or response bodies.
+            raise ValueError(
+                f"Runtime initialization failed for model {model.id!r} "
+                f"({type(error).__name__}); check credentials, endpoint, model and provider."
+            ) from None
+        runtimes.append(runtime)
+    config.output_directory.mkdir(parents=True, exist_ok=True)
+    # mkdtemp reserves the persistent attempt directory atomically and retries collisions.
+    attempt_directory = Path(
+        tempfile.mkdtemp(
+            prefix=f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-",
+            dir=config.output_directory,
+        )
+    )
+    if on_output_directory is not None:
+        on_output_directory(attempt_directory)
+
+    started = monotonic()
+    logger.info(
+        "matrix.start directory=%s pairs=%d",
+        attempt_directory,
+        len(selected_simulations) * len(runtimes),
+    )
     entries: list[ToplineEntry] = []
     failures: list[PairFailure] = []
     for simulation in selected_simulations:
-        for model in config.models:
-            runtime = runtime_builder(model)
+        for runtime in runtimes:
             output_directory = (
-                config.output_directory / "runs" / simulation.simulation_id / runtime.info.model_id
+                attempt_directory / "runs" / simulation.simulation_id / runtime.info.model_id
+            )
+            pair_started = monotonic()
+            logger.info(
+                "pair.start simulation=%s model=%s", simulation.simulation_id, runtime.info.model_id
             )
             try:
                 score = await simulation.run(runtime, output_directory)
             except PairInfrastructureFailure as error:
+                logger.error(
+                    "pair.failed simulation=%s model=%s kind=%s elapsed_s=%.3f",
+                    simulation.simulation_id,
+                    runtime.info.model_id,
+                    error.failure.kind,
+                    monotonic() - pair_started,
+                )
                 failures.append(error.failure)
                 continue
+            logger.info(
+                "pair.end simulation=%s model=%s score=%s elapsed_s=%.3f",
+                simulation.simulation_id,
+                runtime.info.model_id,
+                score.value,
+                monotonic() - pair_started,
+            )
             entries.append(
                 ToplineEntry(
                     simulation_id=simulation.simulation_id,
@@ -59,7 +118,13 @@ async def run_benchmark(
             )
 
     topline = BenchmarkTopline(entries=tuple(entries))
-    _write_topline(config.output_directory / "topline.json", topline)
+    _write_topline(attempt_directory / "topline.json", topline)
+    logger.info(
+        "matrix.end successes=%d failures=%d elapsed_s=%.3f",
+        len(entries),
+        len(failures),
+        monotonic() - started,
+    )
     if failures:
         raise BenchmarkRunFailure(tuple(failures))
     return topline

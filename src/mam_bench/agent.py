@@ -1,20 +1,44 @@
-"""Trial-local PydanticAI sessions with private notebooks and compaction.
+"""Persistent private model sessions, bounded turns, and rolling admission."""
 
-One reusable Agent serves isolated histories and notebooks. A failed trial
-cannot resume; the simulation records its failure and discards this runtime.
-"""
-
+import asyncio
 import hashlib
-import time
+import logging
+import re
 from collections.abc import Awaitable, Callable, Iterable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import cast
+from pathlib import Path
+from time import monotonic
 
 from anyio import Lock
-from pydantic_ai import Agent, AgentRunResult, ModelMessage, RunUsage, UsageLimits, UserContent
-from pydantic_ai.capabilities import AgentCapability
-from pydantic_ai.models import KnownModelName, Model
+from openai import APIConnectionError, APIError, APITimeoutError
+from pydantic_ai import (
+    Agent,
+    ModelMessage,
+    RunContext,
+    RunUsage,
+    UsageLimits,
+    UserContent,
+    capture_run_messages,
+)
+from pydantic_ai.capabilities import AbstractCapability, AgentCapability
+from pydantic_ai.capabilities.abstract import (
+    ValidatedToolArgs,
+    WrapModelRequestHandler,
+    WrapToolExecuteHandler,
+)
+from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior, UsageLimitExceeded
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    RetryPromptPart,
+    ToolCallPart,
+    ToolReturnPart,
+)
+from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.settings import ModelSettings
+from pydantic_ai.tools import ToolDefinition
+from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai_harness import (
     FallbackCompaction,
     Memory,
@@ -22,35 +46,128 @@ from pydantic_ai_harness import (
     SummarizingCompaction,
     TieredCompaction,
 )
-from pydantic_ai_harness.memory import InMemoryStore, MemoryToolset
+from pydantic_ai_harness.memory import (
+    InMemoryStore,
+    MemoryConflictError,
+    MemoryOperationConflictError,
+    MemoryToolset,
+)
+from pydantic_ai_harness.step_persistence import StepPersistence
 
-from mam_bench.benchmark import AgentSettings
-from mam_bench.communication import CompletedWork, SharedCommunication, run_rolling
-from mam_bench.evidence import EvidenceRecorder, RequestTracker, SummaryTracker, TrackedSummaryModel
-from mam_bench.usage import AgentSessionUsage, session_usage_data
+from mam_bench.artifacts import AgentMessageArchive
+from mam_bench.benchmark import AgentInfrastructureFailure
+from mam_bench.communication import MessageBoard, MessagePage
+from mam_bench.config import AgentSettings
+from mam_bench.diagnostics import failure_trace
+
+logger = logging.getLogger(__name__)
+
+
+class _RequestLogging[DepsT](AbstractCapability[DepsT]):
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+
+    async def wrap_model_request(
+        self,
+        ctx: RunContext[DepsT],
+        *,
+        request_context: ModelRequestContext,
+        handler: WrapModelRequestHandler,
+    ) -> ModelResponse:
+        started = monotonic()
+        logger.debug(
+            "request.start session=%s request=%d messages=%d",
+            self.session_id,
+            ctx.usage.requests,
+            len(request_context.messages),
+        )
+        try:
+            response = await handler(request_context)
+        except BaseException as error:
+            logger.debug(
+                "request.failed session=%s elapsed_s=%.3f trace=%s",
+                self.session_id,
+                monotonic() - started,
+                failure_trace(error),
+            )
+            raise
+        logger.debug(
+            "request.end session=%s elapsed_s=%.3f input_tokens=%d output_tokens=%d "
+            "finish=%s tools=%s",
+            self.session_id,
+            monotonic() - started,
+            response.usage.input_tokens,
+            response.usage.output_tokens,
+            response.finish_reason,
+            [part.tool_name for part in response.parts if isinstance(part, ToolCallPart)],
+        )
+        return response
+
+    async def wrap_tool_execute(
+        self,
+        ctx: RunContext[DepsT],
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: ValidatedToolArgs,
+        handler: WrapToolExecuteHandler,
+    ) -> object:
+        started = monotonic()
+        logger.debug("tool.start session=%s tool=%s", self.session_id, call.tool_name)
+        try:
+            result = await handler(args)
+        except BaseException as error:
+            logger.debug(
+                "tool.failed session=%s tool=%s exception=%s elapsed_s=%.3f",
+                self.session_id,
+                call.tool_name,
+                type(error).__name__,
+                monotonic() - started,
+            )
+            raise
+        logger.debug(
+            "tool.end session=%s tool=%s elapsed_s=%.3f",
+            self.session_id,
+            call.tool_name,
+            monotonic() - started,
+        )
+        return result
+
+
+class _Compaction[DepsT](FallbackCompaction[DepsT]):
+    """Keep compaction failures distinct from recoverable actor tool retries."""
+
+    async def compact(
+        self, messages: list[ModelMessage], ctx: RunContext[DepsT]
+    ) -> list[ModelMessage]:
+        started = monotonic()
+        logger.debug("compaction.start messages=%d", len(messages))
+        try:
+            result = await super().compact(messages, ctx)
+        except Exception as error:
+            logger.error("compaction.failed trace=%s", failure_trace(error))
+            raise AgentInfrastructureFailure("compaction", "compaction failed") from error
+        logger.debug(
+            "compaction.end messages=%d elapsed_s=%.3f", len(result), monotonic() - started
+        )
+        return result
 
 
 @dataclass
 class _SessionState:
     history: list[ModelMessage] = field(default_factory=lambda: list[ModelMessage]())
     usage: RunUsage = field(default_factory=RunUsage)
-    model_requests: int = 0
-    cost_complete: bool = True
 
 
-class AgentSessionRuntime[AgentDepsT, OutputDataT, SharedPayloadT = object]:
-    """Run one reusable PydanticAI agent through isolated persistent sessions.
-
-    Construct one runtime per benchmark trial. Each opaque session ID gets a
-    normalized PydanticAI history and a private namespace in the runtime's
-    fresh in-memory Harness store.
-    """
+class AgentSessionRuntime[AgentDepsT, OutputDataT]:
+    """Share one model and message board across isolated histories and notebooks."""
 
     def __init__(
         self,
         agent: Agent[AgentDepsT, OutputDataT],
         *,
         settings: AgentSettings | None = None,
+        artifact_directory: Path | None = None,
     ) -> None:
         self._agent = agent
         self._settings = settings or AgentSettings()
@@ -59,68 +176,46 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT, SharedPayloadT = object]:
         self._locks: dict[str, Lock] = {}
         self._failure: BaseException | None = None
         self._usage = RunUsage()
-        self._model_requests = 0
-        self._cost_complete = True
-        self._communication = SharedCommunication[SharedPayloadT]()
-        self._evidence = EvidenceRecorder()
+        self._archive = None
+        if artifact_directory is not None:
+            artifact_directory.mkdir(parents=True, exist_ok=True)
+            self._archive = AgentMessageArchive(
+                artifact_directory / "agent-messages", media_store=None
+            )
+        self.board = MessageBoard(
+            archive_path=artifact_directory / "message-board.jsonl" if artifact_directory else None
+        )
 
     @property
     def settings(self) -> AgentSettings:
-        """Return the immutable protocol settings."""
         return self._settings
 
     @property
-    def communication(self) -> SharedCommunication[SharedPayloadT]:
-        """Return this trial's opaque shared communication component."""
-        return self._communication
-
-    @property
-    def evidence(self) -> EvidenceRecorder:
-        """Return this trial's normalized event recorder."""
-        return self._evidence
-
-    @property
-    def usage(self) -> AgentSessionUsage:
-        """Return usage aggregated across every session in this trial."""
-        return AgentSessionUsage(
-            self._usage,
-            model_requests=self._model_requests,
-            cost_complete=self._cost_complete,
-        )
-
-    def session_usage(self, session_id: str) -> AgentSessionUsage:
-        """Return usage for one opaque session identity."""
-        state = self._state(session_id)
-        return AgentSessionUsage(
-            state.usage,
-            model_requests=state.model_requests,
-            cost_complete=state.cost_complete,
-        )
+    def usage(self) -> RunUsage:
+        """Return a snapshot of native usage across all sessions."""
+        return deepcopy(self._usage)
 
     def history(self, session_id: str) -> tuple[ModelMessage, ...]:
-        """Return the session's normalized PydanticAI message history."""
         return tuple(self._state(session_id).history)
 
     def notebook_tools(self, session_id: str) -> MemoryToolset[AgentDepsT]:
-        """Return Harness editing tools for one private trial notebook."""
         self._check_active()
         return MemoryToolset(self._memory(session_id))
 
-    async def record_final_notebooks(self) -> None:
-        """Append one final logical notebook snapshot for every used session."""
-        self._check_active()
-        for session_id in sorted(self._states):
-            prefix = f"{self._namespace(session_id)}/agent/"
-            files = {
-                path.removeprefix(prefix): content
-                for path, content in self._store.files.items()
-                if path.startswith(prefix)
-            }
-            await self._evidence.record(
-                "notebook_snapshot",
-                session_id=session_id,
-                files=files,
-            )
+    def _board_tools(self, session_id: str) -> FunctionToolset[AgentDepsT]:
+        tools: FunctionToolset[AgentDepsT] = FunctionToolset()
+
+        async def read_messages() -> MessagePage:
+            """Read the next page of unread shared messages and simulation announcements."""
+            return await self.board.read(session_id)
+
+        async def post_message(text: str) -> int:
+            """Post up to 4000 characters to the shared message board."""
+            return await self.board.post(session_id, text)
+
+        tools.add_function(read_messages, takes_ctx=False)
+        tools.add_function(post_message, takes_ctx=False)
+        return tools
 
     async def run(
         self,
@@ -131,82 +226,157 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT, SharedPayloadT = object]:
         model_settings: ModelSettings | None = None,
         usage_limits: UsageLimits | None = None,
         capabilities: Sequence[AgentCapability[AgentDepsT]] = (),
-    ) -> AgentRunResult[OutputDataT]:
-        """Run one turn and retain successful history, notebook, and usage.
+    ) -> OutputDataT | None:
+        """Run a bounded turn; native limit/retry stops preserve the session.
 
-        Calls for the same session serialize so concurrent callers cannot fork
-        one history. Any escaping failure ends this trial runtime. Its notebook
-        state is discarded with the failed pair; retries need a fresh runtime.
+        None means no terminal output was accepted. The simulation decides its
+        fallback action. Infrastructure failures poison the whole trial runtime.
         """
+        if not self._settings.use_sampling_seed and model_settings is not None:
+            model_settings = model_settings.copy()
+            model_settings.pop("seed", None)
         state = self._state(session_id)
-        lock = self._locks.setdefault(session_id, Lock())
-        async with lock:
+        async with self._locks.setdefault(session_id, Lock()):
             self._check_active()
-            turn_started = time.perf_counter()
-            await self._evidence.record("session_turn_started", session_id=session_id)
-            model_tracker: RequestTracker[AgentDepsT] = RequestTracker(
-                self._evidence,
+            usage = RunUsage()
+            started = monotonic()
+            outcome = "completed"
+            deadline = asyncio.timeout(self._settings.timeout_seconds)
+            logger.debug(
+                "turn.start session=%s timeout_s=%s history_messages=%d",
                 session_id,
+                self._settings.timeout_seconds,
+                len(state.history),
             )
-            summary_tracker = SummaryTracker()
-            run_capabilities: tuple[AgentCapability[AgentDepsT], ...] = (
-                self._compaction(summary_tracker, session_id),
-                self._memory(session_id),
-                *capabilities,
-                model_tracker,
-            )
-            try:
-                result = await self._agent.run(
-                    user_prompt,
-                    message_history=state.history,
-                    deps=deps,
-                    model_settings=model_settings,
-                    usage_limits=usage_limits,
-                    capabilities=run_capabilities,
-                )
-                run_usage = result.usage
-                summary_requests = run_usage.requests - model_tracker.requests
-                if summary_requests != summary_tracker.requests:
-                    raise RuntimeError("session usage could not distinguish summary requests")
-
-                state.history = result.all_messages()
-                state.usage.incr(run_usage)
-                state.model_requests += model_tracker.requests
-                if not model_tracker.cost_complete or not summary_tracker.cost_complete:
-                    state.cost_complete = False
-                    self._cost_complete = False
-                self._usage.incr(run_usage)
-                self._model_requests += model_tracker.requests
-                await self._evidence.record(
-                    "session_turn_completed",
-                    session_id=session_id,
-                    latency_seconds=time.perf_counter() - turn_started,
-                    usage=session_usage_data(
-                        AgentSessionUsage(
-                            run_usage,
-                            model_requests=model_tracker.requests,
-                            cost_complete=model_tracker.cost_complete
-                            and summary_tracker.cost_complete,
+            with capture_run_messages() as messages:
+                try:
+                    async with deadline:
+                        result = await self._agent.run(
+                            user_prompt,
+                            conversation_id=session_id,
+                            message_history=state.history,
+                            deps=deps,
+                            model_settings=model_settings,
+                            usage=usage,
+                            usage_limits=usage_limits
+                            or UsageLimits(request_limit=25, tool_calls_limit=25),
+                            capabilities=(
+                                *(
+                                    (StepPersistence(store=self._archive, agent_name=session_id),)
+                                    if self._archive is not None
+                                    else ()
+                                ),
+                                _RequestLogging[AgentDepsT](session_id),
+                                self._compaction(),
+                                self._memory(session_id),
+                                *capabilities,
+                            ),
+                            toolsets=[self._board_tools(session_id)],
                         )
-                    ),
-                )
-                return result
-            except BaseException as error:
-                if self._failure is None:
+                except UsageLimitExceeded:
+                    outcome = "usage_limit"
+                    logger.info("turn.stop session=%s reason=usage_limit", session_id)
+                    output = None
+                except UnexpectedModelBehavior as error:
+                    # PydanticAI exposes no dedicated retry-exhaustion subtype.
+                    # Match only its native retry messages; other model failures abort.
+                    if not re.fullmatch(
+                        r"Exceeded maximum output retries \(\d+\)|"
+                        r"Tool .+ exceeded max retries count of \d+\..*",
+                        str(error),
+                    ):
+                        self._failure = AgentInfrastructureFailure(
+                            "provider", "model returned an unusable response"
+                        )
+                        raise self._failure from None
+                    outcome = "retry_exhaustion"
+                    logger.info("turn.stop session=%s reason=retry_exhaustion", session_id)
+                    output = None
+                except (APITimeoutError, TimeoutError) as error:
+                    scope = (
+                        "turn_deadline"
+                        if deadline.expired()
+                        else (
+                            "http_request"
+                            if isinstance(error, APITimeoutError)
+                            else "internal_operation"
+                        )
+                    )
+                    logger.error(
+                        "turn.timeout session=%s scope=%s timeout_s=%s elapsed_s=%.3f",
+                        session_id,
+                        scope,
+                        self._settings.timeout_seconds,
+                        monotonic() - started,
+                    )
+                    self._failure = AgentInfrastructureFailure("timeout", f"{scope} timed out")
+                    raise self._failure from error
+                except APIConnectionError as error:
+                    self._failure = AgentInfrastructureFailure("network", "model connection failed")
+                    raise self._failure from error
+                except (APIError, ModelAPIError) as error:
+                    self._failure = AgentInfrastructureFailure("provider", "model request failed")
+                    raise self._failure from error
+                except (MemoryConflictError, MemoryOperationConflictError, OSError) as error:
+                    self._failure = AgentInfrastructureFailure("memory_store", "notebook failed")
+                    raise self._failure from error
+                except BaseException as error:
                     self._failure = error
-                raise
+                    raise
+                else:
+                    output = result.output
+                finally:
+                    if self._failure is not None:
+                        outcome = "failed"
+                        logger.error(
+                            "turn.failed session=%s trace=%s",
+                            session_id,
+                            failure_trace(self._failure),
+                        )
+                    logger.debug(
+                        "turn.end session=%s outcome=%s elapsed_s=%.3f requests=%d tools=%d "
+                        "input_tokens=%d output_tokens=%d",
+                        session_id,
+                        outcome,
+                        monotonic() - started,
+                        usage.requests,
+                        usage.tool_calls,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                    )
+                if output is None:
+                    self._close_stopped_turn(messages)
+                state.history = list(messages)
+                state.usage.incr(usage)
+                self._usage.incr(usage)
+                return output
 
-    async def run_rolling[ItemT, ResultT](
-        self,
-        items: Iterable[ItemT],
-        worker: Callable[[ItemT], Awaitable[ResultT]],
-    ) -> tuple[CompletedWork[ItemT, ResultT], ...]:
-        """Run queued work up to configured concurrency and return completion order."""
-        return await run_rolling(
-            items,
-            worker,
-            concurrency=self._settings.concurrency,
-        )
+    @staticmethod
+    def _close_stopped_turn(messages: list[ModelMessage]) -> None:
+        """Pair pending calls before submitting this history in the next round."""
+        answered: set[str] = set()
+        for message in reversed(messages):
+            if isinstance(message, ModelRequest):
+                answered.update(
+                    part.tool_call_id
+                    for part in message.parts
+                    if isinstance(part, (ToolReturnPart, RetryPromptPart))
+                )
+            else:
+                missing = [
+                    ToolReturnPart(
+                        tool_name=part.tool_name,
+                        tool_call_id=part.tool_call_id,
+                        content=(
+                            "Turn ended at its usage or retry limit; no tool result was returned."
+                        ),
+                    )
+                    for part in message.parts
+                    if isinstance(part, ToolCallPart) and part.tool_call_id not in answered
+                ]
+                if missing:
+                    messages.append(ModelRequest(parts=missing))
+                break
 
     def _state(self, session_id: str) -> _SessionState:
         if not session_id:
@@ -217,36 +387,25 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT, SharedPayloadT = object]:
         if self._failure is not None:
             raise self._failure
 
-    def _namespace(self, session_id: str) -> str:
-        if not session_id:
-            raise ValueError("session_id must not be empty")
-        return f"session-{hashlib.sha256(session_id.encode()).hexdigest()}"
-
     def _memory(self, session_id: str) -> Memory[AgentDepsT]:
+        self._state(session_id)
         return Memory(
             store=self._store,
-            namespace=self._namespace(session_id),
+            namespace=f"session-{hashlib.sha256(session_id.encode()).hexdigest()}",
             agent_name="agent",
             max_tokens=self._settings.memory_injection_tokens,
             injection_errors="raise",
         )
 
-    def _compaction(
-        self,
-        tracker: SummaryTracker,
-        session_id: str,
-    ) -> TieredCompaction[AgentDepsT]:
+    def _compaction(self) -> TieredCompaction[AgentDepsT]:
         settings = self._settings
         model = self._agent.model
         if model is None:
-            raise RuntimeError("the Agent Session Runtime requires an Agent with a model")
+            raise AgentInfrastructureFailure(
+                "compaction", "Session runtime requires an Agent with a model"
+            )
         summarizer: SummarizingCompaction[AgentDepsT] = SummarizingCompaction(
-            model=TrackedSummaryModel(
-                cast("Model | KnownModelName", model),
-                tracker,
-                self._evidence,
-                session_id,
-            ),
+            model=model,
             max_tokens=1,
             keep_tokens=settings.compaction_tail_tokens,
             incremental=True,
@@ -254,15 +413,84 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT, SharedPayloadT = object]:
             receipts=True,
             model_settings={"max_tokens": settings.summary_completion_tokens},
         )
-        sliding_window: SlidingWindowCompaction[AgentDepsT] = SlidingWindowCompaction(
+        sliding: SlidingWindowCompaction[AgentDepsT] = SlidingWindowCompaction(
             max_tokens=1,
             keep_tokens=settings.compaction_tail_tokens,
             preserve_first_user_message=False,
             receipts=True,
         )
-        fallback: FallbackCompaction[AgentDepsT] = FallbackCompaction([summarizer, sliding_window])
+        fallback = _Compaction[AgentDepsT]([summarizer, sliding])
         return TieredCompaction(
             tiers=[fallback],
             target_fraction=settings.compaction_trigger_fraction,
             context_window=settings.context_window_tokens,
         )
+
+
+@dataclass(frozen=True)
+class CompletedWork[ItemT, ResultT]:
+    """One rolling-scheduler result in authoritative completion order."""
+
+    item: ItemT
+    result: ResultT
+    admission_sequence: int
+    completion_sequence: int
+
+
+async def run_rolling[ItemT, ResultT](
+    items: Iterable[ItemT],
+    worker: Callable[[ItemT], Awaitable[ResultT]],
+    *,
+    concurrency: int,
+) -> tuple[CompletedWork[ItemT, ResultT], ...]:
+    """Run queued work up to one concurrency limit in completion order."""
+    if concurrency < 1:
+        raise ValueError("concurrency must be positive")
+    iterator = iter(items)
+    active: set[asyncio.Task[CompletedWork[ItemT, ResultT]]] = set()
+    completed: list[CompletedWork[ItemT, ResultT]] = []
+    next_admission = 0
+    next_completion = 0
+
+    async def execute(item: ItemT, admission: int) -> CompletedWork[ItemT, ResultT]:
+        nonlocal next_completion
+        result = await worker(item)
+        completion = next_completion
+        next_completion += 1
+        return CompletedWork(
+            item=item,
+            result=result,
+            admission_sequence=admission,
+            completion_sequence=completion,
+        )
+
+    def admit_one() -> bool:
+        nonlocal next_admission
+        try:
+            item = next(iterator)
+        except StopIteration:
+            return False
+        active.add(asyncio.create_task(execute(item, next_admission)))
+        next_admission += 1
+        return True
+
+    try:
+        while len(active) < concurrency and admit_one():
+            pass
+        while active:
+            done, active = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+            try:
+                finished = [task.result() for task in done]
+            except BaseException:
+                active.update(done)
+                raise
+            finished.sort(key=lambda item: item.completion_sequence)
+            completed.extend(finished)
+            while len(active) < concurrency and admit_one():
+                pass
+    finally:
+        for task in active:
+            task.cancel()
+        if active:
+            await asyncio.gather(*active, return_exceptions=True)
+    return tuple(completed)

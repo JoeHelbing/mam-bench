@@ -1,134 +1,303 @@
 # MAM-Bench
 
 > [!WARNING]
-> **Work in progress:** MAM-Bench is an early research benchmark. Its interfaces,
+> **Work in progress:** MAM-Bench is an early research benchmark. Its
+interfaces,
 > evaluation profiles, datasets, and scoring may change before the first stable
 > release. Do not treat current results as a mature or standardized benchmark.
 
-MAM-Bench first characterizes one explicit Schelling segregation model, then tests whether separate model-controlled Influence Actors can steer its emergent outcome. Schelling Reference Dataset v2 expands the ordinary-agent landscape across three board sizes while preserving the first influence benchmark.
+MAM-Bench tests whether model-controlled agents can steer a Schelling
+simulation. Each evaluation first runs the ordinary population, then runs the
+model-controlled population from the same initial state and compares outcomes.
+Both complete trajectories are saved with the evaluation.
 
-Read [Benchmarking Self-Organized AI Swarms in Steering Complex Systems](https://joehelbing.net/post/mam-bench) for an illustrated overview of the current pilot.
+The fixed evaluation uses a 20x20 toroidal board, two equally sized groups,
+25% vacancies, tolerance `3/4`, and Seed 50. Sixteen of the 300 occupants become
+model-controlled agents for 30 rounds. Ordinary agents reserve nearest
+satisfactory vacancies; all accepted moves settle together.
 
-## Schelling Reference Dataset v2
-
-The frozen profile uses:
-
-- 20x20, 60x60, and 100x100 toroidal boards;
-- two equally sized groups;
-- a radius-1 Moore neighborhood;
-- exact fractional tolerance over occupied neighbors;
-- stationary satisfied agents;
-- sequential reservation of nearest satisfactory vacancies against a frozen state;
-- staged application of all reserved moves; and
-- equilibrium, blocked, or 30-transition termination.
-
-The landscape crosses all 23 behaviorally distinct radius-1 tolerance fractions with vacancy fractions `1/100`, `1/40`, `1/20`, `1/10`, `1/5`, `1/4`, `3/10`, `2/5`, and `1/2`. Each of the 621 cells receives 50 paired Landscape Seeds, producing 31,050 runs.
-
-This is a modernized profile, not a claim to reproduce Schelling's original checkerboard procedure exactly. See [`docs/schelling-reference-profile-v2.md`](docs/schelling-reference-profile-v2.md) for the complete scientific, randomness, and artifact contract. The v1 profile remains as historical documentation.
+The detailed protocol and implementation reading guide are kept locally under
+`docs/`, which is ignored by Git. This README describes the published interface.
+The [project overview](https://joehelbing.net/post/mam-bench) illustrates the
+pilot.
 
 ## Install
 
-The project uses Python 3.14, NumPy, Pydantic 2, PydanticAI, PydanticAI Harness, PyYAML, and uv. The checked-in mise configuration pins the development toolchain and provides common tasks:
+The project uses Python 3.14, NumPy, Pydantic 2, PydanticAI, PydanticAI Harness,
+PyYAML, and uv. The checked-in mise configuration pins the development toolchain
+and provides common tasks:
 
 ```bash
 mise install
 mise run setup
 ```
 
-If the toolchain is already available, `uv sync` is sufficient.
+If the toolchain is already available, `uv sync` installs the project and its
+development dependencies. Use `uv sync --no-dev` for a benchmark-only
+environment.
 
-Modal is used only as a cloud execution adapter. The engine itself runs and tests locally.
+The old reference dataset and sweep utilities are archived locally under
+`.scratch/schelling-reference-v2-packaged/` and
+`.scratch/schelling-reference-v2-tools/`. These ignored archives are historical
+material; ordinary evaluation computes its reference afresh and needs neither.
 
-Compact validated reference data ships under `src/mam_bench/data/schelling-reference-v2/`: a 621-cell aggregate landscape and the fixed Seed 50 evaluation fixture. The simulation loads the fixture with `importlib.resources`; it never downloads or reconstructs reference data implicitly. Full trajectories are developer-only material under ignored `.scratch` and are not included in clones or wheels.
+## Developer notebooks
 
-## Reconstruct the complete sweep on Modal
+Mise manages JupyterLab and nbdev in isolated tool environments. The project's
+`dev` dependency group contains `ipykernel`, which runs notebook code with the
+same Python interpreter and dependencies as the benchmark.
 
-This is an explicit developer workflow, not part of ordinary benchmark execution. Use it after an intentional Reference Profile mechanics change to reconstruct and revalidate the shipped Reference Dataset.
-
-The Modal CLI must already be authenticated. The adapter runs one CPU task per Landscape Cell and writes each returned artifact locally as it completes. Rerunning the command skips artifacts whose resumable receipts and SHA-256 hashes remain valid.
-
-```bash
-modal run src/mam_bench/simulations/schelling/utils/modal_reference_sweep.py \
-  --output-dir .scratch/schelling-reference-v2-full \
-  --receipt-path .scratch/schelling-reference-v2-receipt.json
+```fish
+mise run notebooks
 ```
 
-After all 621 full-trajectory artifacts arrive, validate them and publish only the compact products used by ordinary evaluation and landscape inspection:
+This installs the locked project dependencies, registers a kernel inside
+`.venv`, and opens JupyterLab on `127.0.0.1`. Select **MAM-Bench (Python 3.14)**
+as the notebook kernel. Kernel registration stays local to this checkout.
 
-```bash
-uv run src/mam_bench/simulations/schelling/utils/publish_reference_data.py
+The nbdev commands are available through mise, for example
+`mise exec -- nbdev-export --help`. This repository does not yet use nbdev to
+generate its Python modules. When testing notebooks that import project code,
+run nbdev in a temporary environment that also has access to the project:
+
+```fish
+uv run --frozen --with nbdev==3.3.15 nbdev-test path/to/notebook.ipynb
 ```
 
-## Artifact layout
+Unlike Jupyter, `nbdev-test` executes Python in its own process and does not use
+the selected notebook kernel. The `--with` option supplies nbdev for that
+command
+without adding it to the project's dependencies.
 
-```text
-src/mam_bench/data/schelling-reference-v2/
-|-- landscape.jsonl
-|-- evaluation-reference.json
-`-- evaluation-reference.npz
-```
+## Read the implementation
 
-`landscape.jsonl` contains one aggregate outcome record for each of the 621 Landscape Cells. The evaluation fixture contains only the fixed Seed 50 initial grid, stable locations and types, terminal Counterfactual Reference state, status, rounds, and comparison metrics. Its JSON metadata records the NPZ hash. The selected test set holds vacancy at 25% and uses preference regimes `1/2`, `3/4`, and `6/7`; the current benchmark uses `3/4`.
+- `config.py` validates selections and per-model settings.
+- `model.py` constructs providers using those settings.
+- Generic `agent.py` owns persistent sessions, private notebooks, compaction,
+  bounded turns, and rolling concurrency.
+- `communication.py` supplies the shared message board, unread cursors, and post archive.
+- `artifacts.py` adapts native agent persistence to the package error-content policy.
+- `simulations/schelling/simulation.py` owns both runs, reservations,
+  settlement,
+  metrics, scoring, and artifact writing.
+- `simulations/schelling/occupants.py` defines `Agent`, `OrdinaryAgent`, and
+  `ModelControlledAgent`, including observations and move/stay tools.
+- Schelling `reference.py`, `profile.py`, and `models.py` hold numerical
+  helpers,
+  scientific parameters, and data records.
 
-The complete 31-state trajectories and their artifact inventory remain under `.scratch/schelling-reference-v2-full/` for local scientific analysis. Because `.scratch` is ignored, preserve them separately if they need to outlive the working copy.
-
-## Read the Schelling implementation
-
-The runtime path is easiest to read in this order:
-
-1. `benchmark.py` constructs the selected model and its shared request settings.
-2. `simulation.py` selects the fixed case and packaged reference.
-3. `runtime.py` runs rounds, applies moves, scores outcomes, and writes evidence.
-4. `agent.py` under `simulations/schelling/` defines the Schelling tools,
-   terminal outputs, and turn policy.
-5. `prompt.py` contains the Influence Actor instructions.
-6. `models.py` defines the shared Schelling runtime data contracts.
-7. `reference.py` contains the ordinary-agent Schelling mechanics.
-8. `profile.py` fixes the parameter grid and deterministic seed contract.
-
-The supporting modules at the package root have separate responsibilities:
-`agent.py` owns persistent sessions, private Harness notebooks, and compaction;
-`communication.py` owns ordered shared records and rolling admission;
-`evidence.py` records normalized messages and events; and `usage.py` aggregates
-native PydanticAI usage before serializing the benchmark's evidence fields.
-
-`fixture.py` loads the compact comparator used at runtime. Everything involved in regenerating or analyzing reference data lives under `utils/`; see `utils/README.md`.
+The local `docs/plans/codebase-cleanup.md` records ownership decisions and
+retired code.
 
 ## Run a benchmark matrix from YAML
 
-The ordinary workflow reads a selection-only YAML file, attempts every selected
+The ordinary workflow reads a YAML file, attempts every selected
 simulation-model pairing, and writes `topline.json` after all pairings finish.
 It prints scores when the full matrix succeeds; after a partial failure it
 prints the aggregate failure while the successful scores remain in the topline:
 
 ```bash
-uv run main.py examples/schelling-pilot.yaml
+uv run --no-dev main.py examples/schelling-qwen9b-venice.yaml
 ```
 
 `main.py` accepts exactly one `.yaml` path. The YAML contract selects built-in
-Benchmark Simulations and Model Runtimes. It cannot change mechanics, objectives,
-prompts, tools, datasets, rounds, or scoring. The configured output directory
-must not already exist; MAM-Bench never overwrites an earlier run.
+Benchmark Simulations, Model Runtimes, and per-model settings. It cannot change mechanics,
+objectives,
+prompts, tools, datasets, rounds, or scoring. `output_directory` is a reusable
+results root. Relative output paths resolve from the working directory where
+`main.py` is invoked, not from the YAML file's directory. Absolute output paths
+remain absolute. For example, running from the repository root with
+`output_directory: results/schelling-muse-spark` saves beneath that repository's
+`results/`, without a `../` prefix. All example YAML files list the current
+per-model settings explicitly.
+
+Every invocation creates a unique timestamp-and-random-suffix
+child
+directory and runs the full selected matrix from scratch. MAM-Bench never
+overwrites an earlier attempt, resumes failed trials, or reuses earlier scores.
+Attempt IDs do not change the benchmark's prescribed seeds.
+
+The CLI prints the allocated directory to stderr before simulations start, so
+it remains discoverable even if execution fails. Scores remain on stdout.
+Each attempt keeps its own `topline.json` and evaluation artifacts:
+
+```text
+<output_directory>/<UTC-timestamp>-<random-suffix>/
+  topline.json
+  runs/<simulation_id>/<model_id>/...
+```
+
+Existing files directly under the results root are left untouched. Consumers
+that previously read `<output_directory>/topline.json` must instead read the
+`topline.json` within the reported attempt directory.
+
 Copy `.env.example` to `.env` and set `OPENROUTER_API_KEY` before running the
 OpenRouter example. `OPENROUTER_BASE_URL` defaults to the standard endpoint and
 can be overridden from the environment or `.env`. The ignored `.env` file must
-never be committed. OpenAI-compatible YAML selections name their required API-key
+never be committed. OpenAI-compatible YAML selections name their required
+API-key
 environment variable directly; benchmark YAML never contains credentials.
 
-Schelling Influence v2 uses the same 20x20 parameter cell with held-out Seed 50
-from the Reference Dataset v2 randomness contract. Each selected model receives
-one stochastic 30-round trial that retains 31 states. A successful pair writes
-`run.json`, `trajectory.npz`, and canonical `events.jsonl`; a failed pair writes
-`failure.json` and redacted `failed-events.jsonl` and remains unscored.
+Config loading stays offline. Provider requests begin during evaluation; loading
+YAML does not verify credentials or model capabilities.
 
-Independent pairs continue after a failure. `topline.json` contains successful
-pairs only, and the command exits nonzero after the matrix if any pair failed.
-A failed pair cancels and awaits its remaining actors, retains failure evidence,
-and discards its runtime. It cannot resume; rerunning starts a fresh trial in a
-new output directory. A partial topline therefore does not mean the complete
-matrix passed. One trial is one sample, not a reliability estimate or confidence
-interval. See the Influence Profile for the complete protocol, scoring, and
-evidence contract.
+Each model entry accepts an optional `settings` mapping. Omitted fields retain
+the defaults below; settings are independent between models and shared across
+the simulations selected for that model. Unknown fields and invalid ranges fail
+configuration loading. Both OpenRouter and OpenAI-compatible entries use the
+same settings contract.
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `temperature` | `1.0` | Sampling temperature for actor and summary requests. |
+| `top_p` | `0.95` | Nucleus sampling for actor and summary requests. |
+| `top_k` | `20` | Top-k sampling, passed in the provider request body. |
+| `reasoning_effort` | `medium` | Provider reasoning effort; none, minimal, low, medium, high, or xhigh. |
+| `max_completion_tokens` | `32768` | Actor response token ceiling, distinct from the 25-call limit. |
+| `concurrency` | `4` | Maximum simultaneous agent turns in a Schelling round. |
+| `use_sampling_seed` | `true` | Send advisory model sampling seeds supplied by simulations; disable for endpoints without seed support. |
+| `tool_choice` | `required` | Tool selection for simulation turns: `required` or `auto`. |
+| `timeout_seconds` | `3600` | HTTP request timeout and whole active turn deadline, including compaction. |
+| `context_window_tokens` | `260000` | Context size used by generic history compaction. |
+| `compaction_trigger_fraction` | `0.7` | Fraction of that context size at which compaction triggers. |
+| `compaction_tail_tokens` | `40000` | Verbatim history tail retained by compaction and its fallback. |
+| `summary_completion_tokens` | `16000` | Completion ceiling for summary requests. |
+| `memory_injection_tokens` | `4000` | Budget for injecting the private `MEMORY.md` notebook. |
+
+The history tail must be smaller than the compaction threshold. Set context and
+completion budgets to values the chosen endpoint supports; these are explicit
+operator settings, not automatically discovered provider limits. Summary calls
+use the same model and sampling settings, with their own completion ceiling.
+
+For endpoints that cannot force tool calls, set this on their model entry:
+
+```yaml
+settings:
+  tool_choice: auto
+```
+
+`required` asks the provider to return a tool call. `auto` lets the provider
+return text, but text does not complete a Schelling turn: native validation asks
+for a tool call again. Exhausted retries or the request limit still end the
+turn as stay. Move/stay output tools remain available in both modes. History
+summaries remain text responses and do not force tool use. The chosen setting
+is recorded in `runtime.agent_settings`. Endpoints such as Trinity and Muse Spark require `auto`; omitted settings
+default to `required`.
+
+`SchellingSim` passes the resolved settings into its generic sessions and uses
+`concurrency` for rolling admission. Higher concurrency can change reservation
+order and therefore outcomes. The ordinary reference uses no model settings.
+Successful evaluations save all resolved defaults and overrides in
+`result.json` under `runtime.agent_settings`; compare those settings alongside
+scores. The 25-request/25-successful-tool-call limits, native retries, prompts,
+and scientific simulation parameters remain prescribed by the protocol.
+
+For Qwen 3.5 9B on Venice at concurrency 16 with DEBUG logging, use the
+[example config](examples/schelling-qwen9b-venice.yaml):
+
+```fish
+uv run --no-sync main.py examples/schelling-qwen9b-venice.yaml 2>run.log
+```
+
+Schelling Influence v3 preserves the YAML selection
+`schelling-influence-pilot-v1`. Each selected model receives a fresh ordinary
+run
+and one stochastic 30-round controlled trial. Each successful pair writes:
+
+- `ordinary.npz`: initialization and every settled ordinary state;
+- `model-controlled.npz`: initialization and all 30 controlled states; and
+- `result.json`: parameters, provenance, identity mask, termination, and scores;
+- `agent-messages/`: native PydanticAI Harness agent history archives; and
+- `message-board.jsonl`: every shared post and simulation announcement in order.
+
+Independent pairs continue after an infrastructure failure. The failed pair
+remains unscored, its runtime is discarded, and any partially written artifacts
+are incomplete. `topline.json` contains successful pairs only; the command exits
+nonzero after the matrix if any pair failed. A fresh invocation creates a new
+attempt directory. One trial is one sample, not a reliability estimate.
+
+## Conversation artifacts
+
+Every benchmark evaluation enables PydanticAI Harness `StepPersistence` backed
+by `FileStepStore`. The generic session runtime owns persistence; Schelling only
+supplies the evaluation directory. Library callers can opt in with
+`AgentSessionRuntime(..., artifact_directory=path)`.
+
+```text
+runs/<simulation_id>/<model_id>/
+  agent-messages/<native-run-id>/
+    run.json
+    events.jsonl
+    tool_effects.jsonl
+    snapshots/<sequence>.json
+  message-board.jsonl
+  ordinary.npz
+  model-controlled.npz
+  result.json
+```
+
+Each agent turn has a native run ID; `conversation_id` and `agent_name` identify
+the agent across turns. Snapshots use PydanticAI's native message serialization,
+including prompts, model reasoning when returned, tool calls, and tool results.
+All snapshots are retained, so earlier raw messages remain available after
+compaction. Snapshots overlap: read earlier snapshots for pre-compaction history,
+rather than concatenating them or assuming the latest contains everything.
+Large text remains inline in the JSON files.
+
+Use the native reader to inspect one agent:
+
+```python
+from pydantic_ai_harness.step_persistence import FileStepStore
+
+store = FileStepStore(evaluation_directory / "agent-messages", media_store=None)
+runs = await store.list_runs(conversation_id="0")
+for run in runs:
+    snapshots = await store.list_snapshots(run_id=run.run_id, include_interrupted=True)
+    # Each snapshot.messages is a list of native PydanticAI ModelMessage objects.
+```
+
+Message-board JSONL rows contain `sequence`, `author_id`, `text`, and
+`announcement`. Posts are written under the same lock that assigns their order.
+Agent archives are saved at native step boundaries, including failure snapshots;
+board posts are appended as accepted. These files remain available when an
+infrastructure failure leaves the pair unscored. A failure before the first
+model response has native events but no conversation snapshot. Abrupt process
+termination can leave only the last persisted boundary. The summarizer's own
+internal conversation and standalone notebook files are not separate artifacts;
+notebook tool interactions and compaction summaries appear in actor histories.
+
+Raw conversation content is deliberately saved here, while DEBUG logs stay
+payload-free. Native failure events omit exception bodies, which can contain
+credentials. Archives do not enable automatic simulation resume, and archived
+conversations cannot be reconstructed retroactively for older runs.
+
+## Logging and timeouts
+
+The top-level YAML `log_level` defaults to `INFO`. `MAM_BENCH_LOG_LEVEL`
+overrides it when set. The CLI logs INFO progress to stderr: matrix/pair
+boundaries, ordinary reference completion, each round and actor turn, saved
+artifacts, and failures. Scores
+remain on stdout. Enable DEBUG for model-request and tool timings, native token
+counts, response finish reasons, and compaction activity:
+
+```fish
+env MAM_BENCH_LOG_LEVEL=DEBUG uv run --no-sync main.py \
+  examples/schelling-qwen9b-venice.yaml 2>run.log
+```
+
+Library callers can configure the standard `mam_bench` logger themselves.
+Neither level logs prompts, responses, tool arguments/results, notebooks,
+credentials, or provider exception bodies. Failures retain exception types and
+stack locations without local variables. Actor logs identify round and identity;
+session logs distinguish `turn_deadline`, `http_request`, and internal timeouts.
+
+There is no whole-evaluation, whole-matrix, or round deadline. Each active agent
+turn has a configurable wall-clock deadline (`timeout_seconds`, default 3,600),
+covering its requests, tool work, and compaction. The same setting supplies the
+model HTTP timeout. Turn/request
+timeouts abort the pair unscored. The separate 25-model-request and
+25-successful-function-call limits end an unfinished turn as stay. These limits
+reset per turn; they do not bound the duration of a complete evaluation.
 
 ## Verify the implementation
 
@@ -142,16 +311,11 @@ provider calls.
 
 ## Documentation
 
-- [`CONTEXT.md`](CONTEXT.md): canonical project language.
-- [`docs/schelling-reference-profile-v2.md`](docs/schelling-reference-profile-v2.md): current reference scientific and data contract.
-- [`docs/schelling-influence-profile-v2.md`](docs/schelling-influence-profile-v2.md): current Influence Actor evaluation contract.
-- [`docs/schelling-reference-profile-v1.md`](docs/schelling-reference-profile-v1.md): historical reference contract.
-- [`docs/adr/0001-use-a-modernized-schelling-reference-profile.md`](docs/adr/0001-use-a-modernized-schelling-reference-profile.md)
-- [`docs/adr/0002-map-behaviorally-distinct-tolerance-vacancy-cells.md`](docs/adr/0002-map-behaviorally-distinct-tolerance-vacancy-cells.md)
-- [`docs/adr/0003-generate-the-reference-landscape-on-modal.md`](docs/adr/0003-generate-the-reference-landscape-on-modal.md)
-- [`docs/adr/0004-select-three-final-satisfaction-test-spots.md`](docs/adr/0004-select-three-final-satisfaction-test-spots.md)
-- [`docs/adr/0005-use-globally-informed-influence-actors.md`](docs/adr/0005-use-globally-informed-influence-actors.md)
+[`CONTEXT.md`](CONTEXT.md) defines the canonical project language. Detailed design
+notes, protocols, and historical decisions under `docs/` are local-only and are
+not included in the Git repository.
 
 ## Method source
 
-Thomas C. Schelling, "Dynamic Models of Segregation," *Journal of Mathematical Sociology* 1 (1971), 143-186.
+Thomas C. Schelling, "Dynamic Models of Segregation," *Journal of Mathematical
+Sociology* 1 (1971), 143-186.

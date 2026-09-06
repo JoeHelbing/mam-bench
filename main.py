@@ -8,6 +8,7 @@ from pathlib import Path
 
 from mam_bench.benchmark import BenchmarkRunFailure, BenchmarkTopline
 from mam_bench.config import load_benchmark_config
+from mam_bench.diagnostics import configure_logging
 from mam_bench.runner import run_benchmark
 
 
@@ -21,19 +22,19 @@ def format_topline(topline: BenchmarkTopline) -> str:
     )
 
 
-def yaml_path(value: str) -> Path:
-    path = Path(value)
-    if path.suffix.lower() != ".yaml":
-        raise argparse.ArgumentTypeError("benchmark configuration must be a .yaml file")
-    return path
+def report_output_directory(path: Path) -> None:
+    """Report the attempt location before execution, including failed attempts."""
+
+    print(f"Output directory: {path}", file=sys.stderr, flush=True)
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("config", type=yaml_path)
+    parser.add_argument("config", type=Path)
     config = load_benchmark_config(parser.parse_args(arguments).config)
+    configure_logging(config.log_level)
     try:
-        topline = asyncio.run(run_benchmark(config))
+        topline = asyncio.run(run_benchmark(config, on_output_directory=report_output_directory))
     except BenchmarkRunFailure as error:
         print(error, file=sys.stderr)
         return 1

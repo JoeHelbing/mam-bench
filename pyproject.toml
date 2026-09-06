@@ -1,7 +1,7 @@
 [project]
 name = "mam-bench"
 version = "0.1.0"
-description = "Run reproducible multi-agent model benchmarks with validated evidence"
+description = "Evaluate model-controlled agents in multi-agent simulations"
 requires-python = ">=3.14"
 dependencies = [
     "numpy>=2.5.2",
@@ -31,3 +31,8 @@ select = ["E", "F", "I", "UP", "B", "SIM", "ANN"]
 include = ["src", "tests", "main.py"]
 pythonVersion = "3.14"
 typeCheckingMode = "strict"
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+]

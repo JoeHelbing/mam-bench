@@ -8,10 +8,21 @@ python = "3.14.7"
 uv = "0.12.7"
 ruff = "0.16.5"
 "npm:pyright" = "1.1.413"
+"pipx:jupyterlab" = "4.6.3"
+"pipx:nbdev" = "3.3.15"
 
 [tasks.setup]
 description = "Install the locked Python dependencies"
 run = "uv sync --frozen"
+
+[tasks.notebooks]
+description = "Open JupyterLab with the project's Python kernel"
+depends = ["setup"]
+env = { JUPYTER_PATH = "{{config_root}}/.venv/share/jupyter" }
+run = [
+    'uv run --frozen python -m ipykernel install --sys-prefix --name mam-bench --display-name "MAM-Bench (Python 3.14)"',
+    "jupyter-lab --ServerApp.ip=127.0.0.1",
+]
 
 [tasks.test]
 description = "Run the unit test suite"

@@ -1,13 +1,11 @@
 import asyncio
-import json
 import unittest
-from dataclasses import dataclass
 from decimal import Decimal
 from typing import cast
 from unittest.mock import patch
 
-from pydantic_ai import Agent, ModelMessage
-from pydantic_ai.exceptions import ModelAPIError
+from pydantic_ai import Agent, ModelMessage, ToolOutput, UsageLimits
+from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
@@ -23,10 +21,10 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RequestUsage
 from pydantic_ai_harness.memory import InMemoryStore, MemoryFile
 
-from mam_bench.agent import AgentSessionRuntime
-from mam_bench.benchmark import AgentInfrastructureFailure, AgentSettings
-from mam_bench.communication import SharedRecord
-from mam_bench.evidence import EvidenceRecorder
+from mam_bench.agent import AgentSessionRuntime, run_rolling
+from mam_bench.benchmark import AgentInfrastructureFailure
+from mam_bench.communication import MessageBoard
+from mam_bench.config import AgentSettings
 
 
 def _response(
@@ -44,6 +42,21 @@ def _latest_request(messages: list[ModelMessage]) -> ModelRequest:
     request = messages[-1]
     assert isinstance(request, ModelRequest)
     return request
+
+
+def _assert_complete_tool_history(messages: list[ModelMessage]) -> None:
+    pending: set[str] = set()
+    for message in messages:
+        if isinstance(message, ModelResponse):
+            assert not pending, f"Unanswered calls before the next response: {pending}"
+            pending.update(
+                part.tool_call_id for part in message.parts if isinstance(part, ToolCallPart)
+            )
+        else:
+            for part in message.parts:
+                if isinstance(part, (ToolReturnPart, RetryPromptPart)):
+                    pending.discard(part.tool_call_id)
+    assert not pending, f"Unanswered calls at the end of the turn: {pending}"
 
 
 def _request_text(request: ModelRequest) -> str:
@@ -77,6 +90,8 @@ class MemoryModel:
             if isinstance(item, TextContent) and item.content.startswith("<memory>")
         )
 
+        if "recall" in text:
+            return _response(TextPart("remembered" if "alpha is durable" in text else "empty"))
         if tool_results:
             return _response(TextPart("stored"))
         if retry_parts:
@@ -153,543 +168,192 @@ class CompactionModel:
         return _response(TextPart(f"normal-{self.normal_requests}"), cost=self.normal_cost)
 
 
-@dataclass(frozen=True)
-class SharedPayload:
-    text: str
-
-
-def _render_payloads(records: tuple[SharedRecord[SharedPayload], ...]) -> str:
-    return "|".join(record.payload.text for record in records)
-
-
-class SharedCommunicationTests(unittest.IsolatedAsyncioTestCase):
-    def _runtime(self) -> AgentSessionRuntime[None, str, SharedPayload]:
-        return AgentSessionRuntime(Agent(FunctionModel(MemoryModel()), output_type=str))
-
-    async def test_pages_complete_records_with_isolated_cursors_and_trial_reset(self) -> None:
-        runtime = self._runtime()
-        communication = runtime.communication
-        first = await communication.append("session-a", SharedPayload("aaaa"))
-        second = await communication.append("session-b", SharedPayload("bb"))
-        third = await communication.append("session-a", SharedPayload("ccc"))
-
-        page_one = await communication.read(
-            "reader-a",
-            max_chars=7,
-            renderer=_render_payloads,
-        )
-        page_two = await communication.read(
-            "reader-a",
-            max_chars=7,
-            renderer=_render_payloads,
-        )
-        other_reader = await communication.read(
-            "reader-b",
-            max_chars=100,
-            renderer=_render_payloads,
-        )
-        oversized_first = await communication.read(
-            "reader-c",
-            max_chars=2,
-            renderer=_render_payloads,
-        )
-        empty = await communication.read(
-            "reader-a",
-            max_chars=7,
-            renderer=_render_payloads,
-        )
-        fresh = await self._runtime().communication.read(
-            "reader-a",
-            max_chars=7,
-            renderer=_render_payloads,
-        )
-
-        self.assertEqual((first.sequence, second.sequence, third.sequence), (0, 1, 2))
-        self.assertEqual(first.author_session_id, "session-a")
-        self.assertEqual(page_one.records, (first, second))
-        self.assertEqual(page_one.content, "aaaa|bb")
-        self.assertTrue(page_one.more_available)
-        self.assertEqual(page_two.records, (third,))
-        self.assertFalse(page_two.more_available)
-        self.assertEqual(other_reader.records, (first, second, third))
-        self.assertEqual(oversized_first.records, (first,))
-        self.assertEqual(oversized_first.content, "aaaa")
-        self.assertTrue(oversized_first.more_available)
-        self.assertEqual(empty.records, ())
-        self.assertEqual(empty.content, "")
-        self.assertFalse(empty.more_available)
-        self.assertEqual(empty.next_cursor, page_two.next_cursor)
-        self.assertEqual(fresh.records, ())
-
-    async def test_read_is_linearized_and_a_failed_render_does_not_advance_cursor(self) -> None:
-        runtime = self._runtime()
-        communication = runtime.communication
-        first = await communication.append("writer", SharedPayload("first"))
-        renderer_entered = asyncio.Event()
-        release_renderer = asyncio.Event()
-
-        async def controlled_renderer(
-            records: tuple[SharedRecord[SharedPayload], ...],
-        ) -> str:
-            renderer_entered.set()
-            await release_renderer.wait()
-            return _render_payloads(records)
-
-        read_task = asyncio.create_task(
-            communication.read("reader", max_chars=100, renderer=controlled_renderer)
-        )
-        await renderer_entered.wait()
-        append_task = asyncio.create_task(
-            communication.append("writer", SharedPayload("after-read"))
-        )
-        await asyncio.sleep(0)
-        self.assertFalse(append_task.done())
-
-        release_renderer.set()
-        first_page = await read_task
-        second = await append_task
-        second_page = await communication.read(
-            "reader",
-            max_chars=100,
-            renderer=_render_payloads,
-        )
-
-        self.assertEqual(first_page.records, (first,))
-        self.assertEqual(second_page.records, (second,))
-
-        def broken_renderer(records: tuple[SharedRecord[SharedPayload], ...]) -> str:
-            del records
-            raise RuntimeError("cannot render")
-
-        third = await communication.append("writer", SharedPayload("third"))
-        with self.assertRaisesRegex(RuntimeError, "cannot render"):
-            await communication.read("failing-reader", max_chars=100, renderer=broken_renderer)
-        recovered = await communication.read(
-            "failing-reader",
-            max_chars=100,
-            renderer=_render_payloads,
-        )
-        self.assertEqual(recovered.records, (first, second, third))
-
-    async def test_rolling_admission_is_bounded_and_preserves_completion_order(self) -> None:
-        settings = AgentSettings(concurrency=2)
-        runtime: AgentSessionRuntime[None, str, SharedPayload] = AgentSessionRuntime(
-            Agent(FunctionModel(MemoryModel()), output_type=str),
-            settings=settings,
-        )
-        gates = [asyncio.Event() for _ in range(5)]
-        started = [asyncio.Event() for _ in range(5)]
-        active = 0
-        maximum_active = 0
-
-        async def worker(item: int) -> int:
-            nonlocal active, maximum_active
-            active += 1
-            maximum_active = max(maximum_active, active)
-            started[item].set()
-            try:
-                await gates[item].wait()
-                await runtime.communication.append("worker", SharedPayload(str(item)))
-                return item * 10
-            finally:
-                active -= 1
-
-        rolling_task = asyncio.create_task(runtime.run_rolling(range(5), worker))
-        await started[0].wait()
-        await started[1].wait()
-        gates[1].set()
-        await started[2].wait()
-        self.assertFalse(gates[0].is_set())
-        gates[2].set()
-        await started[3].wait()
-        gates[0].set()
-        await started[4].wait()
-        gates[4].set()
-        await asyncio.sleep(0)
-        gates[3].set()
-        completed = await rolling_task
-        publication = await runtime.communication.read(
-            "auditor",
-            max_chars=100,
-            renderer=_render_payloads,
-        )
-
-        self.assertEqual(maximum_active, 2)
-        self.assertEqual([item.item for item in completed], [1, 2, 0, 4, 3])
-        self.assertEqual([item.result for item in completed], [10, 20, 0, 40, 30])
-        self.assertEqual([item.admission_sequence for item in completed], [1, 2, 0, 4, 3])
-        self.assertEqual([item.completion_sequence for item in completed], list(range(5)))
-        self.assertEqual(publication.content, "1|2|0|4|3")
-
-
 class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_compaction_references_are_session_scoped_while_messages_deduplicate(
-        self,
-    ) -> None:
-        recorder = EvidenceRecorder()
-        summary = ModelRequest(
-            parts=[SystemPromptPart("Summary of previous conversation: same")],
-            timestamp=None,
-        )
-
-        first_id = await recorder.record_context_message("actor-1", summary)
-        second_id = await recorder.record_context_message("actor-2", summary)
-
-        self.assertEqual(first_id, second_id)
-        self.assertEqual(
-            sum(event.kind == "message" for event in recorder.events),
-            1,
-        )
-        self.assertEqual(
-            {event.data["session_id"] for event in recorder.events if event.kind == "compaction"},
-            {"actor-1", "actor-2"},
-        )
-
-    async def test_normalized_messages_are_deduplicated_and_omit_provider_secrets(self) -> None:
-        recorder = EvidenceRecorder()
-        response = ModelResponse(
-            parts=[
-                ToolCallPart(
-                    tool_name="write_memory",
-                    args={"content": "safe", "api_key": "tool-secret"},
-                    tool_call_id="write-1",
-                ),
-                ToolCallPart(
-                    tool_name="write_memory",
-                    args='{"api_key":"raw-secret"',
-                    tool_call_id="write-2",
-                ),
-            ],
-            usage=RequestUsage(input_tokens=5, output_tokens=2, cost=None),
-            model_name="scripted",
-            provider_name="test",
-            provider_details={"authorization": "provider-secret"},
-            metadata={"token": "metadata-secret"},
-        )
-
-        first_id = await recorder.record_message(response)
-        second_id = await recorder.record_message(response)
-        await recorder.record("model_request_completed", message_id=first_id)
-
-        serialized = "\n".join(json.dumps(event.as_dict()) for event in recorder.events)
-        self.assertEqual(first_id, second_id)
-        self.assertEqual(
-            [event.kind for event in recorder.events], ["message", "model_request_completed"]
-        )
-        self.assertIn('"api_key": "[REDACTED]"', serialized)
-        self.assertNotIn("tool-secret", serialized)
-        self.assertNotIn("raw-secret", serialized)
-        self.assertNotIn("provider-secret", serialized)
-        self.assertNotIn("metadata-secret", serialized)
-
-    async def test_persists_history_and_private_memory_per_opaque_session(self) -> None:
+    async def test_private_memory_and_history(self) -> None:
         model = MemoryModel()
-        agent = Agent(FunctionModel(model), output_type=str)
-        runtime = AgentSessionRuntime(agent)
+        runtime = AgentSessionRuntime(Agent(FunctionModel(model)))
+        self.assertEqual(await runtime.run("a", "remember alpha", deps=None), "stored")
+        self.assertEqual(await runtime.run("a", "recall", deps=None), "remembered")
+        self.assertEqual(await runtime.run("b", "recall", deps=None), "empty")
+        self.assertGreater(len(runtime.history("a")), len(runtime.history("b")))
+        self.assertIn("post_message", model.tool_names)
+        self.assertIn("read_messages", model.tool_names)
+        self.assertEqual(runtime.usage.requests, 4)
+        snapshot = runtime.usage
+        snapshot.requests = 0
+        self.assertEqual(runtime.usage.requests, 4)
 
-        first = await runtime.run("actor/../7", "remember alpha", deps=None)
-        recalled = await runtime.run("actor/../7", "recall", deps=None)
-        isolated = await runtime.run("actor-8", "recall", deps=None)
-        fresh_trial = AgentSessionRuntime(agent)
-        fresh = await fresh_trial.run("actor/../7", "recall", deps=None)
-
-        self.assertEqual(first.output, "stored")
-        self.assertEqual(recalled.output, "remembered")
-        self.assertEqual(isolated.output, "empty")
-        self.assertEqual(fresh.output, "empty")
-        self.assertEqual(
-            model.tool_names,
-            {"write_memory", "read_memory", "search_memory", "delete_memory"},
-        )
-        self.assertGreater(len(runtime.history("actor/../7")), len(runtime.history("actor-8")))
-
-        message_ids = {
-            event.data["message_id"] for event in runtime.evidence.events if event.kind == "message"
-        }
-        request_events = [
-            event
-            for event in runtime.evidence.events
-            if event.kind in {"model_request_started", "model_request_completed"}
-        ]
-        self.assertTrue(request_events)
-        self.assertTrue(all(event.data["message_id"] in message_ids for event in request_events))
-        actor_starts = [
-            event.sequence
-            for event in runtime.evidence.events
-            if event.kind == "model_request_started" and event.data["session_id"] == "actor/../7"
-        ]
-        memory_operation = next(
-            event
-            for event in runtime.evidence.events
-            if event.kind == "memory_operation" and event.data["session_id"] == "actor/../7"
-        )
-        self.assertLess(memory_operation.sequence, actor_starts[1])
-
-        await runtime.record_final_notebooks()
-        snapshots = [
-            event for event in runtime.evidence.events if event.kind == "notebook_snapshot"
-        ]
-        self.assertEqual(
-            [event.data["session_id"] for event in snapshots], ["actor-8", "actor/../7"]
-        )
-        self.assertEqual(snapshots[1].data["files"], {"MEMORY.md": "alpha is durable\n"})
-
-    async def test_memory_injection_is_bounded_to_approximately_four_thousand_tokens(self) -> None:
+    async def test_limit_preserves_memory_and_history_and_resets_per_turn(self) -> None:
         model = MemoryModel()
-        runtime = AgentSessionRuntime(Agent(FunctionModel(model), output_type=str))
-
-        await runtime.run("actor-7", "remember large", deps=None)
-        await runtime.run("actor-7", "recall", deps=None)
-
-        injected = model.memory_blocks[-1]
-        self.assertLessEqual(len(injected), 4_000 * 4)
-        self.assertIn("tail fact", injected)
-        self.assertNotIn("old-000", injected)
-
-    async def test_memory_injection_store_failure_propagates(self) -> None:
-        model = MemoryModel()
-        with patch("mam_bench.agent.InMemoryStore", return_value=FailingReadStore()):
-            runtime = AgentSessionRuntime(Agent(FunctionModel(model), output_type=str))
-            with self.assertRaisesRegex(OSError, "memory unavailable"):
-                await runtime.run("actor-7", "recall", deps=None)
-        self.assertEqual(runtime.history("actor-7"), ())
-        self.assertEqual(runtime.usage.total_requests, 0)
-
-    async def test_main_memory_file_cannot_be_deleted(self) -> None:
-        model = MemoryModel()
-        runtime = AgentSessionRuntime(Agent(FunctionModel(model), output_type=str))
-
-        result = await runtime.run("actor-7", "try deleting main", deps=None)
-
-        self.assertEqual(result.output, "protected")
-        self.assertTrue(
-            any(
-                isinstance(part, RetryPromptPart) and "main notebook" in str(part.content)
-                for message in runtime.history("actor-7")
-                if isinstance(message, ModelRequest)
-                for part in message.parts
-            )
+        runtime = AgentSessionRuntime(Agent(FunctionModel(model)))
+        result = await runtime.run(
+            "a", "remember alpha", deps=None, usage_limits=UsageLimits(request_limit=1)
         )
+        self.assertIsNone(result)
+        self.assertEqual(runtime.usage.requests, 1)
+        self.assertTrue(runtime.history("a"))
+        self.assertEqual(await runtime.run("a", "recall", deps=None), "remembered")
 
-    async def test_failed_runtime_cannot_resume_and_a_fresh_trial_has_empty_memory(self) -> None:
-        failed_once = False
-
-        async def write_then_fail(
-            messages: list[ModelMessage],
-            info: AgentInfo,
-        ) -> ModelResponse:
-            nonlocal failed_once
-            del info
-            request = _latest_request(messages)
-            if any(isinstance(part, ToolReturnPart) for part in request.parts):
-                failed_once = True
-                raise RuntimeError("provider failed after write")
-            text = _request_text(request)
-            if "recall" in text:
-                return _response(TextPart("remembered" if "ghost memory" in text else "empty"))
+    async def test_successful_tool_limit_and_multi_call(self) -> None:
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            del messages, info
             return _response(
-                ToolCallPart(
-                    tool_name="write_memory",
-                    args={"content": "ghost memory"},
-                    tool_call_id="ghost-write",
-                )
+                ToolCallPart("post_message", {"text": "one"}, "one"),
+                ToolCallPart("post_message", {"text": "two"}, "two"),
             )
 
-        agent = Agent(FunctionModel(write_then_fail), output_type=str)
-        runtime = AgentSessionRuntime(agent)
-
-        with self.assertRaisesRegex(RuntimeError, "provider failed after write"):
-            await runtime.run("actor-7", "write then fail", deps=None)
-        for session_id in ("actor-7", "actor-8"):
-            with self.assertRaisesRegex(RuntimeError, "provider failed after write"):
-                await runtime.run(session_id, "recall", deps=None)
-        with self.assertRaisesRegex(RuntimeError, "provider failed after write"):
-            await runtime.record_final_notebooks()
-
-        fresh = AgentSessionRuntime(agent)
-        result = await fresh.run("actor-7", "recall", deps=None)
-        self.assertTrue(failed_once)
-        self.assertEqual(result.output, "empty")
-        self.assertEqual(fresh.usage.total_requests, 1)
-
-    async def test_failed_turn_cancels_and_awaits_other_admitted_turns(self) -> None:
-        other_started = asyncio.Event()
-        other_cancelled = asyncio.Event()
-        admitted: list[int] = []
-
-        async def failing_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            del info
-            if "fail" in _request_text(_latest_request(messages)):
-                await other_started.wait()
-                raise ModelAPIError("scripted", "provider unavailable")
-            other_started.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                other_cancelled.set()
-            raise AssertionError("the waiting request must be cancelled")
-
-        runtime = AgentSessionRuntime(
-            Agent(FunctionModel(failing_model)), settings=AgentSettings(concurrency=2)
+        runtime = AgentSessionRuntime(Agent(FunctionModel(model)))
+        self.assertIsNone(
+            await runtime.run("a", "go", deps=None, usage_limits=UsageLimits(tool_calls_limit=2))
         )
+        self.assertEqual(runtime.usage.tool_calls, 2)
+        _assert_complete_tool_history(list(runtime.history("a")))
+        page = await runtime.board.read("b")
+        self.assertIn("one", page.content)
+        self.assertIn("two", page.content)
 
-        async def turn(actor: int) -> str:
-            admitted.append(actor)
-            result = await runtime.run(str(actor), "fail" if actor == 0 else "wait", deps=None)
-            return result.output
+    async def test_retry_exhaustion_preserves_session_and_provider_behavior_aborts(self) -> None:
+        invalid = True
 
-        async with asyncio.timeout(5):
-            with self.assertRaisesRegex(ModelAPIError, "provider unavailable"):
-                await runtime.run_rolling(range(3), turn)
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            del messages, info
+            if invalid:
+                return _response(ToolCallPart("post_message", {"text": ""}, "bad"))
+            return _response(TextPart("recovered"))
 
-        self.assertTrue(other_cancelled.is_set())
-        self.assertEqual(admitted, [0, 1])
-        with self.assertRaisesRegex(ModelAPIError, "provider unavailable"):
-            await runtime.run("2", "wait", deps=None)
+        runtime = AgentSessionRuntime(Agent(FunctionModel(model), retries=2))
+        self.assertIsNone(await runtime.run("a", "go", deps=None))
+        self.assertEqual(runtime.usage.requests, 3)
+        _assert_complete_tool_history(list(runtime.history("a")))
+        invalid = False
+        self.assertEqual(await runtime.run("a", "again", deps=None), "recovered")
 
-    async def test_compaction_uses_inherited_model_and_reports_summary_usage(self) -> None:
+        async def broken(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            del messages, info
+            raise UnexpectedModelBehavior("provider returned broken body")
+
+        failed = AgentSessionRuntime(Agent(FunctionModel(broken)))
+        for identity in ("a", "b"):
+            with self.assertRaisesRegex(AgentInfrastructureFailure, "unusable response"):
+                await failed.run(identity, "go", deps=None)
+
+    async def test_compaction_uses_same_model_and_native_usage(self) -> None:
         model = CompactionModel()
-        settings = AgentSettings(
-            context_window_tokens=200,
-            compaction_trigger_fraction=0.5,
-            compaction_tail_tokens=20,
-            summary_completion_tokens=16,
-            memory_injection_tokens=100,
-        )
         runtime = AgentSessionRuntime(
-            Agent(FunctionModel(model), output_type=str), settings=settings
+            Agent(FunctionModel(model)),
+            settings=AgentSettings(
+                context_window_tokens=200,
+                compaction_trigger_fraction=0.5,
+                compaction_tail_tokens=20,
+                summary_completion_tokens=16,
+                memory_injection_tokens=100,
+            ),
         )
-
-        await runtime.run("actor-7", "A" * 600, deps=None)
-        result = await runtime.run("actor-7", "B" * 600, deps=None)
-
-        self.assertEqual(result.output, "normal-2")
+        await runtime.run("a", "A" * 600, deps=None)
+        self.assertEqual(await runtime.run("a", "B" * 600, deps=None), "normal-2")
         self.assertEqual(model.summary_requests, 1)
         self.assertEqual(model.summary_max_tokens, [16])
-        self.assertEqual(runtime.usage.model_requests, 2)
-        self.assertEqual(runtime.usage.summary_requests, 1)
-        self.assertEqual(runtime.usage.total_requests, 3)
-        self.assertEqual(runtime.usage.cost_usd, Decimal("0.03"))
+        self.assertEqual(runtime.usage.requests, 3)
         self.assertTrue(
             any(
                 isinstance(part, SystemPromptPart)
-                and part.content.startswith("Summary of previous conversation:")
-                for message in runtime.history("actor-7")
+                and "Summary of previous conversation" in part.content
+                for message in runtime.history("a")
                 if isinstance(message, ModelRequest)
                 for part in message.parts
             )
         )
-        self.assertTrue(_has_compaction_receipt(runtime.history("actor-7"), "summarized"))
-        self.assertTrue(
-            {"summary_request_started", "summary_request_completed"}.issubset(
-                {event.kind for event in runtime.evidence.events}
+
+    async def test_memory_store_failure_poisons_runtime(self) -> None:
+        with patch("mam_bench.agent.InMemoryStore", return_value=FailingReadStore()):
+            runtime = AgentSessionRuntime(Agent(FunctionModel(MemoryModel())))
+        for identity in ("a", "b"):
+            with self.assertRaisesRegex(AgentInfrastructureFailure, "notebook failed"):
+                await runtime.run(identity, "go", deps=None)
+
+    async def test_message_board_pages_and_isolated_cursors(self) -> None:
+        board = MessageBoard()
+        for index in range(12):
+            self.assertEqual(
+                await board.post("writer", str(index) + "x" * 3990, announcement=index == 0), index
             )
-        )
-        compaction_events = [
-            event
-            for event in runtime.evidence.events
-            if event.kind in {"compaction", "compaction_receipt"}
-        ]
-        message_sequences = {
-            event.data["message_id"]: event.sequence
-            for event in runtime.evidence.events
-            if event.kind == "message"
-        }
-        self.assertEqual(
-            {event.kind for event in compaction_events}, {"compaction", "compaction_receipt"}
-        )
-        self.assertTrue(
-            all(
-                message_sequences[event.data["message_id"]] < event.sequence
-                for event in compaction_events
-            )
-        )
+        first = await board.read("a")
+        second = await board.read("a")
+        self.assertLessEqual(len(first.content), 40000)
+        self.assertTrue(first.more_available)
+        self.assertFalse(second.more_available)
+        self.assertIn("announcement by writer", first.content)
+        self.assertEqual(await board.read("b"), first)
+        self.assertEqual((await board.read("a")).content, "")
 
-    async def test_approved_summary_model_failure_uses_sliding_window_fallback(self) -> None:
-        model = CompactionModel(summary_error=ModelAPIError("scripted", "summary unavailable"))
-        settings = AgentSettings(
-            context_window_tokens=200,
-            compaction_trigger_fraction=0.5,
-            compaction_tail_tokens=20,
-            summary_completion_tokens=16,
-            memory_injection_tokens=100,
-        )
-        runtime = AgentSessionRuntime(
-            Agent(FunctionModel(model), output_type=str), settings=settings
-        )
+    async def test_rolling_is_bounded_and_cancels_on_failure(self) -> None:
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        admitted: list[int] = []
 
-        await runtime.run("actor-7", "A" * 600, deps=None)
-        result = await runtime.run("actor-7", "B" * 600, deps=None)
+        async def worker(item: int) -> int:
+            admitted.append(item)
+            if item == 0:
+                await started.wait()
+                raise RuntimeError("failed")
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+            return item
 
-        self.assertEqual(result.output, "normal-2")
-        self.assertEqual(model.summary_requests, 1)
-        self.assertEqual(runtime.usage.model_requests, 2)
-        self.assertEqual(runtime.usage.summary_requests, 0)
-        self.assertEqual(runtime.usage.total_requests, 2)
-        self.assertIsNone(runtime.usage.cost_usd)
-        self.assertTrue(_has_compaction_receipt(runtime.history("actor-7"), "dropped"))
-        self.assertIn(
-            "summary_request_failed",
-            {event.kind for event in runtime.evidence.events},
-        )
-        self.assertIn(
-            "compaction_fallback",
-            {event.kind for event in runtime.evidence.events},
-        )
+        with self.assertRaisesRegex(RuntimeError, "failed"):
+            await run_rolling(range(4), worker, concurrency=2)
+        self.assertEqual(admitted, [0, 1])
+        self.assertTrue(cancelled.is_set())
 
-    async def test_unapproved_compaction_failure_aborts_without_replacing_history(self) -> None:
-        model = CompactionModel(summary_error=RuntimeError("broken compactor"))
-        settings = AgentSettings(
-            context_window_tokens=200,
-            compaction_trigger_fraction=0.5,
-            compaction_tail_tokens=20,
-            summary_completion_tokens=16,
-            memory_injection_tokens=100,
-        )
-        runtime = AgentSessionRuntime(
-            Agent(FunctionModel(model), output_type=str), settings=settings
-        )
-
-        await runtime.run("actor-7", "A" * 600, deps=None)
-        before = runtime.history("actor-7")
-        with self.assertRaisesRegex(AgentInfrastructureFailure, "broken compactor") as raised:
-            await runtime.run("actor-7", "B" * 600, deps=None)
-
-        self.assertEqual(raised.exception.kind, "compaction")
-        self.assertEqual(runtime.history("actor-7"), before)
-        self.assertEqual(runtime.usage.total_requests, 1)
-
-    async def test_mixed_known_and_unknown_request_cost_remains_null(self) -> None:
-        request_number = 0
-
-        async def mixed_cost_model(
-            messages: list[ModelMessage],
-            info: AgentInfo,
-        ) -> ModelResponse:
-            nonlocal request_number
+    async def test_default_request_limit_stops_successful_read_loop_at_25(self) -> None:
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             del info
-            request_number += 1
-            request = _latest_request(messages)
-            if any(isinstance(part, ToolReturnPart) for part in request.parts):
-                return _response(TextPart("done"), cost=Decimal("0.01"))
+            return _response(ToolCallPart("read_messages", {}, str(len(messages))))
+
+        runtime = AgentSessionRuntime(Agent(FunctionModel(model)))
+        self.assertIsNone(await runtime.run("a", "go", deps=None))
+        self.assertEqual(runtime.usage.requests, 25)
+        self.assertEqual(runtime.usage.tool_calls, 25)
+
+    async def test_terminal_tool_takes_precedence_over_other_calls(self) -> None:
+        async def stay() -> str:
+            return "stayed"
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            del messages, info
             return _response(
-                ToolCallPart(
-                    tool_name="write_memory",
-                    args={"content": "cost test"},
-                    tool_call_id="mixed-cost-write",
-                ),
-                cost=None,
+                ToolCallPart("post_message", {"text": "must skip"}, "post"),
+                ToolCallPart("stay", {}, "stay"),
             )
 
-        runtime = AgentSessionRuntime(Agent(FunctionModel(mixed_cost_model), output_type=str))
+        runtime = AgentSessionRuntime(
+            Agent(
+                FunctionModel(model),
+                output_type=ToolOutput(stay, name="stay"),
+                end_strategy="early",
+            )
+        )
+        self.assertEqual(await runtime.run("a", "go", deps=None), "stayed")
+        self.assertEqual((await runtime.board.read("b")).content, "")
 
-        await runtime.run("actor-7", "write", deps=None)
+    async def test_tool_only_text_exhaustion_is_normal_stop(self) -> None:
+        async def stay() -> str:
+            return "stay"
 
-        self.assertEqual(request_number, 2)
-        self.assertIsNone(runtime.usage.cost_usd)
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            del messages, info
+            return _response(TextPart("I refuse to call a tool"))
 
-    async def test_unknown_summary_cost_makes_aggregate_cost_null(self) -> None:
-        model = CompactionModel(summary_cost=None)
+        runtime = AgentSessionRuntime(
+            Agent(FunctionModel(model), output_type=ToolOutput(stay, name="stay"), retries=2)
+        )
+        self.assertIsNone(await runtime.run("a", "go", deps=None))
+        self.assertEqual(runtime.usage.requests, 3)
+
+    async def test_compaction_fallback_and_unrecoverable_failure(self) -> None:
         settings = AgentSettings(
             context_window_tokens=200,
             compaction_trigger_fraction=0.5,
@@ -697,49 +361,44 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             summary_completion_tokens=16,
             memory_injection_tokens=100,
         )
-        runtime = AgentSessionRuntime(
-            Agent(FunctionModel(model), output_type=str),
-            settings=settings,
+        fallback = CompactionModel(summary_error=ModelAPIError("scripted", "unavailable"))
+        runtime = AgentSessionRuntime(Agent(FunctionModel(fallback)), settings=settings)
+        await runtime.run("a", "A" * 600, deps=None)
+        self.assertEqual(await runtime.run("a", "B" * 600, deps=None), "normal-2")
+        self.assertEqual(fallback.summary_requests, 1)
+        broken = CompactionModel(
+            summary_error=UnexpectedModelBehavior("Exceeded maximum output retries (2)")
         )
+        failed = AgentSessionRuntime(Agent(FunctionModel(broken)), settings=settings)
+        await failed.run("a", "A" * 600, deps=None)
+        from mam_bench.benchmark import AgentInfrastructureFailure
 
-        await runtime.run("actor-7", "A" * 600, deps=None)
-        await runtime.run("actor-7", "B" * 600, deps=None)
+        with self.assertRaises(AgentInfrastructureFailure) as raised:
+            await failed.run("a", "B" * 600, deps=None)
+        self.assertEqual(raised.exception.kind, "compaction")
 
-        self.assertEqual(runtime.usage.summary_requests, 1)
-        self.assertIsNone(runtime.usage.cost_usd)
+    async def test_same_session_serializes_while_other_sessions_can_overlap(self) -> None:
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        calls = 0
 
-    async def test_cost_remains_null_when_the_model_reports_no_trustworthy_price(self) -> None:
-        async def costless_model(
-            messages: list[ModelMessage],
-            info: AgentInfo,
-        ) -> ModelResponse:
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal calls
             del messages, info
-            return _response(TextPart("ok"), cost=None)
+            calls += 1
+            if calls == 1:
+                first_started.set()
+                await release_first.wait()
+            return _response(TextPart("ok"))
 
-        runtime = AgentSessionRuntime(Agent(FunctionModel(costless_model), output_type=str))
-
-        await runtime.run("actor-7", "hello", deps=None)
-
-        self.assertIsNone(runtime.usage.cost_usd)
-
-    def test_protocol_defaults_are_fixed(self) -> None:
-        settings = AgentSettings()
-
-        self.assertEqual(settings.context_window_tokens, 260_000)
-        self.assertEqual(settings.compaction_trigger_fraction, 0.7)
-        self.assertEqual(settings.compaction_tail_tokens, 40_000)
-        self.assertEqual(settings.summary_completion_tokens, 16_000)
-        self.assertEqual(settings.memory_injection_tokens, 4_000)
-
-
-def _has_compaction_receipt(messages: tuple[ModelMessage, ...], word: str) -> bool:
-    return any(
-        isinstance(item, TextContent)
-        and item.content.startswith("[History")
-        and word in item.content
-        for message in messages
-        if isinstance(message, ModelRequest)
-        for part in message.parts
-        if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
-        for item in part.content
-    )
+        runtime = AgentSessionRuntime(Agent(FunctionModel(model)))
+        first = asyncio.create_task(runtime.run("a", "first", deps=None))
+        await first_started.wait()
+        second = asyncio.create_task(runtime.run("a", "second", deps=None))
+        await asyncio.sleep(0)
+        self.assertEqual(calls, 1)
+        self.assertEqual(await runtime.run("b", "other", deps=None), "ok")
+        release_first.set()
+        self.assertEqual(await first, "ok")
+        self.assertEqual(await second, "ok")
+        self.assertEqual(len(runtime.history("a")), 4)

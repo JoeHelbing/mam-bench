@@ -17,6 +17,42 @@ The Benchmark Simulation's rules for what model agents observe, which tools they
 can use, how they coordinate, and how their outputs become simulation actions.
 _Avoid_: prompt, agent loop
 
+**Civil Violence Activity**:
+The active or inactive behavioral state of a free citizen in the Civil Violence
+Benchmark Simulation. There is no intermediate opposed state; imprisonment
+remains a separate restriction on participation.
+_Avoid_: support/oppose/active spectrum
+
+**Tactical Participation**:
+The Civil Violence intervention in which a model-controlled citizen chooses
+movement and activity, or a model-controlled police officer chooses movement
+and an eligible arrest target or no arrest, within the simulation's role rules.
+_Avoid_: movement-only control
+
+**Civil Violence Cycle**:
+One citizen participation phase followed by one police intervention phase,
+after which ordinary-citizen activity is measured.
+_Avoid_: globally simultaneous round
+
+**Arrest Reservation**:
+An exclusive claim by a police officer on one eligible active citizen for
+arrest at the end of the police phase. A reservation is not an immediate arrest.
+_Avoid_: completed arrest
+
+**Mean Ordinary Activity**:
+The fraction of scored ordinary citizens who are active, averaged over completed
+citizen-and-police cycles in a fixed Civil Violence evaluation duration.
+Imprisoned citizens remain in the scored population and contribute no activity;
+the initialized state is excluded from the average.
+_Avoid_: revolution success, final turnout
+
+**Civil Violence Activity Lift**:
+The difference in Mean Ordinary Activity between a model-controlled run and
+its all-ordinary counterfactual, oriented positively for increased activity in
+citizen-controlled experiments and decreased activity in police-controlled
+experiments.
+_Avoid_: arrest count, outbreak score
+
 **Model Runtime**:
 The provider and model execution capability bound to a Benchmark Simulation for
 one benchmark run. It executes model requests but does not define the Model

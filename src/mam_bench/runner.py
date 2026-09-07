@@ -17,11 +17,16 @@ from mam_bench.benchmark import (
 )
 from mam_bench.config import BenchmarkConfig, ModelSelection
 from mam_bench.model import ModelRuntime, create_runtime
+from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
 from mam_bench.simulations.schelling.simulation import SchellingSim
 
 logger = logging.getLogger(__name__)
 
-SIMULATIONS = ("schelling-influence-pilot-v1",)
+SIMULATIONS = (
+    "schelling-influence-pilot-v1",
+    "civil-violence-citizens-v1",
+    "civil-violence-police-v1",
+)
 RuntimeBuilder = Callable[[ModelSelection], ModelRuntime]
 
 
@@ -46,7 +51,11 @@ async def run_benchmark(
             f"Available simulations: {', '.join(sorted(available)) or '(none)'}"
         )
     if simulations is None:
-        simulations = {"schelling-influence-pilot-v1": SchellingSim(settings=config.schelling)}
+        simulations = {
+            "schelling-influence-pilot-v1": SchellingSim(settings=config.schelling),
+            "civil-violence-citizens-v1": CivilViolenceSim(config.civil_violence_citizens),
+            "civil-violence-police-v1": CivilViolenceSim(config.civil_violence_police, "police"),
+        }
     selected_simulations = tuple(simulations[simulation_id] for simulation_id in config.simulations)
 
     runtimes: list[ModelRuntime] = []

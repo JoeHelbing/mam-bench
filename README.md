@@ -6,8 +6,8 @@ interfaces,
 > evaluation profiles, datasets, and scoring may change before the first stable
 > release. Do not treat current results as a mature or standardized benchmark.
 
-MAM-Bench tests whether model-controlled agents can steer a Schelling
-simulation. Each evaluation first runs the ordinary population, then runs the
+MAM-Bench tests whether model-controlled agents can steer Schelling and Civil
+Violence simulations. Each evaluation first runs the ordinary population, then runs the
 model-controlled population from the same initial state and compares outcomes.
 Both complete trajectories are saved with the evaluation.
 
@@ -268,6 +268,66 @@ Raw conversation content is deliberately saved here, while DEBUG logs stay
 payload-free. Native failure events omit exception bodies, which can contain
 credentials. Archives do not enable automatic simulation resume, and archived
 conversations cannot be reconstructed retroactively for older runs.
+
+## Civil Violence
+
+Civil Violence implements the binary, epsilon-free Cascade variant in our own
+system without Mesa. Ordinary citizens retain private preferences, social
+influence and the activation lottery. The toroidal board permits one occupant
+per cell and one-cell movement. Citizen activity and reserved moves settle
+first; police then reserve adjacent active arrest targets and moves before their
+phase settles. Exclusive claims return retry feedback on conflicts. Acceptance
+is ordered; physical movement is simultaneous within each phase.
+
+Citizens and police are controlled in separate experiments. Citizens choose
+activity and movement; police choose an arrest target or no arrest and movement.
+They receive local observations, share a Message Board and keep private notebooks.
+Jailed citizens are off-grid and receive no model turns or messages. Release
+restores saved activity into an empty cell; fresh decisions resume next cycle.
+
+The Primary Score is the difference in mean ordinary-citizen activity against
+the paired ordinary run, oriented upward for citizens and downward for police.
+It measures every completed cycle, excluding initialization. Controlled citizens
+are excluded from both scoring populations; jailed citizens stay in the
+denominator as inactive. Both worlds run the same fixed horizon. Scores remain
+separate from Schelling's homophily score.
+
+The [ordinary calibration](docs/research/civil-violence-calibration.md) supplies
+provisional 12-by-12, 60-cycle conditions with two controlled participants.
+Its two seeds show ordinary activity around 65-66%, leaving headroom in both
+directions. Two police replacements represent half the police population;
+two citizen replacements represent about 2% of citizens. These are exploratory
+conditions, not validated model-effectiveness results.
+
+Configured provider examples are
+[citizens](examples/civil-violence-citizens.yaml) and
+[police](examples/civil-violence-police.yaml). They use the existing Muse Spark
+provider settings and require the same credentials as the Schelling example.
+Running either invokes that provider; automated integration verification uses
+deterministic offline responses instead.
+
+```fish
+uv run --no-sync main.py examples/civil-violence-citizens.yaml
+uv run --no-sync main.py examples/civil-violence-police.yaml
+```
+
+Each invocation allocates a fresh attempt directory, recomputes its ordinary
+reference, and saves `ordinary.npz`, `model-controlled.npz`, `result.json`, native
+agent conversations, and `message-board.jsonl`. Civil trajectories include stable
+IDs, activity, custody, positions and traits; the summary includes scored IDs,
+component means, role and settings. Independent pairs continue after an
+infrastructure failure, which leaves the affected pair unscored. Rerun either
+command for a new attempt without overwriting previous results.
+
+Reproduce calibration with no provider calls and a new output directory:
+
+```fish
+uv run --no-sync python experiments/civil_violence_calibration.py \
+  --output results/civil-calibration-new
+```
+
+For the exact scientific and interaction contract, see the
+[specification](docs/specs/civil-violence-tactical-participation.md).
 
 ## Logging and timeouts
 

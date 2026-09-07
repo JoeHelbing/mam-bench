@@ -6,6 +6,7 @@ from typing import Annotated, Literal, Self, cast
 import yaml
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
+from mam_bench.simulations.civil_violence.settings import CivilViolenceSettings
 from mam_bench.simulations.schelling.settings import SchellingSettings
 
 # YAML loading
@@ -118,6 +119,8 @@ class BenchmarkConfig(BaseModel):
     simulations: tuple[SimulationSelection, ...] = Field(min_length=1)
     models: tuple[ModelSelection, ...] = Field(min_length=1)
     schelling: SchellingSettings = SchellingSettings()
+    civil_violence_citizens: CivilViolenceSettings = CivilViolenceSettings()
+    civil_violence_police: CivilViolenceSettings = CivilViolenceSettings()
     output_directory: Path = Field(
         description=(
             "Results root relative to the working directory; each invocation creates a unique child"
@@ -131,4 +134,8 @@ class BenchmarkConfig(BaseModel):
         model_ids = tuple(model.id for model in self.models)
         if len(set(model_ids)) != len(model_ids):
             raise ValueError("model selections must have unique ids")
+        if "civil-violence-citizens-v1" in self.simulations:
+            self.civil_violence_citizens.validate_controlled_role("citizen")
+        if "civil-violence-police-v1" in self.simulations:
+            self.civil_violence_police.validate_controlled_role("police")
         return self

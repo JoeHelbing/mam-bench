@@ -23,6 +23,7 @@ from mam_bench.config import (
 )
 from mam_bench.model import ModelRuntime, RuntimeInfo
 from mam_bench.runner import run_benchmark
+from mam_bench.simulations.schelling.settings import SchellingSettings
 
 
 def fake_runtime(model_id: str) -> ModelRuntime:
@@ -76,6 +77,48 @@ class MixedSimulation(FakeSimulation):
 
 
 class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_constructs_builtin_simulation_with_each_invocations_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            configurations = (
+                SchellingSettings(),
+                SchellingSettings(board_size=12, vision_radius=2, controlled_agent_count=4),
+            )
+            simulation = FakeSimulation()
+            with patch("mam_bench.runner.SchellingSim", return_value=simulation) as factory:
+                for settings in configurations:
+                    config = BenchmarkConfig(
+                        simulations=("schelling-influence-pilot-v1",),
+                        models=(
+                            OpenRouterModel(
+                                id="test", runtime="openrouter", model="test", provider="test"
+                            ),
+                        ),
+                        schelling=settings,
+                        output_directory=Path(directory),
+                    )
+                    await run_benchmark(
+                        config, runtime_builder=lambda model: fake_runtime(model.id)
+                    )
+                    factory.assert_called_with(settings=settings)
+                self.assertEqual(factory.call_count, 2)
+
+    async def test_unknown_builtin_fails_before_simulation_or_runtime_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = BenchmarkConfig(
+                simulations=("unknown",),
+                models=(
+                    OpenRouterModel(id="test", runtime="openrouter", model="test", provider="test"),
+                ),
+                output_directory=Path(directory) / "results",
+            )
+            with (
+                patch("mam_bench.runner.SchellingSim") as factory,
+                self.assertRaisesRegex(ValueError, "Unknown simulations"),
+            ):
+                await run_benchmark(config, runtime_builder=unexpected_runtime)
+            factory.assert_not_called()
+            self.assertFalse(config.output_directory.exists())
+
     async def test_finishes_mixed_matrix_before_raising_aggregate_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "results"

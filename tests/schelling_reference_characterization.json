@@ -27,11 +27,11 @@
       0,
       30
     ],
-    "status": 1,
-    "rounds": 1,
+    "status": 2,
+    "rounds": 30,
     "arrays": {
-      "cell_types": "f45a44e4f38fd5da24267ec6a691f60b6479c45bab9be292d3da4be6e07c50b5",
-      "agent_locations": "edea9b1ae7404413acd30743958e6aeef9f13d8167da7d14e9a9e2dc5267b82d",
+      "cell_types": "bd1a064882f31a2d817ebbcd5c9862ad00eb886a3e1bc996f67fea250d289693",
+      "agent_locations": "2c89c985951eb1c7197624a646a8cd406a9e291c2e77fa7d93929b6a432c9de4",
       "agent_types": "f1d6d156d15558649869423f08b8cea14a3779061d4de632b46001774af2dd56"
     }
   },
@@ -46,10 +46,10 @@
       10
     ],
     "status": 0,
-    "rounds": 5,
+    "rounds": 9,
     "arrays": {
-      "cell_types": "c1a994e463535d4b71784b4a7c1a9710eb59513f5990245f00fc0c575a66e169",
-      "agent_locations": "06a2182b078296ab30161a2bec00b3baf84756bf105863dc3d1215db720a1b64",
+      "cell_types": "a15e91e81e3a1adc435780633b27aaea2af6e975f500d965ac330959aa1af44f",
+      "agent_locations": "f4483c1ec5a8d3dc9ec75791d92442c7e7acbe9cf9b7c115ba224176e015f4f4",
       "agent_types": "7bfd7e025acfb998d6e0cc1bb6535c50a82c59f407ea5f5979005a21850bfb16"
     }
   },
@@ -63,11 +63,11 @@
       50,
       30
     ],
-    "status": 0,
-    "rounds": 20,
+    "status": 2,
+    "rounds": 30,
     "arrays": {
-      "cell_types": "908f3a7c4bc6e3d7a6b260187a63f8966166fc02c1ff93e110c995539d2a5041",
-      "agent_locations": "34f641597d01cb2172834b6719c62cb22d662f2d76a397d7359d2c2b24e4e9d3",
+      "cell_types": "9b5a51d8fe4c9dc6b7566fab1a22a062d2930dbcd166faf7a4e1bf50f3631565",
+      "agent_locations": "0e6b01994b38a4cf9a6f7b9d47ff5448e493434bba0a04500d4f9781b56b26aa",
       "agent_types": "7bfd7e025acfb998d6e0cc1bb6535c50a82c59f407ea5f5979005a21850bfb16"
     }
   },
@@ -84,8 +84,8 @@
     "status": 2,
     "rounds": 5,
     "arrays": {
-      "cell_types": "3693f56f57cd660f0ed709e0105a6ae55f9c7c928c82af22c4d173e7e2d0e89c",
-      "agent_locations": "e9d7fbfe78c69372d4700f0deeff74e415321bda89b8616280c38ac5552e46ca",
+      "cell_types": "9660d0c2e913df8f2a54c061e76b4acb4c9ecda7a545eca01441ce662da140e8",
+      "agent_locations": "9bc3239f29c73825dcc6244044e2bd6d9f7ac8f788276e65493979d0754d3bdc",
       "agent_types": "7bfd7e025acfb998d6e0cc1bb6535c50a82c59f407ea5f5979005a21850bfb16"
     }
   },
@@ -102,8 +102,8 @@
     "status": 2,
     "rounds": 2,
     "arrays": {
-      "cell_types": "cfc3899175145ba86c18e81c5c7dfc4a42c1e4104fb3a54632b212e8ea8acfdf",
-      "agent_locations": "eb628e3af554f6a26ae054bc71cce670eefb9e0c4f33499563975edb1163e6ab",
+      "cell_types": "6d02b1dd98827e1327ed51f5d71ed4e68d2e7e4e3099736290b793f8c97ee8ef",
+      "agent_locations": "f8face22359ec9d96e557a2d12c00a2f7d1c67b0a6428cf098f9cf4ee68249e0",
       "agent_types": "d8355df9fb0242c6e36146ba9b5d92d5e625acb5300518d7e78f489f94b37e72"
     }
   },
@@ -120,8 +120,8 @@
     "status": 2,
     "rounds": 2,
     "arrays": {
-      "cell_types": "6f990bc0ed062353f3a811cc9d41966196920b4027eb8691e9f96a03f1b143d6",
-      "agent_locations": "e1d7d49b078defc9290c891febff81ed906f10262e503ba78c0604cdb1c1725c",
+      "cell_types": "4297b8fa25f10fbab375d964124c3966fcb52acbb5bc0e9a4e54462dddb30b48",
+      "agent_locations": "400aa2b9dd606062254c576a6bcd04b646a440b8221370337509e9e15637603a",
       "agent_types": "ed8737820af7a9a112e4411f052e4d227e58a7f75313c9c6efff7a2bee0e5821"
     }
   }

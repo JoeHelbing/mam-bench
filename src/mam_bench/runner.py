@@ -21,16 +21,14 @@ from mam_bench.simulations.schelling.simulation import SchellingSim
 
 logger = logging.getLogger(__name__)
 
-SIMULATIONS: Mapping[str, BenchmarkSimulation] = {
-    "schelling-influence-pilot-v1": SchellingSim(),
-}
+SIMULATIONS = ("schelling-influence-pilot-v1",)
 RuntimeBuilder = Callable[[ModelSelection], ModelRuntime]
 
 
 async def run_benchmark(
     config: BenchmarkConfig,
     *,
-    simulations: Mapping[str, BenchmarkSimulation] = SIMULATIONS,
+    simulations: Mapping[str, BenchmarkSimulation] | None = None,
     runtime_builder: RuntimeBuilder = create_runtime,
     on_output_directory: Callable[[Path], None] | None = None,
 ) -> BenchmarkTopline:
@@ -40,12 +38,15 @@ async def run_benchmark(
     so its output remains discoverable even if execution fails.
     """
 
-    unknown = tuple(name for name in config.simulations if name not in simulations)
+    available = SIMULATIONS if simulations is None else simulations
+    unknown = tuple(name for name in config.simulations if name not in available)
     if unknown:
         raise ValueError(
             f"Unknown simulations: {', '.join(map(repr, unknown))}. "
-            f"Available simulations: {', '.join(sorted(simulations)) or '(none)'}"
+            f"Available simulations: {', '.join(sorted(available)) or '(none)'}"
         )
+    if simulations is None:
+        simulations = {"schelling-influence-pilot-v1": SchellingSim(settings=config.schelling)}
     selected_simulations = tuple(simulations[simulation_id] for simulation_id in config.simulations)
 
     runtimes: list[ModelRuntime] = []

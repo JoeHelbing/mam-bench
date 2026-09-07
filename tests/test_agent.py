@@ -13,6 +13,7 @@ from pydantic_ai.messages import (
     SystemPromptPart,
     TextContent,
     TextPart,
+    ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
     UserPromptPart,
@@ -169,6 +170,38 @@ class CompactionModel:
 
 
 class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_output_token_limit_preserves_effects_usage_and_next_turn(self) -> None:
+        calls = 0
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return _response(ToolCallPart("post_message", {"text": "saved"}, "post"))
+            if calls == 2:
+                return ModelResponse(
+                    parts=[ThinkingPart("unfinished reasoning")],
+                    finish_reason="length",
+                    usage=RequestUsage(input_tokens=10, output_tokens=32768),
+                )
+            _assert_complete_tool_history(messages)
+            return _response(TextPart("recovered"))
+
+        runtime = AgentSessionRuntime(Agent(FunctionModel(model)))
+        with self.assertLogs("mam_bench.agent", level="INFO") as logs:
+            self.assertIsNone(await runtime.run("a", "go", deps=None))
+        self.assertTrue(any("reason=output_token_limit" in line for line in logs.output))
+        self.assertEqual(calls, 2)
+        self.assertEqual(runtime.usage.output_tokens, 32770)
+        self.assertIn("saved", (await runtime.board.read("b")).content)
+        self.assertTrue(
+            any(
+                isinstance(message, ModelResponse) and message.finish_reason == "length"
+                for message in runtime.history("a")
+            )
+        )
+        self.assertEqual(await runtime.run("a", "again", deps=None), "recovered")
+
     async def test_private_memory_and_history(self) -> None:
         model = MemoryModel()
         runtime = AgentSessionRuntime(Agent(FunctionModel(model)))

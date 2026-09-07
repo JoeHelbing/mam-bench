@@ -1,11 +1,15 @@
 """Scientific records and tool arguments; behavior lives in the domain classes."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from mam_bench.model import RuntimeInfo
+if TYPE_CHECKING:
+    from mam_bench.model import RuntimeInfo
 
 from .profile import LandscapeCell
 from .reference import BoardCoordinate, CellGrid, LocationArray, TerminalStatus
@@ -21,6 +25,9 @@ class EvaluationConfig:
     cell: LandscapeCell
     seed_id: int
     objective: SteeringObjective = SteeringObjective.INTEGRATION
+    max_transitions: int = 30
+    vision_radius: int = 3
+    controlled_agent_count: int = 16
 
 
 @dataclass(frozen=True)
@@ -72,8 +79,8 @@ class Move(BaseModel):
     """Request one vacancy; SchellingSim validates and reserves it."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    row: int = Field(strict=True, ge=0, lt=20)
-    column: int = Field(strict=True, ge=0, lt=20)
+    row: int = Field(strict=True, ge=0)
+    column: int = Field(strict=True, ge=0)
 
 
 class Stay(BaseModel):

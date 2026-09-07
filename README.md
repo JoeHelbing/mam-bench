@@ -11,10 +11,19 @@ simulation. Each evaluation first runs the ordinary population, then runs the
 model-controlled population from the same initial state and compares outcomes.
 Both complete trajectories are saved with the evaluation.
 
-The fixed evaluation uses a 20x20 toroidal board, two equally sized groups,
+The default evaluation uses a 20x20 toroidal board, two equally sized groups,
 25% vacancies, tolerance `3/4`, and Seed 50. Sixteen of the 300 occupants become
-model-controlled agents for 30 rounds. Ordinary agents reserve nearest
-satisfactory vacancies; all accepted moves settle together.
+model-controlled agents for 30 rounds. All agents see radius 3: the 48 surrounding
+cells in a 7x7 square, wrapping at board edges. Satisfaction still uses the eight
+adjacent cells. Unhappy ordinary agents choose the nearest visible vacancy whose
+predicted same-type fraction improves on their current fraction; satisfied agents
+stay. Predictions use only cells visible from the current origin, remove that
+origin, and treat no known occupied neighbors as fraction 1. Unknown cells are
+excluded. Equal-distance choices break ties uniformly; no improvement means stay.
+Model-controlled agents may request any starting vacancy, including outside their
+view, without a satisfaction requirement. They reserve first; ordinary agents
+reserve in seeded shuffled order. All accepted moves settle together, so vacated
+origins become available the following round.
 
 The detailed protocol and implementation reading guide are kept locally under
 `docs/`, which is ignored by Git. This README describes the published interface.
@@ -71,7 +80,8 @@ without adding it to the project's dependencies.
 
 ## Read the implementation
 
-- `config.py` validates selections and per-model settings.
+- `config.py` validates selections and per-model settings; Schelling `settings.py`
+  validates the simulation parameters.
 - `model.py` constructs providers using those settings.
 - Generic `agent.py` owns persistent sessions, private notebooks, compaction,
   bounded turns, and rolling concurrency.
@@ -101,15 +111,52 @@ uv run --no-dev main.py examples/schelling-qwen9b-venice.yaml
 ```
 
 `main.py` accepts exactly one `.yaml` path. The YAML contract selects built-in
-Benchmark Simulations, Model Runtimes, and per-model settings. It cannot change mechanics,
-objectives,
-prompts, tools, datasets, rounds, or scoring. `output_directory` is a reusable
-results root. Relative output paths resolve from the working directory where
+Benchmark Simulations, Model Runtimes, per-model settings, and Schelling parameters.
+`output_directory` is a reusable results root. Relative output paths resolve from
+the working directory where
 `main.py` is invoked, not from the YAML file's directory. Absolute output paths
 remain absolute. For example, running from the repository root with
 `output_directory: results/schelling-muse-spark` saves beneath that repository's
 `results/`, without a `../` prefix. All example YAML files list the current
 per-model settings explicitly.
+
+The optional top-level `schelling` section applies to every selected model. Omit
+it to use these defaults:
+
+```yaml
+simulations: [schelling-influence-pilot-v1]
+schelling:
+  board_size: 20
+  tolerance: "3/4"
+  vacancy_fraction: "1/4"
+  seed_id: 50
+  max_transitions: 30
+  vision_radius: 3
+  controlled_agent_count: 16
+  objective: integration
+# models and output_directory are also required; see the complete examples.
+```
+
+`vision_radius` controls both ordinary and model-controlled direct visibility;
+ordinary destination search uses that same radius. Strict Local improvement and
+unrestricted model destination requests are the standard movement rules. The
+objective can be `integration` or `segregation`. The ordinary reference uses the
+same board parameters, seed, vision, and round limit as the controlled trial.
+
+Fractions must be quoted rational strings. Their representation participates in
+the seeded RNG, so keep it identical when comparing runs. Vacancy counts round
+down to whole cells. Board size is 3-255; the vision diameter must fit the board.
+Both the total population and controlled count must be even, with at least one
+vacancy. Ordinary identities must occupy more than one quarter of the board,
+which guarantees at least one scored edge throughout the trial. Controlled
+identities are selected equally from the beginning of each type group. Round
+limits must be positive. Unknown settings and invalid combinations are rejected
+before model initialization. Model sampling
+settings remain under `models[].settings`; the simulation seed does not make
+provider responses deterministic.
+
+For Muse with explicit simulation defaults, use
+[`examples/schelling-muse-spark.yaml`](examples/schelling-muse-spark.yaml).
 
 Every invocation creates a unique timestamp-and-random-suffix
 child
@@ -199,13 +246,13 @@ For Qwen 3.5 9B on Venice at concurrency 16 with DEBUG logging, use the
 uv run --no-sync main.py examples/schelling-qwen9b-venice.yaml 2>run.log
 ```
 
-Schelling Influence v3 preserves the YAML selection
+Schelling Influence v4 preserves the YAML selection
 `schelling-influence-pilot-v1`. Each selected model receives a fresh ordinary
-run
-and one stochastic 30-round controlled trial. Each successful pair writes:
+run and one stochastic controlled trial for the configured round limit. Each
+successful pair writes:
 
 - `ordinary.npz`: initialization and every settled ordinary state;
-- `model-controlled.npz`: initialization and all 30 controlled states; and
+- `model-controlled.npz`: initialization and all controlled states; and
 - `result.json`: parameters, provenance, identity mask, termination, and scores;
 - `agent-messages/`: native PydanticAI Harness agent history archives; and
 - `message-board.jsonl`: every shared post and simulation announcement in order.

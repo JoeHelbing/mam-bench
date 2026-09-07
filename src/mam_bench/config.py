@@ -6,6 +6,8 @@ from typing import Annotated, Literal, Self, cast
 import yaml
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
+from mam_bench.simulations.schelling.settings import SchellingSettings
+
 # YAML loading
 
 
@@ -115,6 +117,7 @@ class BenchmarkConfig(BaseModel):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     simulations: tuple[SimulationSelection, ...] = Field(min_length=1)
     models: tuple[ModelSelection, ...] = Field(min_length=1)
+    schelling: SchellingSettings = SchellingSettings()
     output_directory: Path = Field(
         description=(
             "Results root relative to the working directory; each invocation creates a unique child"

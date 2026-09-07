@@ -25,7 +25,7 @@ def identity(messages: list[ModelMessage]) -> tuple[int, int]:
         if isinstance(part, UserPromptPart)
     ]
     for prompt in reversed(prompts):
-        match = re.search(r"Round (\d+) of 30 for ModelControlledAgent (\d+)", prompt)
+        match = re.search(r"Round (\d+) of \d+ for ModelControlledAgent (\d+)", prompt)
         if match:
             return int(match[1]), int(match[2])
     raise AssertionError("missing actor observation")

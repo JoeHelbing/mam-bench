@@ -7,13 +7,92 @@ from pydantic import ValidationError
 
 from mam_bench.config import (
     AgentSettings,
+    BenchmarkConfig,
     OpenAICompatibleModel,
     OpenRouterModel,
     load_benchmark_config,
 )
+from mam_bench.simulations.schelling.settings import SchellingSettings
 
 
 class BenchmarkConfigTests(unittest.TestCase):
+    def test_loads_schelling_parameters_and_preserves_fraction_seed_coordinates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "benchmark.yaml"
+            path.write_text(
+                "simulations: [schelling-influence-pilot-v1]\n"
+                "models: [{id: test, runtime: openrouter, model: test, provider: test}]\n"
+                "output_directory: results\n"
+                "schelling:\n"
+                "  board_size: 12\n"
+                "  tolerance: 6/8\n"
+                "  vacancy_fraction: 2/8\n"
+                "  seed_id: 9\n"
+                "  max_transitions: 45\n"
+                "  vision_radius: 2\n"
+                "  controlled_agent_count: 4\n"
+                "  objective: segregation\n",
+                encoding="utf-8",
+            )
+            settings = load_benchmark_config(path).schelling
+        self.assertEqual(settings.board_size, 12)
+        self.assertEqual(settings.seed_id, 9)
+        self.assertEqual(settings.max_transitions, 45)
+        self.assertEqual(settings.vision_radius, 2)
+        self.assertEqual(settings.objective, "segregation")
+        self.assertEqual(str(settings.cell.tolerance), "6/8")
+        self.assertEqual(str(settings.cell.vacancy_fraction), "2/8")
+        self.assertEqual(settings.cell.agent_count, 108)
+        self.assertEqual(settings.controlled_agent_ids, (0, 1, 54, 55))
+
+    def test_existing_yaml_selections_receive_radius_three_defaults(self) -> None:
+        config = BenchmarkConfig.model_validate(
+            {
+                "simulations": ["schelling-influence-pilot-v1"],
+                "models": [
+                    {"id": "test", "runtime": "openrouter", "model": "test", "provider": "test"}
+                ],
+                "output_directory": "results",
+            }
+        )
+        self.assertEqual(config.schelling, SchellingSettings())
+        self.assertEqual(config.schelling.vision_radius, 3)
+        self.assertEqual(config.schelling.cell.agent_count, 300)
+        self.assertEqual(config.schelling.controlled_agent_ids, (*range(8), *range(150, 158)))
+
+    def test_rejects_invalid_schelling_parameters(self) -> None:
+        for values in (
+            {"board_size": 2},
+            {"board_size": 256},
+            {"board_size": 20.0},
+            {"tolerance": "3/0"},
+            {"tolerance": "-1/4"},
+            {"tolerance": "5/4"},
+            {"tolerance": "0.75"},
+            {"tolerance": "3/4/5"},
+            {"tolerance": 0.75},
+            {"tolerance": "1/1000000001"},
+            {"vacancy_fraction": "1/1"},
+            {"vacancy_fraction": "0/1"},
+            {"vacancy_fraction": "1/401"},
+            {"vacancy_fraction": "1/400"},
+            {"seed_id": -1},
+            {"seed_id": True},
+            {"seed_id": "50"},
+            {"max_transitions": 0},
+            {"vision_radius": 0},
+            {"vision_radius": 10},
+            {"controlled_agent_count": 1},
+            {"controlled_agent_count": 3},
+            {"controlled_agent_count": 300},
+            {"board_size": 7, "vacancy_fraction": "1/49", "controlled_agent_count": 46},
+            {"vacancy_fraction": "3/4", "controlled_agent_count": 2},
+            {"objective": "unknown"},
+            {"vision_raduis": 3},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValidationError):
+                SchellingSettings.model_validate(values)
+
     def test_output_paths_use_working_directory_and_preserve_absolute_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

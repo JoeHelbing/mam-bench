@@ -11,22 +11,6 @@ simulation. Each evaluation first runs the ordinary population, then runs the
 model-controlled population from the same initial state and compares outcomes.
 Both complete trajectories are saved with the evaluation.
 
-The default evaluation uses a 20x20 toroidal board, two equally sized groups,
-25% vacancies, tolerance `3/4`, and Seed 50. Sixteen of the 300 occupants become
-model-controlled agents for 30 rounds. All agents see radius 3: the 48 surrounding
-cells in a 7x7 square, wrapping at board edges. Satisfaction still uses the eight
-adjacent cells. Unhappy ordinary agents choose the nearest visible vacancy whose
-predicted same-type fraction improves on their current fraction; satisfied agents
-stay. Predictions use only cells visible from the current origin, remove that
-origin, and treat no known occupied neighbors as fraction 1. Unknown cells are
-excluded. Equal-distance choices break ties uniformly; no improvement means stay.
-Model-controlled agents may request any starting vacancy, including outside their
-view, without a satisfaction requirement. They reserve first; ordinary agents
-reserve in seeded shuffled order. All accepted moves settle together, so vacated
-origins become available the following round.
-
-The detailed protocol and implementation reading guide are kept locally under
-`docs/`, which is ignored by Git. This README describes the published interface.
 The [project overview](https://joehelbing.net/post/mam-bench) illustrates the
 pilot.
 
@@ -44,39 +28,6 @@ mise run setup
 If the toolchain is already available, `uv sync` installs the project and its
 development dependencies. Use `uv sync --no-dev` for a benchmark-only
 environment.
-
-The old reference dataset and sweep utilities are archived locally under
-`.scratch/schelling-reference-v2-packaged/` and
-`.scratch/schelling-reference-v2-tools/`. These ignored archives are historical
-material; ordinary evaluation computes its reference afresh and needs neither.
-
-## Developer notebooks
-
-Mise manages JupyterLab and nbdev in isolated tool environments. The project's
-`dev` dependency group contains `ipykernel`, which runs notebook code with the
-same Python interpreter and dependencies as the benchmark.
-
-```fish
-mise run notebooks
-```
-
-This installs the locked project dependencies, registers a kernel inside
-`.venv`, and opens JupyterLab on `127.0.0.1`. Select **MAM-Bench (Python 3.14)**
-as the notebook kernel. Kernel registration stays local to this checkout.
-
-The nbdev commands are available through mise, for example
-`mise exec -- nbdev-export --help`. This repository does not yet use nbdev to
-generate its Python modules. When testing notebooks that import project code,
-run nbdev in a temporary environment that also has access to the project:
-
-```fish
-uv run --frozen --with nbdev==3.3.15 nbdev-test path/to/notebook.ipynb
-```
-
-Unlike Jupyter, `nbdev-test` executes Python in its own process and does not use
-the selected notebook kernel. The `--with` option supplies nbdev for that
-command
-without adding it to the project's dependencies.
 
 ## Read the implementation
 
@@ -345,24 +296,3 @@ model HTTP timeout. Turn/request
 timeouts abort the pair unscored. The separate 25-model-request and
 25-successful-function-call limits end an unfinished turn as stay. These limits
 reset per turn; they do not bound the duration of a complete evaluation.
-
-## Verify the implementation
-
-```bash
-mise run check
-```
-
-The individual `test`, `lint`, and `typecheck` tasks are also available through
-`mise run`. Tests use fake, scripted, or function-backed models and make no live
-provider calls.
-
-## Documentation
-
-[`CONTEXT.md`](CONTEXT.md) defines the canonical project language. Detailed design
-notes, protocols, and historical decisions under `docs/` are local-only and are
-not included in the Git repository.
-
-## Method source
-
-Thomas C. Schelling, "Dynamic Models of Segregation," *Journal of Mathematical
-Sociology* 1 (1971), 143-186.

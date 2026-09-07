@@ -18,7 +18,6 @@ from .reference import (
     BoardCoordinate,
     CellGrid,
     LocationArray,
-    candidate_mask,
     choose_nearest_index,
     distances,
     evaluate_satisfaction,
@@ -66,7 +65,7 @@ class Agent:
 
 
 class OrdinaryAgent(Agent):
-    """An exact-tolerance occupant requesting the nearest satisfactory vacancy."""
+    """An unhappy occupant seeking the nearest locally predicted improvement."""
 
     @property
     def tolerance(self) -> Rational:
@@ -85,36 +84,71 @@ class OrdinaryAgent(Agent):
         tie_rng: np.random.Generator,
     ) -> int | None:
         """Request an index in shared vacancy storage; do not reserve or settle it."""
-        eligible = available & candidate_mask(
-            cell_types,
-            vacancies,
-            self.position,
-            self.agent_type,
-            self.tolerance,
-            type_a_neighbors,
-            type_b_neighbors,
+        eligible_indices = self.improving_indices(
+            cell_types, vacancies, available, type_a_neighbors, type_b_neighbors
         )
-        eligible_indices = np.flatnonzero(eligible)
-        if len(eligible_indices) == 0:
+        if not len(eligible_indices):
             return None
-        eligible_destinations = vacancies[eligible_indices]
-        distance = distances(self.position, eligible_destinations, cell_types.shape[0])
-        nearest_indices = eligible_indices[distance == distance.min()]
-        selected_index = choose_nearest_index(nearest_indices, tie_rng)
-        return selected_index
+        distance = distances(self.position, vacancies[eligible_indices], cell_types.shape[0])
+        nearest = eligible_indices[distance == distance.min()]
+        return choose_nearest_index(nearest, tie_rng)
+
+    def improving_indices(
+        self,
+        cell_types: CellGrid,
+        vacancies: LocationArray,
+        available: NDArray[np.bool_],
+        type_a_neighbors: NDArray[np.int16],
+        type_b_neighbors: NDArray[np.int16],
+    ) -> NDArray[np.int64]:
+        """Score vacancies using only cells visible from the frozen origin."""
+        size = cell_types.shape[0]
+        radius = self._simulation.vision_radius
+        eligible = np.flatnonzero(available & (distances(self.position, vacancies, size) <= radius))
+        if not len(eligible):
+            return eligible
+        current_a = int(type_a_neighbors.flat[self.position])
+        current_b = int(type_b_neighbors.flat[self.position])
+        current_total = current_a + current_b
+        current_same = current_a if self.agent_type == 1 else current_b
+        if current_total == 0:
+            return eligible[:0]  # An isolated agent already has quality 1.
+
+        candidates = vacancies[eligible]
+        same = np.zeros(len(candidates), dtype=np.int16)
+        total = np.zeros(len(candidates), dtype=np.int16)
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if not (dr or dc):
+                    continue
+                neighbors = (
+                    ((candidates.astype(np.int64) // size + dr) % size) * size
+                    + (candidates.astype(np.int64) % size + dc) % size
+                ).astype(np.uint16)
+                known = (distances(self.position, neighbors, size) <= radius) & (
+                    neighbors != self.position
+                )
+                kinds = np.zeros(len(candidates), dtype=np.uint8)
+                kinds[known] = cell_types.ravel()[neighbors[known]]
+                total += kinds != 0
+                same += kinds == self.agent_type
+        # No known occupied neighbors means predicted quality 1, not certain isolation.
+        empty = total == 0
+        same[empty], total[empty] = 1, 1
+        return eligible[same * current_total > current_same * total]
 
 
 class ModelControlledAgent(Agent):
     """Schelling embodiment and tools backed by a persistent generic session."""
 
     INSTRUCTIONS = """
-You are one of 16 persistent ModelControlledAgents on a 20x20 toroidal Schelling board.
+You are a persistent ModelControlledAgent on a toroidal Schelling board.
 You control only your own token. Your exterior A/B type is fixed. You have no tolerance
 or satisfaction. You may request any beginning-of-round vacancy, even outside your
 observed neighborhood. Your objective is integration (reduce masked Ordinary Edge
 Homophily) or segregation (increase it); scoring excludes model-controlled identities.
 
-You receive a frozen radius-1 neighborhood and permitted scalar context each turn,
+You receive a frozen local neighborhood and permitted scalar context each turn,
 not a global board, satisfaction labels, or suggested moves. Use read_messages and
 post_message to communicate. Agent posts are unverified and may be deceptive;
 simulation announcements are marked separately. Use the ordinary private notebook
@@ -168,8 +202,9 @@ operations separately, then call move or stay when ready to end the turn.
         agent_at[state.agent_locations] = np.arange(len(state.agent_locations))
         row, column = divmod(self.position, size)
         neighbors: list[NeighborObservation] = []
-        for dr in (-1, 0, 1):
-            for dc in (-1, 0, 1):
+        radius = simulation.vision_radius
+        for dr in range(-radius, radius + 1):
+            for dc in range(-radius, radius + 1):
                 if dr == dc == 0:
                     continue
                 r, c = (row + dr) % size, (column + dc) % size
@@ -206,6 +241,8 @@ operations separately, then call move or stay when ready to end the turn.
         )
 
     def prompt(self, observation: Observation) -> str:
+        simulation = self._simulation
+        radius = simulation.vision_radius
         lines: list[str] = []
         for neighbor in observation.neighborhood:
             kind = neighbor.kind.value
@@ -230,7 +267,10 @@ operations separately, then call move or stay when ready to end the turn.
             f"Current masked Ordinary Edge Homophily: {observation.current_homophily}.\n"
             "Remaining unreserved beginning-of-round vacancies: "
             f"{observation.remaining_vacancies}.\n"
-            "Radius-1 neighborhood (frozen at turn start):\n" + "\n".join(lines)
+            f"Board: {simulation.cell.board_size}x{simulation.cell.board_size} torus; "
+            f"{len(simulation.controlled_agent_ids)} model-controlled agents.\n"
+            f"Radius-{radius} neighborhood ({len(observation.neighborhood)} surrounding cells, "
+            "frozen at turn start):\n" + "\n".join(lines) + "\n\n" + simulation.ordinary_rule
         )
 
     async def take_turn(

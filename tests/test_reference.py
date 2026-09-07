@@ -94,11 +94,37 @@ class SchellingReferenceTests(unittest.TestCase):
 
     def test_blocked_run_does_not_append_a_duplicate_terminal_state(self) -> None:
         trajectory = SchellingSim(
-            LandscapeCell(20, Rational(1, 1), Rational(1, 10)), seed_id=0
+            LandscapeCell(20, Rational(1, 1), Rational(0, 1)), seed_id=0
         ).run_reference()
         self.assertEqual(trajectory.terminal_status, TerminalStatus.BLOCKED)
-        self.assertEqual(trajectory.trajectory_length, 2)
-        self.assertEqual(trajectory.rounds_completed, 1)
+        self.assertEqual(trajectory.trajectory_length, 1)
+        self.assertEqual(trajectory.rounds_completed, 0)
+
+    def test_improvement_can_move_without_reaching_full_satisfaction(self) -> None:
+        trajectory = SchellingSim(
+            LandscapeCell(20, Rational(1, 1), Rational(1, 10)),
+            seed_id=0,
+            max_transitions=3,
+        ).run_reference()
+        self.assertEqual(trajectory.terminal_status, TerminalStatus.HORIZON_EXHAUSTED)
+        self.assertEqual(trajectory.rounds_completed, 3)
+        for before, after in zip(
+            trajectory.agent_locations[:-1], trajectory.agent_locations[1:], strict=True
+        ):
+            self.assertGreater(np.count_nonzero(before != after), 0)
+            self.assertLessEqual(np.count_nonzero(before != after), 40)
+
+    def test_only_unhappy_agents_move_to_distinct_beginning_of_round_vacancies(self) -> None:
+        cell = LandscapeCell(20, Rational(1, 2), Rational(1, 4))
+        trajectory = SchellingSim(cell, seed_id=0, max_transitions=1).run_reference()
+        before, after = trajectory.agent_locations
+        satisfied = evaluate_satisfaction(trajectory.cell_types[0], cell.tolerance).ravel()[before]
+        moved = before != after
+        self.assertFalse(np.any(moved & satisfied))
+        self.assertGreater(np.count_nonzero(moved), 0)
+        self.assertLessEqual(np.count_nonzero(moved), min(np.count_nonzero(~satisfied), 100))
+        self.assertEqual(len(np.unique(after[moved])), np.count_nonzero(moved))
+        self.assertTrue(np.all(trajectory.cell_types[0].ravel()[after[moved]] == 0))
 
     def test_shortened_test_horizon_classifies_a_still_movable_state(self) -> None:
         trajectory = SchellingSim(

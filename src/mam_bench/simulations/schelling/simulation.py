@@ -24,7 +24,7 @@ from .models import (
     Trajectory,
 )
 from .occupants import Agent, ModelControlledAgent, OrdinaryAgent
-from .profile import MASTER_SEED_WORDS, MAX_TRANSITIONS, LandscapeCell, Rational
+from .profile import MASTER_SEED_WORDS, LandscapeCell
 from .reference import (
     EMPTY_CELL,
     PAD_LOCATION,
@@ -33,13 +33,13 @@ from .reference import (
     CellGrid,
     LocationArray,
     TerminalStatus,
-    candidate_mask,
     evaluate_satisfaction,
     neighbor_counts,
     ordinary_edge_homophily,
     reference_rng,
     unhappy_agent_ids,
 )
+from .settings import SchellingSettings
 
 if TYPE_CHECKING:
     from mam_bench.agent import AgentSessionRuntime
@@ -75,21 +75,28 @@ class SchellingSim:
     """One owner for ordinary mechanics, model-controlled rounds, and evaluation."""
 
     simulation_id = "schelling-influence-pilot-v1"
-    simulation_version = "schelling-influence-v3"
+    simulation_version = "schelling-influence-v4"
 
     def __init__(
         self,
         cell: LandscapeCell | None = None,
-        seed_id: int = 50,
+        seed_id: int | None = None,
         *,
-        max_transitions: int = MAX_TRANSITIONS,
+        max_transitions: int | None = None,
+        settings: SchellingSettings | None = None,
     ) -> None:
-        if seed_id < 0 or not 0 <= max_transitions <= MAX_TRANSITIONS:
+        self.settings = settings or SchellingSettings()
+        seed_id = self.settings.seed_id if seed_id is None else seed_id
+        max_transitions = (
+            self.settings.max_transitions if max_transitions is None else max_transitions
+        )
+        if seed_id < 0 or max_transitions < 0:
             raise ValueError("invalid seed or transition horizon")
-        self.cell = cell or LandscapeCell(20, Rational(3, 4), Rational(1, 4))
+        self.cell = cell or self.settings.cell
         self.seed_id = seed_id
         self.max_transitions = max_transitions
-        self.objective = SteeringObjective.INTEGRATION
+        self.vision_radius = self.settings.vision_radius
+        self.objective = SteeringObjective(self.settings.objective)
         self.controlled_agent_ids: tuple[int, ...] = ()
         self.reference_homophily: float | None = None
         self.ordinary_trajectory: Trajectory | None = None
@@ -99,6 +106,27 @@ class SchellingSim:
         self._vacancies: frozenset[int] = frozenset()
         self._reservations: dict[int, int] = {}
         self._initialize()
+
+    @property
+    def ordinary_rule(self) -> str:
+        """Describe the actual configured mechanics to model-controlled occupants."""
+        return (
+            f"Ordinary agents use strict radius-{self.vision_radius} current visibility. "
+            "Actual satisfaction uses occupied radius-1 neighbors and requires a matching-type "
+            f"fraction of at least {self.cell.tolerance}; isolated agents are satisfied. "
+            "Satisfied ordinary agents stay. An unhappy ordinary agent considers only starting "
+            f"vacancies within toroidal Chebyshev distance {self.vision_radius}. It evaluates "
+            "each destination's radius-1 neighborhood using ONLY cells visible from its current "
+            "origin. Unknown cells are excluded, and its own origin is removed. Zero known "
+            "occupied neighbors scores 1, which does not guarantee actual isolation. It chooses "
+            "the nearest vacancy with a strictly higher predicted matching-type fraction than "
+            "its current actual fraction, uniformly breaking remaining ties. No improvement "
+            "means stay. Model agents reserve first, then ordinary agents reserve in shuffled "
+            "order. All moves settle together; newly vacated origins are unavailable until "
+            "the next round. Everyone evaluates the frozen board and ignores other planned "
+            "moves. Model agents have no improvement requirement and may request any "
+            "beginning-of-round vacancy, including outside their observed neighborhood."
+        )
 
     def _initialize(self) -> None:
         cell = self.cell
@@ -146,12 +174,15 @@ class SchellingSim:
         runtime: ModelRuntime,
         *,
         cell: LandscapeCell | None = None,
-        seed_id: int = 50,
-        objective: SteeringObjective = SteeringObjective.INTEGRATION,
+        seed_id: int | None = None,
+        objective: SteeringObjective | None = None,
+        settings: SchellingSettings | None = None,
+        max_transitions: int | None = None,
     ) -> SchellingSim:
         """Compute a fresh ordinary reference, then prepare an inspectable model run."""
-        simulation = cls(cell, seed_id)
-        simulation.objective = objective
+        simulation = cls(cell, seed_id, settings=settings, max_transitions=max_transitions)
+        if objective is not None:
+            simulation.objective = objective
         simulation._start_model(runtime)
         return simulation
 
@@ -160,18 +191,27 @@ class SchellingSim:
     ) -> None:
         from mam_bench.agent import AgentSessionRuntime
 
-        if self.cell.board_size != 20 or self.cell.agent_count != 300:
-            raise ValueError("model-controlled evaluations require the fixed 20x20 population")
+        # Validate effective values, including legacy Python constructor overrides.
+        configured = SchellingSettings(
+            board_size=self.cell.board_size,
+            tolerance=str(self.cell.tolerance),
+            vacancy_fraction=str(self.cell.vacancy_fraction),
+            seed_id=self.seed_id,
+            max_transitions=self.max_transitions,
+            vision_radius=self.vision_radius,
+            controlled_agent_count=self.settings.controlled_agent_count,
+            objective=self.objective.value,
+        )
         # A separate instance of the same class runs identical ordinary mechanics.
         logger.info("reference.start seed=%d", self.seed_id)
-        ordinary = SchellingSim(self.cell, self.seed_id).run_reference()
+        ordinary = SchellingSim(settings=configured).run_reference()
         logger.info(
             "reference.end rounds=%d status=%s",
             ordinary.rounds_completed,
             ordinary.terminal_status.name,
         )
         self.ordinary_trajectory = ordinary
-        self.controlled_agent_ids = (*range(8), *range(150, 158))
+        self.controlled_agent_ids = configured.controlled_agent_ids
         self.reference_homophily = ordinary_edge_homophily(
             ordinary.agent_locations[-1],
             ordinary.agent_types,
@@ -181,7 +221,6 @@ class SchellingSim:
         self._cell_types = ordinary.cell_types[0].copy()
         self._agent_locations = ordinary.agent_locations[0].copy()
         self._agent_types = ordinary.agent_types.copy()
-        self.max_transitions = MAX_TRANSITIONS
         self._runtime = runtime
         self.sessions = AgentSessionRuntime(
             ModelControlledAgent.model_definition(runtime),
@@ -283,18 +322,11 @@ class SchellingSim:
         if not len(unhappy):
             return TerminalStatus.EQUILIBRIUM
         vacancies = np.flatnonzero(self._cell_types.ravel() == EMPTY_CELL).astype(np.uint16)
+        available = np.ones(len(vacancies), dtype=np.bool_)
         counts = neighbor_counts(self._cell_types)
         possible = any(
-            np.any(
-                candidate_mask(
-                    self._cell_types,
-                    vacancies,
-                    self.agent_position(int(identity)),
-                    self.agent_type(int(identity)),
-                    self.cell.tolerance,
-                    *counts,
-                )
-            )
+            isinstance(agent := self.agents[int(identity)], OrdinaryAgent)
+            and len(agent.improving_indices(self._cell_types, vacancies, available, *counts)) > 0
             for identity in unhappy
         )
         return TerminalStatus.HORIZON_EXHAUSTED if possible else TerminalStatus.BLOCKED
@@ -345,6 +377,10 @@ class SchellingSim:
         async with self._reservation_lock:
             if not self._stepping or agent_id not in self.controlled_agent_ids:
                 raise RuntimeError("reservation requires an active model-controlled turn")
+            if not (
+                0 <= move.row < self.cell.board_size and 0 <= move.column < self.cell.board_size
+            ):
+                raise ModelRetry("destination coordinates are outside the board")
             destination = move.row * self.cell.board_size + move.column
             if destination not in self._vacancies:
                 raise ModelRetry("destination was not vacant at the beginning of the round")
@@ -497,7 +533,14 @@ class SchellingSim:
             assert self.reference_homophily is not None
             directional = tuple(self._lift(value) for value in self._homophily)
             self._result = EvaluationResult(
-                EvaluationConfig(self.cell, self.seed_id, self.objective),
+                EvaluationConfig(
+                    self.cell,
+                    self.seed_id,
+                    self.objective,
+                    self.max_transitions,
+                    self.vision_radius,
+                    len(self.controlled_agent_ids),
+                ),
                 self._runtime.info,
                 self.ordinary_trajectory,
                 self._trajectory(),

@@ -2,7 +2,7 @@ import asyncio
 import unittest
 
 import numpy as np
-from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, ThinkingPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo
 
 from mam_bench.simulations.schelling import ModelControlledAgent, SchellingSim
@@ -10,6 +10,28 @@ from schelling_support import identity, runtime_for
 
 
 class RoundTests(unittest.IsolatedAsyncioTestCase):
+    async def test_output_token_limit_stays_then_actor_can_move_next_round(self) -> None:
+        async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            _, agent_id = identity(messages)
+            if agent_id == 0:
+                if sim.rounds_completed == 0:
+                    return ModelResponse(parts=[ThinkingPart("unfinished")], finish_reason="length")
+                row, column = divmod(destination, 20)
+                return ModelResponse(parts=[ToolCallPart("move", {"row": row, "column": column})])
+            return ModelResponse(parts=[ToolCallPart("stay", {})])
+
+        sim = SchellingSim.for_model(runtime_for(script))
+        origin = sim.agent_position(0)
+        first = await sim.step()
+        assert first is not None
+        self.assertEqual(first.controlled_moves, ())
+        self.assertEqual(sim.agent_position(0), origin)
+        destination = int(np.flatnonzero(sim.snapshot().cell_types.ravel() == 0)[0])
+        second = await sim.step()
+        assert second is not None
+        self.assertEqual(second.controlled_moves, ((0, destination),))
+        self.assertEqual(sim.rounds_completed, 2)
+
     async def test_rolling_reservations_collisions_and_frozen_settlement(self) -> None:
         release = asyncio.Event()
         admitted = asyncio.Event()
@@ -103,10 +125,13 @@ class RoundTests(unittest.IsolatedAsyncioTestCase):
         assert isinstance(agent, ModelControlledAgent)
         snapshot = sim.snapshot()
         observation = agent.observe()
-        self.assertEqual(len(observation.neighborhood), 8)
+        self.assertEqual(len(observation.neighborhood), 48)
         row, col = divmod(agent.position, 20)
         expected = {
-            ((row + dr) % 20, (col + dc) % 20) for dr in (-1, 0, 1) for dc in (-1, 0, 1) if dr or dc
+            ((row + dr) % 20, (col + dc) % 20)
+            for dr in range(-3, 4)
+            for dc in range(-3, 4)
+            if dr or dc
         }
         self.assertEqual(
             {(n.location.row, n.location.column) for n in observation.neighborhood}, expected

@@ -277,20 +277,29 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT]:
                     outcome = "usage_limit"
                     logger.info("turn.stop session=%s reason=usage_limit", session_id)
                     output = None
+
+                # TODO: Have to fix this
                 except UnexpectedModelBehavior as error:
-                    # PydanticAI exposes no dedicated retry-exhaustion subtype.
-                    # Match only its native retry messages; other model failures abort.
-                    if not re.fullmatch(
+                    # These native PydanticAI errors have no dedicated subtype.
+                    # Only exhausted turn budgets are recoverable; other failures abort.
+                    if re.fullmatch(
+                        r"Model token limit \([^)]+\) exceeded before any response "
+                        r"was generated\..*",
+                        str(error),
+                    ):
+                        outcome = "output_token_limit"
+                    elif re.fullmatch(
                         r"Exceeded maximum output retries \(\d+\)|"
                         r"Tool .+ exceeded max retries count of \d+\..*",
                         str(error),
                     ):
+                        outcome = "retry_exhaustion"
+                    else:
                         self._failure = AgentInfrastructureFailure(
                             "provider", "model returned an unusable response"
                         )
                         raise self._failure from None
-                    outcome = "retry_exhaustion"
-                    logger.info("turn.stop session=%s reason=retry_exhaustion", session_id)
+                    logger.info("turn.stop session=%s reason=%s", session_id, outcome)
                     output = None
                 except (APITimeoutError, TimeoutError) as error:
                     scope = (

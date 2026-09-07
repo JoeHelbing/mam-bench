@@ -1,4 +1,4 @@
-"""Golden trajectories captured from the procedural v2 engine before refactoring."""
+"""Golden trajectories for strict radius-3 local improvement."""
 
 import hashlib
 import json
@@ -11,7 +11,7 @@ from mam_bench.simulations.schelling.simulation import SchellingSim
 
 
 class CharacterizationTests(unittest.TestCase):
-    def test_pre_refactor_trajectories(self) -> None:
+    def test_strict_vision_improvement_trajectories(self) -> None:
         cases = json.loads(
             Path(__file__).with_name("schelling_reference_characterization.json").read_text()
         )

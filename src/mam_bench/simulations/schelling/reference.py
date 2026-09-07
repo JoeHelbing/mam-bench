@@ -69,8 +69,8 @@ def evaluate_satisfaction(cell_types: CellGrid, tolerance: Rational) -> NDArray[
     same_neighbors = np.where(cell_types == TYPE_A, type_a, type_b)
     satisfied = np.zeros(cell_types.shape, dtype=np.bool_)
     satisfied[occupied_cells] = (occupied_neighbors[occupied_cells] == 0) | (
-        same_neighbors[occupied_cells] * tolerance.denominator
-        >= occupied_neighbors[occupied_cells] * tolerance.numerator
+        same_neighbors[occupied_cells].astype(np.int64) * tolerance.denominator
+        >= occupied_neighbors[occupied_cells].astype(np.int64) * tolerance.numerator
     )
     return satisfied
 

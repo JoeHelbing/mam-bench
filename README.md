@@ -62,7 +62,7 @@ the world. Subsequent draws may diverge as states and conditional policies diver
 this does not claim permanently matched randomness.
 
 Schelling preserves strict local improvement for ordinary agents: satisfaction
-uses occupied radius-one neighbors and an exact rational tolerance; unhappy
+uses occupied radius-one neighbors and a floating-point tolerance; unhappy
 agents choose the nearest predicted improvement within their vision, with random
 ties. Destination predictions use only cells visible from the current origin,
 excluding the origin itself. Unknown cells are excluded; zero known occupied
@@ -70,6 +70,12 @@ neighbors predicts quality one. Model agents may request any starting vacancy.
 Model reservations precede shuffled ordinary reservations; all moves settle
 together. Ordinary execution stops at equilibrium, blockage, or the horizon;
 controlled execution runs to the configured horizon.
+
+Set `tolerance` and `vacancy_fraction` as numbers between zero and one (for example,
+`0.75` and `0.25`). Vacancy counts round `board_size ** 2 * vacancy_fraction` to the
+nearest integer, with ties to even; population validation still requires equal
+type counts. Satisfaction compares the same-type neighbor share directly with
+the tolerance, without an epsilon.
 
 Schelling scores final ordinary-to-ordinary edge homophily, excluding the selected
 controlled identities in both worlds:

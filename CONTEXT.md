@@ -186,7 +186,7 @@ initial grid across tolerance values.
 _Avoid_: evaluation seed, trial
 
 **Final Satisfaction**:
-The fraction of occupied agents satisfying their exact tolerance rule in a run's
+The fraction of occupied agents satisfying their tolerance rule in a run's
 final retained state. It remains defined for equilibrium, blocked, and
 horizon-exhausted runs.
 _Avoid_: equilibrium satisfaction, similarity

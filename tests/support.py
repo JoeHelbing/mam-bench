@@ -26,8 +26,8 @@ def schelling(**updates: object) -> SchellingSettings:
         {
             "simulation": "schelling",
             "board_size": 8,
-            "tolerance": "3/4",
-            "vacancy_fraction": "1/4",
+            "tolerance": 0.75,
+            "vacancy_fraction": 0.25,
             "seed": 7,
             "max_steps": 3,
             "vision_radius": 2,

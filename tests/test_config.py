@@ -45,8 +45,7 @@ class ConfigurationTests(unittest.TestCase):
             {"controlled_agent_count": 3},
             {"controlled_agent_count": 40},
             {"vision_radius": 4},
-            {"vacancy_fraction": "1"},
-            {"tolerance": "1/0"},
+            {"vacancy_fraction": 1.0},
             {"max_steps": 0},
             {"seed": -1},
         ):
@@ -70,8 +69,14 @@ class ConfigurationTests(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 load_benchmark_config(model, output_directory=root)
 
-    def test_exact_fractions_normalize_without_changing_seed(self) -> None:
-        self.assertEqual(schelling(tolerance="6/8"), schelling(tolerance="3/4"))
+    def test_float_proportions_and_vacancy_rounding(self) -> None:
+        for field in ("tolerance", "vacancy_fraction"):
+            for value in (-0.1, 1.1, float("nan"), float("inf"), "3/4", "0.75", True):
+                with self.subTest(field=field, value=value), self.assertRaises(ValidationError):
+                    schelling(**{field: value})
+        for fraction in (0.25, 15.5 / 64, 16.5 / 64, 0.24999999999999997):
+            with self.subTest(fraction=fraction):
+                self.assertEqual(schelling(vacancy_fraction=fraction).vacancy_count, 16)
 
     def test_agent_budget_and_sampling_settings_validate(self) -> None:
         for settings in (

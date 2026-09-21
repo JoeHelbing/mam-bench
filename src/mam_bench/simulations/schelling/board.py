@@ -1,7 +1,5 @@
 """Schelling spatial state and measurements, shared by both worlds."""
 
-from fractions import Fraction
-
 import numpy as np
 from numpy.typing import NDArray
 
@@ -43,13 +41,8 @@ class Board:
         a, b = self.neighbor_counts()
         total = a + b
         same = np.where(self.cells == 1, a, b)
-        tolerance = Fraction(self.settings.tolerance)
         return (self.cells != 0) & (
-            (total == 0)
-            | (
-                same.astype(np.int64) * tolerance.denominator
-                >= total.astype(np.int64) * tolerance.numerator
-            )
+            (total == 0) | (same / np.maximum(total, 1) >= self.settings.tolerance)
         )
 
     @property

@@ -34,11 +34,29 @@ def quality(cells: list[int], places: set[int], kind: int) -> Fraction:
 
 
 class SchellingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_large_exact_tolerance_and_ordinary_stopping(self) -> None:
-        sim = SchellingSim(schelling(tolerance="999999999/1000000000"))
+    def test_satisfaction_at_float_thresholds_and_without_neighbors(self) -> None:
+        neighbors = sorted(neighborhood(27, 8, 1))
+        for total in range(1, 9):
+            for same in range(total + 1):
+                share = same / total
+                for tolerance in (share, float(np.nextafter(share, 1.0))):
+                    board = SchellingSim(schelling(tolerance=tolerance)).board
+                    board.cells.fill(0)
+                    board.cells.flat[27] = 1
+                    board.cells.flat[neighbors[:same]] = 1
+                    board.cells.flat[neighbors[same:total]] = 2
+                    with self.subTest(total=total, same=same, tolerance=tolerance):
+                        self.assertEqual(bool(board.satisfaction().flat[27]), share >= tolerance)
+        board = SchellingSim(schelling(tolerance=1.0)).board
+        board.cells.fill(0)
+        board.cells.flat[27] = 1
+        self.assertEqual(int(board.satisfaction().sum()), 1)
+
+    async def test_high_tolerance_and_ordinary_stopping(self) -> None:
+        sim = SchellingSim(schelling(tolerance=0.999999999))
         await sim.step()
         self.assertEqual(sim.steps, 1)
-        equilibrium = SchellingSim(schelling(tolerance="0"))
+        equilibrium = SchellingSim(schelling(tolerance=0.0))
         await equilibrium.step()
         self.assertEqual(equilibrium.termination, "equilibrium")
         self.assertEqual(equilibrium.steps, 0)
@@ -60,7 +78,7 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
                     origin = positions[identity]
                     kind = cells[origin]
                     current = quality(cells, neighborhood(origin, 8, 1), kind)
-                    if current >= Fraction(settings.tolerance):
+                    if float(current) >= settings.tolerance:
                         continue
                     visible = neighborhood(origin, 8, radius)
                     for distance in range(1, radius + 1):

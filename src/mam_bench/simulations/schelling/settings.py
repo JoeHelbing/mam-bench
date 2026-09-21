@@ -1,9 +1,8 @@
 """The complete configuration of one paired Schelling evaluation."""
 
-from fractions import Fraction
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SchellingSettings(BaseModel):
@@ -11,28 +10,17 @@ class SchellingSettings(BaseModel):
 
     simulation: Literal["schelling"]
     board_size: int = Field(strict=True, ge=3, le=255)
-    tolerance: str
-    vacancy_fraction: str
+    tolerance: float = Field(strict=True, ge=0, le=1)
+    vacancy_fraction: float = Field(strict=True, ge=0, le=1)
     seed: int = Field(strict=True, ge=0)
     max_steps: int = Field(strict=True, ge=1)
     vision_radius: int = Field(strict=True, ge=1)
     controlled_agent_count: int = Field(strict=True, ge=2)
     objective: Literal["integration", "segregation"]
 
-    @field_validator("tolerance", "vacancy_fraction")
-    @classmethod
-    def unit_fraction(cls, value: str) -> str:
-        try:
-            fraction = Fraction(value)
-        except (ValueError, ZeroDivisionError) as error:
-            raise ValueError("must be a rational string such as '3/4'") from error
-        if not 0 <= fraction <= 1 or fraction.denominator > 1_000_000_000:
-            raise ValueError("must be between 0 and 1 with denominator at most 1000000000")
-        return str(fraction)
-
     @property
     def vacancy_count(self) -> int:
-        return int(self.board_size**2 * Fraction(self.vacancy_fraction))
+        return round(self.board_size**2 * self.vacancy_fraction)
 
     @property
     def agent_count(self) -> int:

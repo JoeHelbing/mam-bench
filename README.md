@@ -1,14 +1,18 @@
-# MAM-Bench 0.1.0
+# MAM-Bench
+
+> [!WARNING]
+> **Work in progress:** MAM-Bench is an early research benchmark. Its
+interfaces,
+> evaluation profiles, datasets, and scoring may change before the first stable
+> release. Do not treat current results as a mature or standardized benchmark.
 
 MAM-Bench measures how model-controlled agents change a simulation relative to
 ordinary agents initialized with the same seed and parameters. One invocation
 evaluates one explicit language model against an ordered suite of test cases.
 Every completed case contributes a signed score; the final score is their sum.
 
-The functionality is implemented. **Official seeds, parameters, suite composition,
-and real-model evaluations remain deferred.** The 100-point Civil Violence
-revolution contribution is provisional. The examples are development fixtures,
-not a calibrated benchmark.
+The [project overview](https://joehelbing.net/post/mam-bench) illustrates the
+pilot.
 
 ## Run a custom suite
 

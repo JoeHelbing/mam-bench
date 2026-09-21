@@ -6,11 +6,48 @@ system's ordinary behavior before defining model-agent evaluations.
 
 ## Language
 
+**Model**:
+The single language model being evaluated in a Benchmark Suite invocation.
+Model-controlled agents use that selected model; Schelling and Civil Violence
+are Benchmark Simulations, not Models in this vocabulary.
+_Avoid_: simulation, individual agent
+
+**Simulation Agent**:
+One individual participant in a simulation world, such as a Schelling occupant
+or a Civil Violence citizen or police officer. It has a stable identity and
+chooses actions through ordinary rules or model control.
+_Avoid_: model interface, language model
+
+**Model Interface**:
+The shared definition of how simulation agents consult the selected Model,
+including instructions and available tools for their simulation and role.
+It is distinct from each participating Simulation Agent and its Agent Session.
+_Avoid_: citizen, agent session
+
+**Agent Session**:
+One model-controlled Simulation Agent's private conversation history and memory
+throughout one world run. Sessions remain isolated by identity while sharing
+the applicable Model Interface and Message Board.
+_Avoid_: model interface, benchmark run
+
 **Benchmark Simulation**:
 A versioned MAM-Bench evaluation domain that owns its reference conditions,
 ordinary dynamics, model-controlled intervention, and scoring semantics.
-Schelling and Civil Violence are separate Benchmark Simulations.
+Schelling and Civil Violence are separate Benchmark Simulations, shortened to
+Simulations in conversation.
 _Avoid_: environment, benchmark case, model
+
+**Test Case**:
+One configured evaluation of a Simulation with a specific parameter set,
+objective, seed, and controlled role where applicable, executed once for the
+selected Model. It produces one score contribution to the Benchmark Run.
+_Avoid_: simulation type, benchmark run
+
+**Benchmark Run**:
+One start-to-finish execution of the Benchmark Suite against exactly one
+explicitly selected Model. A successful run produces one Combined Benchmark
+Score; a failed run retains partial artifacts without a final score.
+_Avoid_: individual test case, multi-model campaign
 
 **Model Interaction Protocol**:
 The Benchmark Simulation's rules for what model agents observe, which tools they
@@ -31,7 +68,7 @@ _Avoid_: movement-only control
 
 **Civil Violence Cycle**:
 One citizen participation phase followed by one police intervention phase,
-after which ordinary-citizen activity is measured.
+after which ordinary-citizen participation and revolution are measured.
 _Avoid_: globally simultaneous round
 
 **Arrest Reservation**:
@@ -39,47 +76,54 @@ An exclusive claim by a police officer on one eligible active citizen for
 arrest at the end of the police phase. A reservation is not an immediate arrest.
 _Avoid_: completed arrest
 
-**Mean Ordinary Activity**:
-The fraction of scored ordinary citizens who are active, averaged over completed
-citizen-and-police cycles in a fixed Civil Violence evaluation duration.
-Imprisoned citizens remain in the scored population and contribute no activity;
-the initialized state is excluded from the average.
-_Avoid_: revolution success, final turnout
+**Civil Violence Objective**:
+The assigned direction of desired change in citizen participation, either
+increase or decrease, independent of the model-controlled role. Citizen control
+and police control can each be evaluated under either objective.
+_Avoid_: citizen goal, police goal
 
-**Civil Violence Activity Lift**:
-The difference in Mean Ordinary Activity between a model-controlled run and
-its all-ordinary counterfactual, oriented positively for increased activity in
-citizen-controlled experiments and decreased activity in police-controlled
-experiments.
-_Avoid_: arrest count, outbreak score
+**Civil Violence Participation**:
+The fraction of scored ordinary citizens who are active or jailed, with jailed
+citizens included in both numerator and denominator. This is the outcome measure
+for both objectives under either controlled role; controlled identities are
+excluded in both paired worlds.
+_Avoid_: free active share, cumulative ever-active share
 
-**Model Runtime**:
-The provider and model execution capability bound to a Benchmark Simulation for
-one benchmark run. It executes model requests but does not define the Model
-Interaction Protocol.
-_Avoid_: model, provider, controller
-
-**Agent Session Runtime**:
-The model-agnostic runtime for one trial's isolated persistent agent sessions
-and shared communication, leaving each Model Interaction Protocol to its
-Benchmark Simulation. Its lifetime ends permanently when the trial fails.
-_Avoid_: simulation runtime, agent framework, controller
+**Revolution**:
+A Civil Violence event in which at least 95% of ordinary citizens are active or
+jailed at any one turn; persistence across turns is not required. Jailed citizens
+count in both numerator and denominator; model-controlled identities are
+excluded in both the model run and its ordinary reference. The threshold is
+checked after each complete Civil Violence Cycle, once citizen and security
+actions have resolved. Its first occurrence ends the run, and that completed
+cycle is recorded as the time to revolution.
+_Avoid_: sustained activity, regime collapse
 
 **Primary Score**:
 A Benchmark Simulation's designated higher-is-better topline measure for
 comparing models within that simulation. Primary Score magnitudes are not
-comparable or aggregated across Benchmark Simulations.
+directly comparable across Benchmark Simulations.
 _Avoid_: overall score, universal score, composite score
 
-**Run Evidence**:
-The historical persisted model-event and audit bundle for one scored run. It
-belongs to the retired evidence contract, not the revised evaluation design.
-_Avoid_: artifact, diagnostics, logs
+**Combined Benchmark Score**:
+The sum of signed per-test scores across all evaluated simulation, objective,
+condition, and seed variations, with no averaging or additional aggregation
+weights. Gains add and deterioration subtracts; totals are comparable only for
+the same test suite and scoring version.
+_Avoid_: absolute goal achievement, percentage improvement over baseline
+
+**Benchmark Suite**:
+The versioned collection of Test Cases executed by a Benchmark Run for one
+explicitly selected Model. Simulation defaults are selected as a suite; their
+final selection is deferred.
+Model selection is always explicit.
+_Avoid_: model preset, single simulation run
 
 **Evaluation Artifacts**:
-The saved scientific results of one evaluation, including the full ordinary and
-model-controlled trajectories. They preserve simulation outcomes without the
-retired model-event audit bundle.
+The saved results and inspectable interaction records of an evaluation,
+including ordinary and model-controlled trajectories, scores, agent model
+messages, tool calls, and shared Message Board communication. Records are
+retained as execution progresses, including partial work before failure.
 _Avoid_: Run Evidence, packaged reference fixture
 
 **Diagnostic Artifact**:
@@ -124,12 +168,6 @@ agent types. A Model Evaluation retains and saves its ordinary Counterfactual
 Reference's full trajectory.
 _Avoid_: run data, history
 
-**Evaluation Reference Fixture**:
-The historical packaged projection of a Counterfactual Reference, including its
-initial state, terminal state, and comparison values. The revised evaluation
-computes its Counterfactual Reference directly instead.
-_Avoid_: full dataset, replay log
-
 **Agent Trace**:
 The ordered location sequence of one stable agent identity within a Reference
 Trajectory. Agent type is static metadata rather than repeated in every state.
@@ -166,8 +204,7 @@ _Avoid_: scenario, case, sample
 
 **Test Spot**:
 One exact Landscape Cell selected from the Satisfaction Manifold for held-out
-evaluation. The first panel contains three Test Spots rather than broader
-Representative Regions.
+evaluation. Test Spot and seed selection are deferred.
 _Avoid_: representative region, scenario
 
 **Evaluation Seed**:
@@ -178,67 +215,64 @@ _Avoid_: landscape seed, trial
 
 **Schelling Influence Profile**:
 The single, versioned Model Evaluation contract that layers persistent, locally
-embodied ModelControlledAgents onto the Schelling Reference Profile.
+embodied model-controlled agents onto the Schelling Reference Profile.
 _Avoid_: agent variant, LLM Schelling model
 
 **Ordinary Agent**:
-A rule-controlled typed board occupant whose satisfaction is evaluated and whose
-moves follow the Schelling mechanics for the active evaluation profile.
+A Simulation Agent that selects actions through its simulation's ordinary
+rules. These are Schelling movement decisions, Civil Violence citizen
+participation, or Civil Violence police intervention.
 _Avoid_: algorithmic agent, regular agent
 
-**ModelControlledAgent**:
+**Model-controlled Agent**:
 A model-controlled participant whose observations and permitted actions are
 defined by its Benchmark Simulation. In Schelling, it replaces an Ordinary
 Agent, retains an exterior A/B type, and has no satisfaction or tolerance of its
-own.
+own. Model-controlled agents are outside the population used for simulation
+outcome statistics; corresponding identities are also excluded from reference
+statistics.
 _Avoid_: Influence Actor, InfluenceAgent, controlled ordinary agent
 
 **Ordinary Edge Homophily**:
 The fraction of undirected toroidal Moore-neighbor edges between scored Ordinary
-Agents that join the same type. ModelControlledAgents, and the corresponding
-would-be actor identities in a counterfactual reference run, are excluded from
+Agents that join the same type. Model-controlled agents, and the corresponding
+selected identities in a counterfactual reference run, are excluded from
 the edge set.
 _Avoid_: segregation index, satisfaction
 
 **Message Board**:
-The append-only ordered communication surface shared by ModelControlledAgents in
-one trial. Agent posts are unverified free text, simulation announcements are
+The append-only ordered communication surface shared by model-controlled agents in
+one controlled world. Agent posts are unverified free text, simulation announcements are
 distinguished from agent posts, and each agent has an independent unread
 position.
 _Avoid_: Public Document, shared notebook, controller
 
-**Actor Notebook**:
-One ModelControlledAgent's private persistent notes within a single trial,
-isolated from other agents and reset before the next trial.
+**Private Notebook**:
+One model-controlled agent's private persistent notes within one world,
+isolated from other agents. Each test case creates fresh notebooks.
 _Avoid_: Message Board, shared memory, transcript
 
-**Actor Turn**:
-One ModelControlledAgent's opportunity to act in one Staged Round, beginning
-with a frozen local observation and ending with an accepted move or a stay.
+**Agent Turn**:
+One model-controlled agent's opportunity to act in its simulation's current
+step or role phase. It receives a frozen observation, can communicate and use
+private memory, and ends with a legal role-specific action or fallback.
 _Avoid_: wave, request, round
 
 **Turn Tool Allowance**:
 The maximum number of successful function-tool calls available to one
-ModelControlledAgent during an Actor Turn. Failed calls are handled through
-model retries; terminal move and stay outputs end the turn.
+model-controlled agent during an Agent Turn. Failed calls are handled through
+model retries; an accepted terminal action ends the turn.
 _Avoid_: attempt count, token budget, request count
 
-**Policy Rejection**:
-Historical terminology for the removed custom turn policy. Current invalid
-tools and actions use native model retry feedback, with exhausted retries
-ending the turn as stay. Infrastructure failures remain distinct.
-_Avoid_: provider error, failed pair, invalid score
-
 **Reservation Record**:
-An authoritative Message Board entry written when a ModelControlledAgent
+An authoritative Message Board entry written when a model-controlled agent
 atomically claims a beginning-of-round vacancy.
 _Avoid_: actor post, move result, proposal
 
-**Pair Infrastructure Failure**:
-A provider, network, timeout, memory, compaction, or artifact-write failure
-that ends one simulation/model pair and leaves it unscored without stopping
-independent pairs. A new attempt starts a fresh trial rather than resuming the
-failed one.
+**Execution Failure**:
+A provider, network, timeout, memory, compaction, persistence, or simulation
+failure that stops the Benchmark Run. Completed results and partial artifacts
+remain available, but no Combined Benchmark Score is published.
 _Avoid_: policy rejection, stay, zero score
 
 **Counterfactual Reference**:
@@ -254,7 +288,7 @@ toward the assigned integration or segregation objective.
 _Avoid_: improvement, normalized score
 
 **Model Evaluation**:
-A later experiment that introduces ModelControlledAgents into frozen conditions
-selected from the Reference Landscape. It is downstream of reference generation
-and Test Spot selection.
+A paired comparison of a controlled world against its Counterfactual Reference
+for one Test Case. Benchmark calibration and final real-model evaluations are
+separate from implementation checks using development conditions.
 _Avoid_: benchmark run, model test

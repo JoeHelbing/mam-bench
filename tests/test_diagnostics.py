@@ -9,12 +9,9 @@ from pydantic_ai import Agent, ModelMessage
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from mam_bench.agent import AgentSessionRuntime
-from mam_bench.benchmark import AgentInfrastructureFailure
 from mam_bench.config import AgentSettings
-from mam_bench.diagnostics import configure_logging
-from mam_bench.simulations.schelling import SchellingSim
-from schelling_support import runtime_for
+from mam_bench.diagnostics import ExecutionFailure, configure_logging
+from mam_bench.sessions import AgentSessions
 
 
 class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
@@ -32,12 +29,12 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
             return ModelResponse(parts=[])
 
-        runtime = AgentSessionRuntime(
+        runtime = AgentSessions(
             Agent(FunctionModel(slow)), settings=AgentSettings(timeout_seconds=0.01)
         )
         with (
             self.assertLogs("mam_bench", level="DEBUG") as captured,
-            self.assertRaises(AgentInfrastructureFailure) as failure,
+            self.assertRaises(ExecutionFailure) as failure,
         ):
             await runtime.run("agent-7", "PRIVATE PROMPT", deps=None)
         self.assertEqual(failure.exception.kind, "timeout")
@@ -51,10 +48,10 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         async def broken(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             raise APITimeoutError(request=httpx.Request("POST", "https://SECRET.invalid"))
 
-        runtime = AgentSessionRuntime(Agent(FunctionModel(broken)))
+        runtime = AgentSessions(Agent(FunctionModel(broken)))
         with (
             self.assertLogs("mam_bench", level="DEBUG") as captured,
-            self.assertRaises(AgentInfrastructureFailure),
+            self.assertRaises(ExecutionFailure),
         ):
             await runtime.run("actor", "SECRET PROMPT", deps=None)
         log = "\n".join(captured.output)
@@ -72,7 +69,7 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 return ModelResponse(parts=[ToolCallPart("post_message", {"text": "PRIVATE POST"})])
             return ModelResponse(parts=[TextPart("PRIVATE OUTPUT")])
 
-        runtime = AgentSessionRuntime(Agent(FunctionModel(scripted)))
+        runtime = AgentSessions(Agent(FunctionModel(scripted)))
         with self.assertLogs("mam_bench", level="DEBUG") as captured:
             self.assertEqual(await runtime.run("a", "PRIVATE INPUT", deps=None), "PRIVATE OUTPUT")
         log = "\n".join(captured.output)
@@ -81,14 +78,3 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("post_message", log)
         self.assertIn("requests=2", log)
         self.assertNotIn("PRIVATE", log)
-
-    async def test_round_and_actor_progress(self) -> None:
-        with self.assertLogs("mam_bench", level="INFO") as captured:
-            simulation = SchellingSim.for_model(runtime_for())
-            await simulation.step()
-        log = "\n".join(captured.output)
-        self.assertIn("reference.end", log)
-        self.assertIn("round.start round=1", log)
-        self.assertIn("actor.start round=1 agent=", log)
-        self.assertIn("actor.end round=1 agent=", log)
-        self.assertIn("round.end round=1", log)

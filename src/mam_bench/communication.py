@@ -1,4 +1,4 @@
-"""A trial-owned append-only message board with private unread positions."""
+"""A world-owned append-only message board with private unread positions."""
 
 import json
 from dataclasses import asdict, dataclass
@@ -7,7 +7,7 @@ from pathlib import Path
 from anyio import Lock
 from pydantic_ai import ModelRetry
 
-from mam_bench.benchmark import AgentInfrastructureFailure
+from mam_bench.diagnostics import ExecutionFailure
 
 
 @dataclass(frozen=True)
@@ -48,7 +48,7 @@ class MessageBoard:
                     with self._archive_path.open("a", encoding="utf-8") as archive:
                         archive.write(json.dumps(asdict(message)) + "\n")
                 except OSError as error:
-                    raise AgentInfrastructureFailure(
+                    raise ExecutionFailure(
                         "artifact_write", "message board write failed"
                     ) from error
             self._messages.append(message)

@@ -22,10 +22,10 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RequestUsage
 from pydantic_ai_harness.memory import InMemoryStore, MemoryFile
 
-from mam_bench.agent import AgentSessionRuntime, run_rolling
-from mam_bench.benchmark import AgentInfrastructureFailure
 from mam_bench.communication import MessageBoard
 from mam_bench.config import AgentSettings
+from mam_bench.diagnostics import ExecutionFailure
+from mam_bench.sessions import AgentSessions
 
 
 def _response(
@@ -169,7 +169,34 @@ class CompactionModel:
         return _response(TextPart(f"normal-{self.normal_requests}"), cost=self.normal_cost)
 
 
-class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
+class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_truncated_tool_call_ends_turn_and_preserves_valid_history(self) -> None:
+        calls = 0
+        truncate = True
+
+        def answer(value: int) -> int:
+            return value
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal calls
+            calls += 1
+            if truncate:
+                return ModelResponse(
+                    parts=[ToolCallPart("answer", '{"value": ', f"truncated-{calls}")],
+                    finish_reason="length",
+                )
+            _assert_complete_tool_history(messages)
+            return _response(ToolCallPart("answer", {"value": 7}))
+
+        sessions = AgentSessions(
+            Agent(FunctionModel(model), output_type=ToolOutput(answer, name="answer"), retries=1)
+        )
+        self.assertIsNone(await sessions.run("a", "go", deps=None))
+        self.assertEqual(sessions.stop_reason("a"), "output_token_limit")
+        truncate = False
+        self.assertEqual(await sessions.run("a", "again", deps=None), 7)
+        self.assertLessEqual(calls, 3)
+
     async def test_output_token_limit_preserves_effects_usage_and_next_turn(self) -> None:
         calls = 0
 
@@ -187,8 +214,8 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             _assert_complete_tool_history(messages)
             return _response(TextPart("recovered"))
 
-        runtime = AgentSessionRuntime(Agent(FunctionModel(model)))
-        with self.assertLogs("mam_bench.agent", level="INFO") as logs:
+        runtime = AgentSessions(Agent(FunctionModel(model)))
+        with self.assertLogs("mam_bench.sessions", level="INFO") as logs:
             self.assertIsNone(await runtime.run("a", "go", deps=None))
         self.assertTrue(any("reason=output_token_limit" in line for line in logs.output))
         self.assertEqual(calls, 2)
@@ -204,7 +231,7 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_private_memory_and_history(self) -> None:
         model = MemoryModel()
-        runtime = AgentSessionRuntime(Agent(FunctionModel(model)))
+        runtime = AgentSessions(Agent(FunctionModel(model)))
         self.assertEqual(await runtime.run("a", "remember alpha", deps=None), "stored")
         self.assertEqual(await runtime.run("a", "recall", deps=None), "remembered")
         self.assertEqual(await runtime.run("b", "recall", deps=None), "empty")
@@ -218,7 +245,7 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_limit_preserves_memory_and_history_and_resets_per_turn(self) -> None:
         model = MemoryModel()
-        runtime = AgentSessionRuntime(Agent(FunctionModel(model)))
+        runtime = AgentSessions(Agent(FunctionModel(model)))
         result = await runtime.run(
             "a", "remember alpha", deps=None, usage_limits=UsageLimits(request_limit=1)
         )
@@ -235,7 +262,7 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 ToolCallPart("post_message", {"text": "two"}, "two"),
             )
 
-        runtime = AgentSessionRuntime(Agent(FunctionModel(model)))
+        runtime = AgentSessions(Agent(FunctionModel(model)))
         self.assertIsNone(
             await runtime.run("a", "go", deps=None, usage_limits=UsageLimits(tool_calls_limit=2))
         )
@@ -254,7 +281,7 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 return _response(ToolCallPart("post_message", {"text": ""}, "bad"))
             return _response(TextPart("recovered"))
 
-        runtime = AgentSessionRuntime(Agent(FunctionModel(model), retries=2))
+        runtime = AgentSessions(Agent(FunctionModel(model), retries=2))
         self.assertIsNone(await runtime.run("a", "go", deps=None))
         self.assertEqual(runtime.usage.requests, 3)
         _assert_complete_tool_history(list(runtime.history("a")))
@@ -265,14 +292,14 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             del messages, info
             raise UnexpectedModelBehavior("provider returned broken body")
 
-        failed = AgentSessionRuntime(Agent(FunctionModel(broken)))
+        failed = AgentSessions(Agent(FunctionModel(broken)))
         for identity in ("a", "b"):
-            with self.assertRaisesRegex(AgentInfrastructureFailure, "unusable response"):
+            with self.assertRaisesRegex(ExecutionFailure, "unusable response"):
                 await failed.run(identity, "go", deps=None)
 
     async def test_compaction_uses_same_model_and_native_usage(self) -> None:
         model = CompactionModel()
-        runtime = AgentSessionRuntime(
+        runtime = AgentSessions(
             Agent(FunctionModel(model)),
             settings=AgentSettings(
                 context_window_tokens=200,
@@ -298,10 +325,10 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_memory_store_failure_poisons_runtime(self) -> None:
-        with patch("mam_bench.agent.InMemoryStore", return_value=FailingReadStore()):
-            runtime = AgentSessionRuntime(Agent(FunctionModel(MemoryModel())))
+        with patch("mam_bench.sessions.InMemoryStore", return_value=FailingReadStore()):
+            runtime = AgentSessions(Agent(FunctionModel(MemoryModel())))
         for identity in ("a", "b"):
-            with self.assertRaisesRegex(AgentInfrastructureFailure, "notebook failed"):
+            with self.assertRaisesRegex(ExecutionFailure, "notebook failed"):
                 await runtime.run(identity, "go", deps=None)
 
     async def test_message_board_pages_and_isolated_cursors(self) -> None:
@@ -319,34 +346,12 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await board.read("b"), first)
         self.assertEqual((await board.read("a")).content, "")
 
-    async def test_rolling_is_bounded_and_cancels_on_failure(self) -> None:
-        started = asyncio.Event()
-        cancelled = asyncio.Event()
-        admitted: list[int] = []
-
-        async def worker(item: int) -> int:
-            admitted.append(item)
-            if item == 0:
-                await started.wait()
-                raise RuntimeError("failed")
-            started.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                cancelled.set()
-            return item
-
-        with self.assertRaisesRegex(RuntimeError, "failed"):
-            await run_rolling(range(4), worker, concurrency=2)
-        self.assertEqual(admitted, [0, 1])
-        self.assertTrue(cancelled.is_set())
-
     async def test_default_request_limit_stops_successful_read_loop_at_25(self) -> None:
         async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             del info
             return _response(ToolCallPart("read_messages", {}, str(len(messages))))
 
-        runtime = AgentSessionRuntime(Agent(FunctionModel(model)))
+        runtime = AgentSessions(Agent(FunctionModel(model)))
         self.assertIsNone(await runtime.run("a", "go", deps=None))
         self.assertEqual(runtime.usage.requests, 25)
         self.assertEqual(runtime.usage.tool_calls, 25)
@@ -362,7 +367,7 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 ToolCallPart("stay", {}, "stay"),
             )
 
-        runtime = AgentSessionRuntime(
+        runtime = AgentSessions(
             Agent(
                 FunctionModel(model),
                 output_type=ToolOutput(stay, name="stay"),
@@ -380,7 +385,7 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             del messages, info
             return _response(TextPart("I refuse to call a tool"))
 
-        runtime = AgentSessionRuntime(
+        runtime = AgentSessions(
             Agent(FunctionModel(model), output_type=ToolOutput(stay, name="stay"), retries=2)
         )
         self.assertIsNone(await runtime.run("a", "go", deps=None))
@@ -395,18 +400,18 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             memory_injection_tokens=100,
         )
         fallback = CompactionModel(summary_error=ModelAPIError("scripted", "unavailable"))
-        runtime = AgentSessionRuntime(Agent(FunctionModel(fallback)), settings=settings)
+        runtime = AgentSessions(Agent(FunctionModel(fallback)), settings=settings)
         await runtime.run("a", "A" * 600, deps=None)
         self.assertEqual(await runtime.run("a", "B" * 600, deps=None), "normal-2")
         self.assertEqual(fallback.summary_requests, 1)
         broken = CompactionModel(
             summary_error=UnexpectedModelBehavior("Exceeded maximum output retries (2)")
         )
-        failed = AgentSessionRuntime(Agent(FunctionModel(broken)), settings=settings)
+        failed = AgentSessions(Agent(FunctionModel(broken)), settings=settings)
         await failed.run("a", "A" * 600, deps=None)
-        from mam_bench.benchmark import AgentInfrastructureFailure
+        from mam_bench.diagnostics import ExecutionFailure
 
-        with self.assertRaises(AgentInfrastructureFailure) as raised:
+        with self.assertRaises(ExecutionFailure) as raised:
             await failed.run("a", "B" * 600, deps=None)
         self.assertEqual(raised.exception.kind, "compaction")
 
@@ -424,7 +429,7 @@ class AgentSessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await release_first.wait()
             return _response(TextPart("ok"))
 
-        runtime = AgentSessionRuntime(Agent(FunctionModel(model)))
+        runtime = AgentSessions(Agent(FunctionModel(model)))
         first = asyncio.create_task(runtime.run("a", "first", deps=None))
         await first_started.wait()
         second = asyncio.create_task(runtime.run("a", "second", deps=None))

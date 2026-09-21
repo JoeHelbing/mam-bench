@@ -11,10 +11,10 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, Thinking
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai_harness.step_persistence import FileStepStore
 
-from mam_bench.agent import AgentSessionRuntime
-from mam_bench.benchmark import AgentInfrastructureFailure
 from mam_bench.communication import MessageBoard
 from mam_bench.config import AgentSettings
+from mam_bench.diagnostics import ExecutionFailure
+from mam_bench.sessions import AgentSessions
 
 
 class ArtifactTests(unittest.IsolatedAsyncioTestCase):
@@ -26,7 +26,7 @@ class ArtifactTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            runtime = AgentSessionRuntime(
+            runtime = AgentSessions(
                 Agent(FunctionModel(respond)),
                 artifact_directory=root,
                 settings=AgentSettings(
@@ -71,10 +71,8 @@ class ArtifactTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            runtime = AgentSessionRuntime(
-                Agent(FunctionModel(fail_after_post)), artifact_directory=root
-            )
-            with self.assertRaises(AgentInfrastructureFailure):
+            runtime = AgentSessions(Agent(FunctionModel(fail_after_post)), artifact_directory=root)
+            with self.assertRaises(ExecutionFailure):
                 await runtime.run("agent-a", "hello agent", deps=None)
             rows = [
                 json.loads(line) for line in (root / "message-board.jsonl").read_text().splitlines()
@@ -116,13 +114,13 @@ class ArtifactTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_archive_write_failure_aborts_as_artifact_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            runtime = AgentSessionRuntime(
+            runtime = AgentSessions(
                 Agent(FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart("ok")]))),
                 artifact_directory=Path(directory),
             )
             with (
                 patch.object(FileStepStore, "_sync_register_run", side_effect=OSError("disk full")),
-                self.assertRaises(AgentInfrastructureFailure) as raised,
+                self.assertRaises(ExecutionFailure) as raised,
             ):
                 await runtime.run("agent-a", "hello", deps=None)
             self.assertEqual(raised.exception.kind, "artifact_write")

@@ -5,6 +5,14 @@ import os
 import traceback
 
 
+class ExecutionFailure(RuntimeError):
+    """A classified execution failure with a safe, fixed description."""
+
+    def __init__(self, kind: str, message: str) -> None:
+        self.kind = kind
+        super().__init__(message)
+
+
 def configure_logging(default_level: str = "INFO") -> None:
     """Configure CLI stderr logging; leave application/root loggers alone."""
     level = os.environ.get("MAM_BENCH_LOG_LEVEL", default_level).upper()

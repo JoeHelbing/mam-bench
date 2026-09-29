@@ -1,0 +1,3 @@
+# Official cases, parameters and seeds are deliberately unselected.
+# Until calibration is complete, pass an explicit --suite YAML file.
+cases: []

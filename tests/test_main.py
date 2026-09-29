@@ -1,116 +1,112 @@
+"""CLI validation, per-case display and withheld totals on failure."""
+
+import contextlib
 import io
 import tempfile
 import unittest
-from collections.abc import Callable
-from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
-import main as benchmark_main
+import main
+import yaml
+from pydantic_ai.exceptions import ModelAPIError
+from pydantic_ai.messages import ModelMessage, ModelResponse
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from mam_bench.benchmark import (
-    BenchmarkRunFailure,
-    BenchmarkTopline,
-    PairFailure,
-    PrimaryScore,
-    ToplineEntry,
-)
 from mam_bench.config import BenchmarkConfig
+from mam_bench.runner import BenchmarkRunner
+from support import civil, schelling, selection, stay
 
 
 class MainTests(unittest.TestCase):
-    def test_reports_aggregate_pair_failure_without_a_traceback(self) -> None:
-        failure = BenchmarkRunFailure(
-            (
-                PairFailure(
-                    simulation_id="simulation-a",
-                    simulation_version="v1",
-                    model_id="model-a",
-                    provider="openrouter",
-                    model="vendor/model",
-                    kind="provider",
-                ),
+    def files(self, root: Path) -> list[str]:
+        (root / "model.yaml").write_text(yaml.safe_dump(selection().model_dump()))
+        (root / "suite.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "cases": [
+                        schelling(max_steps=1).model_dump(),
+                        civil().model_dump(),
+                    ]
+                }
             )
         )
+        return [
+            "--model",
+            str(root / "model.yaml"),
+            "--suite",
+            str(root / "suite.yaml"),
+            "--output",
+            str(root / "results"),
+        ]
+
+    def test_cli_prints_effective_cases_and_complete_total(self) -> None:
+        def runner(config: BenchmarkConfig) -> BenchmarkRunner:
+            return BenchmarkRunner(config, model_factory=lambda _: FunctionModel(stay))
+
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "benchmark.yaml"
-            path.write_text(
-                """simulations: [schelling-influence-pilot-v1]
-models:
-  - {id: model-a, runtime: openrouter, model: vendor/model, provider: provider-a}
-output_directory: results
-""",
-                encoding="utf-8",
-            )
-            attempt = Path(directory) / "results" / "attempt"
-
-            async def fail(
-                config: BenchmarkConfig, *, on_output_directory: Callable[[Path], None]
-            ) -> BenchmarkTopline:
-                on_output_directory(attempt)
-                raise failure
-
-            error_output = io.StringIO()
+            args = self.files(Path(directory))
+            output, errors = io.StringIO(), io.StringIO()
             with (
-                patch.object(benchmark_main, "run_benchmark", AsyncMock(side_effect=fail)),
-                redirect_stderr(error_output),
-            ):
-                status = benchmark_main.main([str(path)])
-
-        self.assertEqual(status, 1)
-        self.assertEqual(
-            error_output.getvalue(),
-            f"Output directory: {attempt}\n"
-            "benchmark failed pairs: simulation-a / model-a (provider)\n",
-        )
-
-    def test_loads_runs_and_prints_one_topline_without_yaml_extension(self) -> None:
-        topline = BenchmarkTopline(
-            entries=(
-                ToplineEntry(
-                    simulation_id="simulation-a",
-                    simulation_version="v1",
-                    model_id="model-a",
-                    provider="openrouter",
-                    model="vendor/model",
-                    primary_score=PrimaryScore(name="score", value=0.125, unit="points"),
+                patch(
+                    "main.BenchmarkRunner",
+                    side_effect=runner,
                 ),
-            )
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "benchmark.config"
-            path.write_text(
-                """log_level: DEBUG
-simulations: [schelling-influence-pilot-v1]
-models:
-  - {id: model-a, runtime: openrouter, model: vendor/model, provider: provider-a}
-output_directory: results
-""",
-                encoding="utf-8",
-            )
-            attempt = Path(directory) / "results" / "attempt"
-
-            async def succeed(
-                config: BenchmarkConfig, *, on_output_directory: Callable[[Path], None]
-            ) -> BenchmarkTopline:
-                on_output_directory(attempt)
-                return topline
-
-            output = io.StringIO()
-            error_output = io.StringIO()
-            with (
-                patch.object(benchmark_main, "run_benchmark", AsyncMock(side_effect=succeed)),
-                patch.object(benchmark_main, "configure_logging") as configure_logging,
-                redirect_stdout(output),
-                redirect_stderr(error_output),
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(errors),
             ):
-                status = benchmark_main.main([str(path)])
-                configure_logging.assert_called_once_with("DEBUG")
+                self.assertEqual(main.main(args), 0)
+            text = output.getvalue()
+            self.assertIn("Case 1:", text)
+            self.assertIn("Case 2:", text)
+            self.assertIn('"seed":7', text)
+            self.assertIn('"objective":"increase"', text)
+            self.assertIn("Combined Benchmark Score:", text)
+            self.assertIn("Output directory:", errors.getvalue())
 
-        self.assertEqual(status, 0)
-        self.assertEqual(error_output.getvalue(), f"Output directory: {attempt}\n")
-        self.assertEqual(output.getvalue(), "simulation-a / model-a: 0.125000 points\n")
+    def test_failed_case_is_visible_but_never_prints_total_or_sensitive_body(self) -> None:
+        async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if any(tool.name == "participate" for tool in info.output_tools):
+                raise ModelAPIError("offline", "SECRET-PROVIDER")
+            return await stay(messages, info)
 
+        def runner(config: BenchmarkConfig) -> BenchmarkRunner:
+            return BenchmarkRunner(config, model_factory=lambda _: FunctionModel(script))
 
-if __name__ == "__main__":
-    unittest.main()
+        with tempfile.TemporaryDirectory() as directory:
+            args = self.files(Path(directory))
+            output, errors = io.StringIO(), io.StringIO()
+            with (
+                patch(
+                    "main.BenchmarkRunner",
+                    side_effect=runner,
+                ),
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(errors),
+            ):
+                self.assertEqual(main.main(args), 1)
+            self.assertIn("Case 1:", output.getvalue())
+            self.assertNotIn("Combined Benchmark Score:", output.getvalue())
+            self.assertIn("Failed case:", errors.getvalue())
+            self.assertNotIn("SECRET-PROVIDER", errors.getvalue())
+
+    def test_last_case_validation_prevents_runner_construction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = self.files(root)
+            (root / "suite.yaml").write_text(
+                yaml.safe_dump(
+                    {
+                        "cases": [
+                            schelling().model_dump(),
+                            {"simulation": "civil-violence"},
+                        ]
+                    }
+                )
+            )
+            errors = io.StringIO()
+            with patch("main.BenchmarkRunner") as runner, contextlib.redirect_stderr(errors):
+                self.assertEqual(main.main(args), 2)
+                runner.assert_not_called()
+            self.assertIn("cases.1.civil-violence.board_size", errors.getvalue())
+            self.assertFalse((root / "results").exists())

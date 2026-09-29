@@ -1,10 +1,10 @@
-"""Persistent private model sessions, bounded turns, and rolling admission."""
+"""Private agent sessions, memory, archives, and bounded individual turns."""
 
 import asyncio
 import hashlib
 import logging
 import re
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,7 +27,12 @@ from pydantic_ai.capabilities.abstract import (
     WrapModelRequestHandler,
     WrapToolExecuteHandler,
 )
-from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior, UsageLimitExceeded
+from pydantic_ai.exceptions import (
+    IncompleteToolCall,
+    ModelAPIError,
+    UnexpectedModelBehavior,
+    UsageLimitExceeded,
+)
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
@@ -50,15 +55,13 @@ from pydantic_ai_harness.memory import (
     InMemoryStore,
     MemoryConflictError,
     MemoryOperationConflictError,
-    MemoryToolset,
 )
 from pydantic_ai_harness.step_persistence import StepPersistence
 
 from mam_bench.artifacts import AgentMessageArchive
-from mam_bench.benchmark import AgentInfrastructureFailure
 from mam_bench.communication import MessageBoard, MessagePage
 from mam_bench.config import AgentSettings
-from mam_bench.diagnostics import failure_trace
+from mam_bench.diagnostics import ExecutionFailure, failure_trace
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +138,7 @@ class _RequestLogging[DepsT](AbstractCapability[DepsT]):
 
 
 class _Compaction[DepsT](FallbackCompaction[DepsT]):
-    """Keep compaction failures distinct from recoverable actor tool retries."""
+    """Keep compaction failures distinct from recoverable agent tool retries."""
 
     async def compact(
         self, messages: list[ModelMessage], ctx: RunContext[DepsT]
@@ -146,7 +149,7 @@ class _Compaction[DepsT](FallbackCompaction[DepsT]):
             result = await super().compact(messages, ctx)
         except Exception as error:
             logger.error("compaction.failed trace=%s", failure_trace(error))
-            raise AgentInfrastructureFailure("compaction", "compaction failed") from error
+            raise ExecutionFailure("compaction", "compaction failed") from error
         logger.debug(
             "compaction.end messages=%d elapsed_s=%.3f", len(result), monotonic() - started
         )
@@ -157,9 +160,11 @@ class _Compaction[DepsT](FallbackCompaction[DepsT]):
 class _SessionState:
     history: list[ModelMessage] = field(default_factory=lambda: list[ModelMessage]())
     usage: RunUsage = field(default_factory=RunUsage)
+    lock: Lock = field(default_factory=Lock)
+    stop_reason: str | None = None
 
 
-class AgentSessionRuntime[AgentDepsT, OutputDataT]:
+class AgentSessions[AgentDepsT, OutputDataT]:
     """Share one model and message board across isolated histories and notebooks."""
 
     def __init__(
@@ -173,7 +178,6 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT]:
         self._settings = settings or AgentSettings()
         self._store = InMemoryStore()
         self._states: dict[str, _SessionState] = {}
-        self._locks: dict[str, Lock] = {}
         self._failure: BaseException | None = None
         self._usage = RunUsage()
         self._archive = None
@@ -198,9 +202,8 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT]:
     def history(self, session_id: str) -> tuple[ModelMessage, ...]:
         return tuple(self._state(session_id).history)
 
-    def notebook_tools(self, session_id: str) -> MemoryToolset[AgentDepsT]:
-        self._check_active()
-        return MemoryToolset(self._memory(session_id))
+    def stop_reason(self, session_id: str) -> str | None:
+        return self._state(session_id).stop_reason
 
     def _board_tools(self, session_id: str) -> FunctionToolset[AgentDepsT]:
         tools: FunctionToolset[AgentDepsT] = FunctionToolset()
@@ -230,13 +233,14 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT]:
         """Run a bounded turn; native limit/retry stops preserve the session.
 
         None means no terminal output was accepted. The simulation decides its
-        fallback action. Infrastructure failures poison the whole trial runtime.
+        fallback action. Execution failures stop all sessions in this world.
         """
         if not self._settings.use_sampling_seed and model_settings is not None:
             model_settings = model_settings.copy()
             model_settings.pop("seed", None)
         state = self._state(session_id)
-        async with self._locks.setdefault(session_id, Lock()):
+        async with state.lock:
+            state.stop_reason = None
             self._check_active()
             usage = RunUsage()
             started = monotonic()
@@ -278,24 +282,26 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT]:
                     logger.info("turn.stop session=%s reason=usage_limit", session_id)
                     output = None
 
-                # TODO: Have to fix this
+                except IncompleteToolCall:
+                    outcome = "output_token_limit"
+                    output = None
                 except UnexpectedModelBehavior as error:
                     # These native PydanticAI errors have no dedicated subtype.
                     # Only exhausted turn budgets are recoverable; other failures abort.
                     if re.fullmatch(
                         r"Model token limit \([^)]+\) exceeded before any response "
                         r"was generated\..*",
-                        str(error),
+                        error.message,
                     ):
                         outcome = "output_token_limit"
                     elif re.fullmatch(
                         r"Exceeded maximum output retries \(\d+\)|"
                         r"Tool .+ exceeded max retries count of \d+\..*",
-                        str(error),
+                        error.message,
                     ):
                         outcome = "retry_exhaustion"
                     else:
-                        self._failure = AgentInfrastructureFailure(
+                        self._failure = ExecutionFailure(
                             "provider", "model returned an unusable response"
                         )
                         raise self._failure from None
@@ -318,16 +324,16 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT]:
                         self._settings.timeout_seconds,
                         monotonic() - started,
                     )
-                    self._failure = AgentInfrastructureFailure("timeout", f"{scope} timed out")
+                    self._failure = ExecutionFailure("timeout", f"{scope} timed out")
                     raise self._failure from error
                 except APIConnectionError as error:
-                    self._failure = AgentInfrastructureFailure("network", "model connection failed")
+                    self._failure = ExecutionFailure("network", "model connection failed")
                     raise self._failure from error
                 except (APIError, ModelAPIError) as error:
-                    self._failure = AgentInfrastructureFailure("provider", "model request failed")
+                    self._failure = ExecutionFailure("provider", "model request failed")
                     raise self._failure from error
                 except (MemoryConflictError, MemoryOperationConflictError, OSError) as error:
-                    self._failure = AgentInfrastructureFailure("memory_store", "notebook failed")
+                    self._failure = ExecutionFailure("memory_store", "notebook failed")
                     raise self._failure from error
                 except BaseException as error:
                     self._failure = error
@@ -354,6 +360,7 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT]:
                         usage.output_tokens,
                     )
                 if output is None:
+                    state.stop_reason = outcome
                     self._close_stopped_turn(messages)
                 state.history = list(messages)
                 state.usage.incr(usage)
@@ -410,9 +417,7 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT]:
         settings = self._settings
         model = self._agent.model
         if model is None:
-            raise AgentInfrastructureFailure(
-                "compaction", "Session runtime requires an Agent with a model"
-            )
+            raise ExecutionFailure("compaction", "Session runtime requires an Agent with a model")
         summarizer: SummarizingCompaction[AgentDepsT] = SummarizingCompaction(
             model=model,
             max_tokens=1,
@@ -434,72 +439,3 @@ class AgentSessionRuntime[AgentDepsT, OutputDataT]:
             target_fraction=settings.compaction_trigger_fraction,
             context_window=settings.context_window_tokens,
         )
-
-
-@dataclass(frozen=True)
-class CompletedWork[ItemT, ResultT]:
-    """One rolling-scheduler result in authoritative completion order."""
-
-    item: ItemT
-    result: ResultT
-    admission_sequence: int
-    completion_sequence: int
-
-
-async def run_rolling[ItemT, ResultT](
-    items: Iterable[ItemT],
-    worker: Callable[[ItemT], Awaitable[ResultT]],
-    *,
-    concurrency: int,
-) -> tuple[CompletedWork[ItemT, ResultT], ...]:
-    """Run queued work up to one concurrency limit in completion order."""
-    if concurrency < 1:
-        raise ValueError("concurrency must be positive")
-    iterator = iter(items)
-    active: set[asyncio.Task[CompletedWork[ItemT, ResultT]]] = set()
-    completed: list[CompletedWork[ItemT, ResultT]] = []
-    next_admission = 0
-    next_completion = 0
-
-    async def execute(item: ItemT, admission: int) -> CompletedWork[ItemT, ResultT]:
-        nonlocal next_completion
-        result = await worker(item)
-        completion = next_completion
-        next_completion += 1
-        return CompletedWork(
-            item=item,
-            result=result,
-            admission_sequence=admission,
-            completion_sequence=completion,
-        )
-
-    def admit_one() -> bool:
-        nonlocal next_admission
-        try:
-            item = next(iterator)
-        except StopIteration:
-            return False
-        active.add(asyncio.create_task(execute(item, next_admission)))
-        next_admission += 1
-        return True
-
-    try:
-        while len(active) < concurrency and admit_one():
-            pass
-        while active:
-            done, active = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
-            try:
-                finished = [task.result() for task in done]
-            except BaseException:
-                active.update(done)
-                raise
-            finished.sort(key=lambda item: item.completion_sequence)
-            completed.extend(finished)
-            while len(active) < concurrency and admit_one():
-                pass
-    finally:
-        for task in active:
-            task.cancel()
-        if active:
-            await asyncio.gather(*active, return_exceptions=True)
-    return tuple(completed)

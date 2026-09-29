@@ -1,47 +1,13 @@
 """Strict YAML configuration for benchmark runs."""
 
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Annotated, Literal, Self, cast
 
 import yaml
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from mam_bench.simulations.civil_violence.settings import CivilViolenceSettings
 from mam_bench.simulations.schelling.settings import SchellingSettings
-
-# YAML loading
-
-
-def load_benchmark_config(path: Path) -> BenchmarkConfig:
-    """Load YAML, resolving output paths against the caller's working directory."""
-
-    with path.open("rb") as config_file:
-        document = cast(
-            object,
-            yaml.safe_load(config_file),  # pyright: ignore[reportUnknownMemberType]
-        )
-    config = BenchmarkConfig.model_validate(document)
-    return config.model_copy(update={"output_directory": config.output_directory.resolve()})
-
-
-# Model selections
-
-
-def _validate_model_id(value: str) -> str:
-    """Keep a user-defined model ID within one output-directory component."""
-    windows_path = PureWindowsPath(value)
-    if (
-        not value
-        or value in {".", ".."}
-        or "\x00" in value
-        or Path(value).name != value
-        or windows_path.name != value
-        or windows_path.drive
-    ):
-        raise ValueError("model id must be a single output-directory name")
-    return value
-
-
-ModelId = Annotated[str, AfterValidator(_validate_model_id)]
 
 
 class AgentSettings(BaseModel):
@@ -78,7 +44,6 @@ class OpenRouterModel(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    id: ModelId
     runtime: Literal["openrouter"]
     model: str
     provider: str
@@ -90,7 +55,6 @@ class OpenAICompatibleModel(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    id: ModelId
     runtime: Literal["openai-compatible"]
     model: str
     base_url: str
@@ -104,31 +68,39 @@ ModelSelection = Annotated[
 ]
 
 
-# Benchmark configuration
-
-SimulationSelection = str
+# Both shipped and custom suites use the same discriminated case schema.
+CaseSettings = Annotated[
+    SchellingSettings | CivilViolenceSettings, Field(discriminator="simulation")
+]
 
 
 class BenchmarkConfig(BaseModel):
-    """Configuration for choosing which simulations and models to run."""
+    """One explicit model and an ordered, fully specified suite."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
-
+    model: ModelSelection
+    cases: tuple[CaseSettings, ...] = Field(min_length=1)
+    output_directory: Path
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
-    simulations: tuple[SimulationSelection, ...] = Field(min_length=1)
-    models: tuple[ModelSelection, ...] = Field(min_length=1)
-    schelling: SchellingSettings = SchellingSettings()
-    output_directory: Path = Field(
-        description=(
-            "Results root relative to the working directory; each invocation creates a unique child"
-        )
-    )
 
-    @model_validator(mode="after")
-    def require_unique_selections(self) -> BenchmarkConfig:
-        if len(set(self.simulations)) != len(self.simulations):
-            raise ValueError("simulation selections must be unique")
-        model_ids = tuple(model.id for model in self.models)
-        if len(set(model_ids)) != len(model_ids):
-            raise ValueError("model selections must have unique ids")
-        return self
+
+DEFAULT_SUITE = Path(__file__).with_name("default-suite.yaml")
+
+
+def load_benchmark_config(
+    model_path: Path, suite_path: Path = DEFAULT_SUITE, *, output_directory: Path
+) -> BenchmarkConfig:
+    """Validate every case before constructing a provider or creating output."""
+    with model_path.open("rb") as source:
+        model = cast(object, yaml.safe_load(source))  # pyright: ignore[reportUnknownMemberType]
+    with suite_path.open("rb") as source:
+        suite = cast(object, yaml.safe_load(source))  # pyright: ignore[reportUnknownMemberType]
+    if not isinstance(suite, dict):
+        raise ValueError("suite YAML must be a mapping containing cases")
+    return BenchmarkConfig.model_validate(
+        {
+            **cast(dict[str, object], suite),
+            "model": model,
+            "output_directory": output_directory.resolve(),
+        }
+    )

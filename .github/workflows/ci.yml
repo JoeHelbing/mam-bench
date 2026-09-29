@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Tests, Ruff, Pyright
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: 0.12.7
+          enable-cache: true
+      - run: uv python install 3.14.7
+      - run: uv sync --frozen --no-dev
+      - name: Tests
+        run: uv run --no-sync python -m unittest discover -s tests -v
+      - name: Ruff
+        run: uvx --from ruff==0.16.5 ruff check src tests main.py && uvx --from ruff==0.16.5 ruff format --check src tests main.py
+      - name: Pyright
+        run: npx --yes pyright@1.1.413 --pythonpath .venv/bin/python
+
+  pr-title:
+    name: Conventional PR title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          node -e 'if (!/^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([a-z0-9][a-z0-9-]*\))?!?: .+/.test(process.env.PR_TITLE)) { console.error("Use a Conventional Commit PR title, e.g. feat: add a case"); process.exit(1); }'

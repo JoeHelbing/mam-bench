@@ -1,0 +1,18 @@
+name: Feature request
+description: Propose a focused change to the research benchmark
+title: "Proposal: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Explain the current limitation and who it affects.
+    validations:
+      required: true
+  - type: textarea
+    id: approach
+    attributes:
+      label: Proposed change
+      description: Include any effect on benchmark behavior, suites, or scores.
+    validations:
+      required: true

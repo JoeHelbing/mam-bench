@@ -2,6 +2,7 @@
 name = "mam-bench"
 version = "0.1.0"
 description = "Evaluate model-controlled agents in multi-agent simulations"
+license = "Apache-2.0"
 requires-python = ">=3.14"
 dependencies = [
     "numpy>=2.5.2",

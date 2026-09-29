@@ -1,0 +1,18 @@
+name: Bug report
+description: Report reproducible incorrect behavior
+title: "Bug: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include expected and actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How can this be reproduced?
+      description: Include a minimal example and the version or commit. Do not include credentials or private model conversations.
+    validations:
+      required: true

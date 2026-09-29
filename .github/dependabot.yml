@@ -1,0 +1,9 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    commit-message:
+      prefix: "chore(deps)"
+    schedule:
+      interval: monthly

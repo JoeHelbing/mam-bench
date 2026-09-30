@@ -228,6 +228,7 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_collisions_follow_priority_not_response_speed(self) -> None:
         release, faster_response = asyncio.Event(), asyncio.Event()
+        slower_started = asyncio.Event()
         calls: dict[str, int] = {}
         order: list[str] = []
         active = maximum = 0
@@ -235,16 +236,16 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
         async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             nonlocal active, maximum
             identity = cast(str, info.instructions).split("Identity: ")[1].split(";")[0]
-            if identity not in calls:
-                order.append(identity)
             calls[identity] = calls.get(identity, 0) + 1
             slot = order.index(identity)
             active += 1
             maximum = max(active, maximum)
             try:
                 if slot == 0:
+                    slower_started.set()
                     await release.wait()
                 if slot == 1:
+                    await slower_started.wait()
                     faster_response.set()
                 if slot in (0, 1):
                     destination = vacancies[0] if calls[identity] == 1 else vacancies[1]
@@ -260,6 +261,10 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             sim = SchellingSim(
                 schelling(), runtime=runtime(Path(directory) / "case", FunctionModel(script))
             )
+            # Callback arrival is deliberately not the scheduler's claim priority.
+            priority = list(sim.settings.controlled_agent_ids)
+            sim.scheduler.rng(0, "schelling", 0, "_order_selected").shuffle(priority)
+            order = [str(identity) for identity in priority]
             initial = sim.snapshot()
             vacancies = np.flatnonzero(sim.board.cells.ravel() == 0).tolist()
             agents = sim.agents

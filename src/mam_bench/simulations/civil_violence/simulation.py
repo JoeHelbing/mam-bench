@@ -1,6 +1,5 @@
 """Binary Cascade phase rules, simulation-owned scheduling and paired evaluation."""
 
-import asyncio
 from dataclasses import asdict
 from typing import Literal
 
@@ -10,6 +9,7 @@ from pydantic_ai import ModelRetry
 
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.runtime import CaseRuntime
+from mam_bench.scheduling import TurnScheduler
 from mam_bench.sessions import AgentSessions
 
 from .agents import (
@@ -30,6 +30,9 @@ class CivilViolenceSim:
     ) -> None:
         self.settings, self.runtime = settings, runtime
         self.rng = np.random.default_rng(settings.seed)
+        self.scheduler = TurnScheduler(
+            settings.seed, concurrency=runtime.settings.concurrency if runtime else 1
+        )
         positions = self.rng.permutation(settings.board_size**2)
         self.citizens = {
             i: Citizen(
@@ -182,12 +185,14 @@ class CivilViolenceSim:
                 citizen.jail_remaining -= 1
             elif empty:
                 choices = sorted(empty)
-                citizen.location = choices[int(self.rng.integers(len(choices)))]
+                release = self.scheduler.rng(self.steps, "citizen", agent_id, "release")
+                citizen.location = choices[int(release.integers(len(choices)))]
                 # Cascade releases into a random vacancy, then makes the usual
                 # one-cell random move; neither choice consumes a reserved cell.
                 hops = [p for p in self.neighborhood(citizen.location, 1) if p in empty]
                 if hops:
-                    citizen.location = hops[int(self.rng.integers(len(hops)))]
+                    hop = self.scheduler.rng(self.steps, "citizen", agent_id, "release-hop")
+                    citizen.location = hops[int(hop.integers(len(hops)))]
                 empty.remove(citizen.location)
 
     def _begin_police_phase(self) -> tuple[int, ...]:
@@ -221,7 +226,8 @@ class CivilViolenceSim:
         for target_id in self._targets.values():
             citizen = self.citizens[target_id]
             citizen.location = None
-            citizen.jail_remaining = int(self.rng.integers(self.settings.max_jail_term + 1))
+            jail = self.scheduler.rng(self.steps, "police", target_id, "jail")
+            citizen.jail_remaining = int(jail.integers(self.settings.max_jail_term + 1))
         for agent_id, destination in self._moves.items():
             self.police[agent_id].location = destination
         self.steps += 1
@@ -229,6 +235,9 @@ class CivilViolenceSim:
 
     async def reserve_action(self, agent_id: int, action: Action) -> None:
         """Validate a whole action before claiming any resource, for either policy."""
+        if agent_id not in self._admitted or agent_id in self._submitted:
+            raise ModelRetry("identity has no available turn in this phase")
+        await self.scheduler.wait_turn(agent_id)
         async with self._lock:
             if agent_id not in self._admitted or agent_id in self._submitted:
                 raise ModelRetry("identity has no available turn in this phase")
@@ -257,33 +266,15 @@ class CivilViolenceSim:
         if agent_id not in self._submitted:
             await self.reserve_action(agent_id, action)
 
-    async def _phase_turns(self, eligible: tuple[int, ...]) -> None:
-        # Model claims precede ordinary claims; ordinary actions remain sequential.
-        controlled = [i for i in eligible if i in self.controlled_agent_ids]
-        queue = iter(int(i) for i in self.rng.permutation(controlled))
-        active: set[asyncio.Task[None]] = set()
-        try:
-            if self.runtime is not None:
-                while True:
-                    while len(active) < self.runtime.settings.concurrency:
-                        identity = next(queue, None)
-                        if identity is None:
-                            break
-                        active.add(asyncio.create_task(self._act(identity)))
-                    if not active:
-                        break
-                    done, pending = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
-                    for task in done:
-                        task.result()
-                    active = pending
-            for agent_id in eligible:
-                if agent_id not in self.controlled_agent_ids:
-                    await self._act(agent_id)
-        finally:
-            for task in active:
-                task.cancel()
-            if active:
-                await asyncio.gather(*active, return_exceptions=True)
+    async def _phase_turns(self, eligible: tuple[int, ...], phase: str) -> None:
+        selected = set(self.replacement_ids)
+        await self.scheduler.run(
+            step=self.steps,
+            phase=phase,
+            selected=(i for i in eligible if i in selected),
+            ordinary=(i for i in eligible if i not in selected),
+            act=self._act,
+        )
 
     async def step(self) -> None:
         if self._failed or self._stepping:
@@ -292,9 +283,9 @@ class CivilViolenceSim:
             return
         self._stepping = True
         try:
-            await self._phase_turns(self._begin_citizen_phase())
+            await self._phase_turns(self._begin_citizen_phase(), "citizen")
             self._settle_citizens()
-            await self._phase_turns(self._begin_police_phase())
+            await self._phase_turns(self._begin_police_phase(), "police")
             self._settle_police()
             # Check the completed step, including step 30, before classifying the horizon.
             if self.participating_count * 100 >= len(self.scored_agent_ids) * 95:

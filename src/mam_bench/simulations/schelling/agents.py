@@ -87,11 +87,15 @@ class OrdinaryAgent(SimulationAgent):
             return Stay()
         distances = self.simulation.board.distances(self.position, candidates)
         nearest = candidates[distances == distances.min()]
-        destination = int(nearest[0] if len(nearest) == 1 else self.simulation.rng.choice(nearest))
+        rng = self.simulation.scheduler.rng(
+            self.simulation.steps, "schelling", self.agent_id, "movement"
+        )
+        destination = int(nearest[0] if len(nearest) == 1 else rng.choice(nearest))
         row, column = divmod(destination, self.simulation.settings.board_size)
         return Move(row=row, column=column)
 
     async def choose_action(self) -> Action:
+        await self.simulation.scheduler.wait_turn(self.agent_id)
         return self.propose_action()
 
 
@@ -103,8 +107,9 @@ homophily) or segregation (increase it). Scores exclude controlled identities
 in both worlds and equal four times signed percentage-point improvement.
 You may move to any unclaimed beginning-of-step vacancy, including outside your
 local view, or stay. Everyone observes the frozen board; moves settle together.
-Newly vacated origins are unavailable until the next step. Model agents reserve
-first. Ordinary agents then reserve in shuffled order: satisfied agents stay;
+Newly vacated origins are unavailable until the next step. Selected identities reserve
+first in both worlds, followed by the remaining ordinary agents. Decisions can overlap,
+but claims follow seeded priority, not response speed. Satisfied ordinary agents stay;
 unhappy agents choose the nearest strictly improving vacancy within their vision,
 with random ties. They predict destinations using only currently visible cells,
 excluding their origin; no known occupied neighbors predicts a same-type share
@@ -188,9 +193,8 @@ even if listed first. Complete memory and communication before ending the turn.
 
     async def choose_action(self) -> Action:
         simulation = self.simulation
-        # Discard the ordinary proposal to consume its RNG draws in this world state.
-        # Proposal selection never reserves a destination or changes the world.
-        self.propose_action()
+        # Ordinary-choice randomness has its own addressed slot. Leaving it unused
+        # cannot shift another agent's draws, even after the paired states diverge.
         sessions, runtime = simulation.sessions, simulation.runtime
         assert sessions is not None and runtime is not None
         result = await sessions.run(

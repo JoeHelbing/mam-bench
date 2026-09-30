@@ -1,7 +1,5 @@
 """Schelling owns paired evaluation, scheduling, settlement, and persistence."""
 
-import asyncio
-from collections.abc import Iterable
 from typing import Literal
 
 import numpy as np
@@ -10,6 +8,7 @@ from pydantic_ai import ModelRetry
 
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.runtime import CaseRuntime
+from mam_bench.scheduling import TurnScheduler
 from mam_bench.sessions import AgentSessions
 
 from .agents import Action, ModelControlledAgent, Move, OrdinaryAgent, SimulationAgent
@@ -22,6 +21,9 @@ class SchellingSim:
     def __init__(self, settings: SchellingSettings, *, runtime: CaseRuntime | None = None) -> None:
         self.settings = settings
         self.runtime = runtime
+        self.scheduler = TurnScheduler(
+            settings.seed, runtime.settings.concurrency if runtime else 1
+        )
         self.rng = np.random.default_rng(settings.seed)
         self.board = Board(settings, self.rng)
         self.controlled_agent_ids: tuple[int, ...] = (
@@ -69,7 +71,10 @@ class SchellingSim:
         }
 
     async def reserve_action(self, agent_id: int, action: Action) -> None:
-        """Both policies claim through this path; only settlement moves agents."""
+        """Both policies claim in seeded priority order; only settlement moves agents."""
+        if not self._stepping or agent_id not in self._admitted or agent_id in self._submitted:
+            raise ModelRetry("identity has no available turn")
+        await self.scheduler.wait_turn(agent_id)
         async with self._lock:
             if not self._stepping or agent_id not in self._admitted or agent_id in self._submitted:
                 raise ModelRetry("identity has no available turn")
@@ -95,30 +100,6 @@ class SchellingSim:
         if identity not in self._submitted:
             await self.reserve_action(identity, action)
 
-    async def _model_turns(self, identities: Iterable[int]) -> None:
-        """Rolling admission belongs to this simulation; failure cancels active turns."""
-        assert self.runtime is not None
-        queue = iter(identities)
-        active: set[asyncio.Task[None]] = set()
-        try:
-            while True:
-                while len(active) < self.runtime.settings.concurrency:
-                    identity = next(queue, None)
-                    if identity is None:
-                        break
-                    active.add(asyncio.create_task(self._act(identity)))
-                if not active:
-                    break
-                done, pending = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
-                for task in done:
-                    task.result()
-                active = pending
-        finally:
-            for task in active:
-                task.cancel()
-            if active:
-                await asyncio.gather(*active, return_exceptions=True)
-
     async def step(self) -> None:
         if self._failed or self._stepping:
             raise RuntimeError("world is failed or already stepping")
@@ -128,15 +109,14 @@ class SchellingSim:
         try:
             self._vacancies = set(int(p) for p in np.flatnonzero(self.board.cells.ravel() == 0))
             self._moves, self._submitted, self._admitted = {}, set(), set()
-            if self.controlled_agent_ids:
-                await self._model_turns(
-                    int(i) for i in self.rng.permutation(self.controlled_agent_ids)
-                )
-            ordinary = [
-                a.agent_id for a in self.agents if a.agent_id not in self.controlled_agent_ids
-            ]
-            for identity in self.rng.permutation(ordinary):
-                await self._act(int(identity))
+            selected = self.settings.controlled_agent_ids
+            await self.scheduler.run(
+                step=self.steps,
+                phase="schelling",
+                selected=selected,
+                ordinary=(a.agent_id for a in self.agents if a.agent_id not in selected),
+                act=self._act,
+            )
             if not self._moves and not self.controlled_agent_ids:
                 self.termination = (
                     "equilibrium"

@@ -75,21 +75,39 @@ class OrdinaryAgent(SimulationAgent):
             x = -citizen.private_preference + active**2 / inactive - simulation.settings.threshold
             sigmoid = 1 / (1 + exp(-x)) if x >= 0 else exp(x) / (1 + exp(x))
             probability = sigmoid - (1 - exp(-2.3 * police / active))
-            active_choice = probability > simulation.rng.random()
+            active_choice = (
+                probability
+                > simulation.scheduler.rng(
+                    simulation.steps, "citizen", self.agent_id, "activation"
+                ).random()
+            )
+            movement = simulation.scheduler.rng(
+                simulation.steps, "citizen", self.agent_id, "movement"
+            )
             destination = (
-                destinations[int(simulation.rng.integers(len(destinations)))]
-                if destinations
-                else None
+                destinations[int(movement.integers(len(destinations)))] if destinations else None
             )
             return CitizenAction(bool(active_choice), destination)
+        movement = simulation.scheduler.rng(simulation.steps, "police", self.agent_id, "movement")
         destination = (
-            destinations[int(simulation.rng.integers(len(destinations)))] if destinations else None
+            destinations[int(movement.integers(len(destinations)))] if destinations else None
         )
         targets = simulation.eligible_targets(self.agent_id)
-        target = targets[int(simulation.rng.integers(len(targets)))] if targets else None
+        target = (
+            targets[
+                int(
+                    simulation.scheduler.rng(
+                        simulation.steps, "police", self.agent_id, "target"
+                    ).integers(len(targets))
+                )
+            ]
+            if targets
+            else None
+        )
         return PoliceAction(target, destination)
 
     async def choose_action(self) -> Action:
+        await self.simulation.scheduler.wait_turn(self.agent_id)
         return self.propose_action()
 
 
@@ -225,9 +243,7 @@ Submit null row and column to stay; null target_id declines arrest.
 
     async def choose_action(self) -> Action:
         simulation = self.simulation
-        # Consume the ordinary policy's RNG draws without reserving or mutating state.
-        # Jailed ordinary citizens defer without a draw; their model turn does too.
-        self.propose_action()
+        # Ordinary random slots are addressed by identity and purpose, not consumed here.
         sessions, runtime = simulation.sessions, simulation.runtime
         assert sessions is not None and runtime is not None
         result = await sessions.run(

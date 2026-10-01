@@ -59,11 +59,24 @@ timestamp/UUID child and never overwrites a previous attempt.
 
 ## Rules and scores
 
-Both worlds have separate RNG instances initialized with the same case seed.
-Model agents consume and discard an ordinary-policy proposal before choosing
-their actual action. Proposals consume randomness without reserving or changing
-the world. Subsequent draws may diverge as states and conditional policies diverge;
-this does not claim permanently matched randomness.
+Both worlds start from the same seed and use the same staged turn mechanism:
+selected replacement identities decide first, then the remaining ordinary agents.
+Model decisions can overlap up to the configured concurrency limit, but claims
+are accepted in seeded priority order, not response order. Ordinary decisions
+use that same priority and see earlier reservations. Within each phase, physical
+actions settle only after both groups finish. Invalid claims retain their turn for bounded
+retries or fallback; a slow earlier turn can delay later claims.
+
+Turn priorities and action randomness have separate, stable addresses: case seed,
+step, role phase, identity, and purpose. Replacing an ordinary decision leaves its
+random slot unused instead of consuming a proposal in a different world state.
+Jail, release, or early termination in one world cannot shift another agent's
+random stream. Different available actions can still map the same randomness to
+different choices. Model outputs and message timing are not made deterministic.
+
+This changes the ordinary reference dynamics. Historical calibration archives
+remain historical evidence, not interchangeable baselines for this scheduler;
+recompute calibration before selecting defaults or evaluation seeds.
 
 Schelling preserves strict local improvement for ordinary agents: satisfaction
 uses occupied radius-one neighbors and a floating-point tolerance; unhappy
@@ -71,7 +84,8 @@ agents choose the nearest predicted improvement within their vision, with random
 ties. Destination predictions use only cells visible from the current origin,
 excluding the origin itself. Unknown cells are excluded; zero known occupied
 neighbors predicts quality one. Model agents may request any starting vacancy.
-Model reservations precede shuffled ordinary reservations; all moves settle
+Selected identities reserve first in both worlds, followed by the remaining
+ordinary identities; both groups use seeded priorities and all moves settle
 together. Ordinary execution stops at equilibrium, blockage, or the horizon;
 controlled execution runs to the configured horizon.
 
@@ -193,13 +207,15 @@ participation and revolution components through the same `score` property.
 Both use [sessions.py](src/mam_bench/sessions.py) for individual model turns,
 private history/memory, and communication. Instructions carry identity, goal,
 and standing rules; user inputs contain changing JSON observations. Each
-simulation owns rolling admission and cancellation. [artifacts.py](src/mam_bench/artifacts.py)
-writes supplied records and preserves native archives. The runner retains case
+simulation owns legality and settlement. [scheduling.py](src/mam_bench/scheduling.py)
+shares cohort ordering, concurrent admission, claim gates, failure cleanup, and
+addressed random streams. [artifacts.py](src/mam_bench/artifacts.py) writes supplied
+records and preserves native archives. The runner retains case
 results, and `BenchmarkResult.total_score` sums their calculated scores.
 
 There are no reset/reinitialization paths, alternate constructors, old YAML
-adapters, simulation-model matrices, shared scheduler, or reference-stream
-framework. The obsolete 60-step/two-agent calibration selector and tests for
+adapters, simulation-model matrices, base-simulation framework, or reference
+replay dependency. The obsolete 60-step/two-agent calibration selector and tests for
 retired interfaces are removed. Historical result files are untouched.
 
 ## Verify without model calls
@@ -213,6 +229,7 @@ uv run --no-sync pyright --pythonpath .venv/bin/python
 
 Checks cover upfront validation, paired worlds, an independent Schelling movement
 oracle, score replay, signed formulas, reservations and settlement, persistent
-sessions and jailed communication, RNG proposal purity, stopping, incremental
-artifacts, fallback diagnostics, cancellation, and failure redaction. They verify
-implementation behavior, not scientific calibration or real-model effectiveness.
+sessions and jailed communication, matched ordinary-policy replacements, isolated
+random slots, stopping, incremental artifacts, fallback diagnostics, cancellation,
+and failure redaction. They verify implementation behavior, not scientific
+calibration or real-model effectiveness.

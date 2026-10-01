@@ -1,5 +1,6 @@
 """Civil Violence acceptance through real tools, stepping, and paired results."""
 
+import asyncio
 import json
 import tempfile
 import unittest
@@ -7,11 +8,11 @@ from copy import deepcopy
 from pathlib import Path
 from typing import cast
 
-import numpy as np
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from mam_bench.simulations.civil_violence.agents import Defer, OrdinaryAgent
+from mam_bench.scheduling import TurnScheduler
+from mam_bench.simulations.civil_violence.agents import CitizenAction, Defer, OrdinaryAgent
 from mam_bench.simulations.civil_violence.results import EvaluationResult, Outcome
 from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
 from support import civil, observation, records, runtime
@@ -20,27 +21,31 @@ from support import civil, observation, records, runtime
 class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_activation_pseudocounts_and_unrounded_arrest_risk(self) -> None:
         # With one visible active citizen, A=2, I=1. Threshold 4 gives p=0.5.
-        # The first seeded draws are 0.637 (seed 0) and 0.262 (seed 2).
-        for seed, expected in ((0, False), (2, True)):
-            sim = CivilViolenceSim(civil(threshold=4))
+        # Citizen 0 activation slots are 0.135 (seed 0) and 0.726 (seed 3).
+        for seed, expected in ((0, True), (3, False)):
+            sim = CivilViolenceSim(civil(threshold=4, police_density=0.25, seed=seed))
             for citizen in sim.citizens.values():
                 citizen.location, citizen.jail_remaining = None, 99
             sim.citizens[0].location = (0, 0)
             sim.citizens[1].location, sim.citizens[1].active = (0, 1), True
-            sim.rng = np.random.default_rng(seed)
+            for j, officer in enumerate(sim.police.values()):
+                officer.location = (3 + j // 8, j % 8)
             await sim.step()
             self.assertEqual(sim.citizens[0].active, expected)
 
         # C/A = 1/2: unrounded risk leaves exp(-1.15)=0.317 activation probability.
-        # Rounding that ratio to zero would incorrectly activate seed 0.
-        for seed, expected in ((0, False), (2, True)):
-            sim = CivilViolenceSim(civil(police_density=1 / 64, citizen_vision=2, threshold=-1000))
+        # Rounding that ratio to zero would incorrectly activate seed 3.
+        for seed, expected in ((0, True), (3, False)):
+            sim = CivilViolenceSim(
+                civil(police_density=0.25, citizen_vision=2, threshold=-1000, seed=seed)
+            )
             for citizen in sim.citizens.values():
                 citizen.location, citizen.jail_remaining = None, 99
             sim.citizens[0].location = (0, 0)
             sim.citizens[1].location, sim.citizens[1].active = (0, 1), True
+            for j, officer in enumerate(sim.police.values()):
+                officer.location = (3 + j // 8, j % 8)
             next(iter(sim.police.values())).location = (2, 2)
-            sim.rng = np.random.default_rng(seed)
             await sim.step()
             self.assertEqual(sim.citizens[0].active, expected)
 
@@ -139,6 +144,166 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                         ],
                         result.score,
                     )
+
+    async def test_ordinary_equivalent_model_matches_selected_cohort_in_both_roles(self) -> None:
+        async def check(role: str) -> None:
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as directory:
+                sim: CivilViolenceSim
+                calls: set[int] = set()
+                second_started = asyncio.Event()
+                responses: list[int] = []
+
+                async def ordinary_policy(
+                    messages: list[ModelMessage], info: AgentInfo
+                ) -> ModelResponse:
+                    identity = int(
+                        cast(str, info.instructions).split("Identity: ")[1].split(".")[0]
+                    )
+                    calls.add(identity)
+                    if cast(int, observation(messages)["step"]) == 1:
+                        priority = sorted(sim.replacement_ids)
+                        sim.scheduler.rng(0, role, 0, "_order_selected").shuffle(priority)
+                        first, second = priority[:2]
+                        if identity == first:
+                            await second_started.wait()
+                            responses.append(identity)
+                        elif identity == second:
+                            responses.append(identity)
+                            second_started.set()
+                    # Compute the ordinary policy at the same priority gate. Earlier
+                    # claims can remove legal destinations and arrest targets.
+                    await sim.scheduler.wait_turn(identity)
+                    agent = sim.agents[identity]
+                    assert isinstance(agent, OrdinaryAgent)
+                    action = agent.propose_action()
+                    if isinstance(action, Defer):
+                        return ModelResponse(parts=[ToolCallPart("defer", {})])
+                    if isinstance(action, CitizenAction):
+                        point = action.destination
+                        return ModelResponse(
+                            parts=[
+                                ToolCallPart(
+                                    "participate",
+                                    {
+                                        "active": action.active,
+                                        "row": point[0] if point else None,
+                                        "column": point[1] if point else None,
+                                    },
+                                )
+                            ]
+                        )
+                    point = action.destination
+                    return ModelResponse(
+                        parts=[
+                            ToolCallPart(
+                                "intervene",
+                                {
+                                    "target_id": action.target_id,
+                                    "row": point[0] if point else None,
+                                    "column": point[1] if point else None,
+                                },
+                            )
+                        ]
+                    )
+
+                resources = runtime(
+                    Path(directory) / "case", FunctionModel(ordinary_policy), concurrency=16
+                )
+                settings = civil(
+                    controlled_role=role,
+                    citizen_density=0.5,
+                    police_density=0.25,
+                    seed=5 if role == "police" else 7,
+                    threshold=1 if role == "police" else 0,
+                )
+                reference = CivilViolenceSim(settings)
+                sim = CivilViolenceSim(settings, runtime=resources)
+                self.assertEqual(reference.snapshot(), sim.snapshot())
+                jailed_before: set[int] = set()
+                saw_release = False
+                for _ in range(3):
+                    await reference.step()
+                    await sim.step()
+                    self.assertEqual(reference.snapshot(), sim.snapshot())
+                    self.assertEqual(reference.termination, sim.termination)
+                    jailed_now = {i for i, c in reference.citizens.items() if c.location is None}
+                    saw_release |= bool(jailed_before - jailed_now)
+                    jailed_before = jailed_now
+                self.assertEqual(reference.steps, 3)
+                if role == "police":
+                    self.assertTrue(saw_release)
+                priority = sorted(sim.replacement_ids)
+                sim.scheduler.rng(0, role, 0, "_order_selected").shuffle(priority)
+                self.assertEqual(responses, priority[1::-1])
+                self.assertEqual(calls, set(sim.replacement_ids))
+
+        for role in ("citizen", "police"):
+            await check(role)
+
+    async def test_local_null_policy_evaluation_has_identical_worlds_and_zero_score(self) -> None:
+        async def check(role: str) -> None:
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as directory:
+                settings = civil(
+                    controlled_role=role,
+                    board_size=64,
+                    citizen_density=(16 if role == "police" else 32) / 4096,
+                    police_density=16 / 4096,
+                    seed=1 if role == "police" else 7,
+                    threshold=-10_000,
+                )
+                slots = TurnScheduler(settings.seed)
+                called: set[int] = set()
+
+                async def ordinary_policy(
+                    messages: list[ModelMessage], info: AgentInfo
+                ) -> ModelResponse:
+                    identity = int(
+                        cast(str, info.instructions).split("Identity: ")[1].split(".")[0]
+                    )
+                    called.add(identity)
+                    view = observation(messages)
+                    step = cast(int, view["step"]) - 1
+                    phase = role
+                    destinations = cast(list[list[int]], view["legal_destinations"])
+                    movement = slots.rng(step, phase, identity, "movement")
+                    point = (
+                        destinations[int(movement.integers(len(destinations)))]
+                        if destinations
+                        else None
+                    )
+                    position = {
+                        "row": point[0] if point else None,
+                        "column": point[1] if point else None,
+                    }
+                    if role == "citizen":
+                        return ModelResponse(
+                            parts=[ToolCallPart("participate", {"active": True, **position})]
+                        )
+                    targets = cast(list[int], view["eligible_targets"])
+                    choice = slots.rng(step, phase, identity, "target")
+                    target = targets[int(choice.integers(len(targets)))] if targets else None
+                    return ModelResponse(
+                        parts=[ToolCallPart("intervene", {"target_id": target, **position})]
+                    )
+
+                resources = runtime(
+                    Path(directory) / "case", FunctionModel(ordinary_policy), concurrency=1
+                )
+                result = await CivilViolenceSim(settings).evaluate(resources)
+                ordinary = records(resources.writer.directory / "ordinary.jsonl")
+                controlled = records(resources.writer.directory / "controlled.jsonl")
+                self.assertEqual(ordinary, controlled)
+                self.assertEqual(result.reference, result.controlled)
+                self.assertEqual(result.reference.termination, "revolution")
+                self.assertEqual(result.score, 0)
+                self.assertEqual(called, set(result.controlled_agent_ids))
+                self.assertEqual(
+                    json.loads((resources.writer.directory / "result.json").read_text())["score"],
+                    0,
+                )
+
+        for role in ("citizen", "police"):
+            await check(role)
 
     def test_revolution_components_reverse_with_goal_not_role(self) -> None:
         # Neither, model-only, reference-only, both. Event times do not score.
@@ -271,7 +436,8 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
             agent.propose_action()
             self.assertEqual(before, sim.snapshot())
             self.assertEqual(destinations, sim.legal_destinations(identity))
-            self.assertNotEqual(rng_before, sim.rng.bit_generator.state)
+            self.assertEqual(rng_before, sim.rng.bit_generator.state)
+            self.assertEqual(agent.propose_action(), agent.propose_action())
             if role == "citizen":
                 sim.citizens[identity].location = None
                 rng_before = deepcopy(sim.rng.bit_generator.state)
@@ -318,7 +484,7 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
             sim = CivilViolenceSim(
-                civil(controlled_role="police", citizen_density=0.5, police_density=0.25),
+                civil(controlled_role="police", citizen_density=0.5, police_density=0.25, seed=2),
                 runtime=resources,
             )
             await sim.step()

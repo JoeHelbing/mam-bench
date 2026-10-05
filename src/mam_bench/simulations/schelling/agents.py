@@ -178,7 +178,12 @@ and memory before moving or staying.
         interface: ModelInterface[ModelControlledAgent, Action] = ModelInterface(
             runtime.model,
             deps_type=ModelControlledAgent,
-            output_type=[ToolOutput(_move, name="move"), ToolOutput(_stay, name="stay")],
+            output_type=[
+                ToolOutput(_move, name="move"),
+                ToolOutput(
+                    _stay, name="stay", strict=runtime.settings.strict_parameterless_tools or None
+                ),
+            ],
             instructions=ModelControlledAgent.INSTRUCTIONS,
             retries=5,
             end_strategy="early",

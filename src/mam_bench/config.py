@@ -23,6 +23,7 @@ class AgentSettings(BaseModel):
     concurrency: int = Field(default=4, gt=0)
     use_sampling_seed: bool = True
     tool_choice: Literal["required", "auto"] = "required"
+    strict_parameterless_tools: bool = Field(default=False, strict=True)
     timeout_seconds: float = Field(default=3_600.0, gt=0)
     context_window_tokens: int = Field(default=260_000, gt=0)
     compaction_trigger_fraction: float = Field(default=0.7, gt=0, lt=1)

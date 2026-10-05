@@ -222,7 +222,11 @@ class AgentSessions[AgentDepsT, OutputDataT]:
             """Post up to 4000 characters to the shared message board."""
             return await self.board.post(session_id, text)
 
-        tools.add_function(read_messages, takes_ctx=False)
+        tools.add_function(
+            read_messages,
+            takes_ctx=False,
+            strict=self._settings.strict_parameterless_tools or None,
+        )
         tools.add_function(post_message, takes_ctx=False)
         return tools
 

@@ -357,7 +357,9 @@ def _model_interface(
         end_strategy="early",
     )
     interface.tool(name="move", sequential=True)(_move)
-    interface.tool(name="stay", sequential=True)(_stay)
+    interface.tool(
+        name="stay", sequential=True, strict=runtime.settings.strict_parameterless_tools or None
+    )(_stay)
     interface.instructions(_identity)
     return interface
 
@@ -388,7 +390,12 @@ Exhaustion means stay with unchanged activity, or defer while jailed.
         interface = _model_interface(
             runtime,
             ModelCitizenAgent.INSTRUCTIONS,
-            [ToolOutput(_submit, name="submit"), ToolOutput(_defer, name="defer")],
+            [
+                ToolOutput(_submit, name="submit"),
+                ToolOutput(
+                    _defer, name="defer", strict=runtime.settings.strict_parameterless_tools or None
+                ),
+            ],
         )
         interface.tool(name="choose_activity", sequential=True)(_choose_activity)
         return interface

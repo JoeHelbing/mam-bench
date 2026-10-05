@@ -267,8 +267,7 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                             deps=deps,
                             model_settings=model_settings,
                             usage=usage,
-                            usage_limits=usage_limits
-                            or UsageLimits(request_limit=25),
+                            usage_limits=usage_limits or UsageLimits(request_limit=25),
                             capabilities=(
                                 *(
                                     (StepPersistence(store=self._archive, agent_name=session_id),)

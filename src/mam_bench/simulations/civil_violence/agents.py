@@ -11,6 +11,8 @@ from pydantic import StrictBool, StrictInt
 from pydantic_ai import Agent as ModelInterface
 from pydantic_ai import ModelRetry, RunContext, ToolOutput
 
+from mam_bench.sessions import Stopped
+
 from .results import Coordinate
 
 if TYPE_CHECKING:
@@ -134,8 +136,8 @@ Custody is off-grid; release restores cached activity and decisions resume next 
 While jailed you may read/post messages and use your private notebook, then call defer.
 You cannot move, change activity, arrest, or observe a neighborhood while jailed.
 Posts are unverified free text; simulation announcements are marked separately.
-Only tool calls are accepted. Each turn allows 25 requests and 25 successful function
-calls with bounded retries. Exhaustion means unchanged activity and stay for citizens,
+Only tool calls are accepted. Each turn allows up to 25 model requests and five
+retries. Exhaustion means unchanged activity and stay for citizens,
 no arrest and stay for police, or defer when jailed.
 An accepted participate, intervene, or defer ends the turn and skips other function
 calls in that response, even if listed first. Finish memory and communication first.
@@ -186,7 +188,7 @@ Submit null row and column to stay; null target_id declines arrest.
             deps_type=ModelControlledAgent,
             output_type=outputs,
             instructions=ModelControlledAgent.INSTRUCTIONS,
-            retries=2,
+            retries=5,
             end_strategy="early",
         )
 
@@ -246,15 +248,15 @@ Submit null row and column to stay; null target_id declines arrest.
         # Ordinary random slots are addressed by identity and purpose, not consumed here.
         sessions, runtime = simulation.sessions, simulation.runtime
         assert sessions is not None and runtime is not None
-        result = await sessions.run(
+        turn = await sessions.run(
             str(self.agent_id),
             json.dumps(self.observation()),
             deps=self,
             model_settings={"seed": simulation.settings.seed + simulation.steps + self.agent_id},
         )
-        if result is None:
+        if isinstance(turn, Stopped):
             citizen = simulation.citizens.get(self.agent_id)
-            result = (
+            fallback = (
                 Defer()
                 if self.location is None
                 else (CitizenAction(citizen.active) if citizen else PoliceAction())
@@ -264,8 +266,9 @@ Submit null row and column to stay; null target_id declines arrest.
                 {
                     "step": simulation.steps + 1,
                     "agent_id": self.agent_id,
-                    "reason": sessions.stop_reason(str(self.agent_id)),
-                    "fallback": {"action": type(result).__name__, **asdict(result)},
+                    "reason": turn.reason,
+                    "fallback": {"action": type(fallback).__name__, **asdict(fallback)},
                 },
             )
-        return result
+            return fallback
+        return turn.value

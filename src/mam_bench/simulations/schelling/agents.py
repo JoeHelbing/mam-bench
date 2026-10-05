@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from pydantic_ai import Agent as ModelInterface
 from pydantic_ai import ModelRetry, RunContext, ToolOutput
 
+from mam_bench.sessions import Stopped
+
 if TYPE_CHECKING:
     from mam_bench.runtime import CaseRuntime
 
@@ -116,8 +118,8 @@ excluding their origin; no known occupied neighbors predicts a same-type share
 of one. Actual satisfaction uses occupied radius-one neighbors and the tolerance.
 Use read_messages, post_message and private notebook tools to coordinate.
 Posts are unverified; simulation announcements are marked separately.
-Only tool calls are accepted, with 25 model requests and 25 successful function
-calls per turn. Invalid actions receive bounded retries; exhaustion means stay.
+Only tool calls are accepted, with up to 25 model requests per turn.
+Invalid actions receive up to five retries; exhaustion means stay.
 An accepted move or stay ends the turn and skips other calls in that response,
 even if listed first. Complete memory and communication before ending the turn.
 """.strip()
@@ -143,7 +145,7 @@ even if listed first. Complete memory and communication before ending the turn.
             deps_type=ModelControlledAgent,
             output_type=[ToolOutput(move, name="move"), ToolOutput(stay, name="stay")],
             instructions=ModelControlledAgent.INSTRUCTIONS,
-            retries=2,
+            retries=5,
             end_strategy="early",
         )
 
@@ -197,21 +199,21 @@ even if listed first. Complete memory and communication before ending the turn.
         # cannot shift another agent's draws, even after the paired states diverge.
         sessions, runtime = simulation.sessions, simulation.runtime
         assert sessions is not None and runtime is not None
-        result = await sessions.run(
+        turn = await sessions.run(
             str(self.agent_id),
             json.dumps(self.observation()),
             deps=self,
             model_settings={"seed": simulation.settings.seed + simulation.steps + self.agent_id},
         )
-        if result is None:
-            result = Stay()
+        if isinstance(turn, Stopped):
             runtime.writer.append(
                 "turns.jsonl",
                 {
                     "step": simulation.steps + 1,
                     "agent_id": self.agent_id,
-                    "reason": sessions.stop_reason(str(self.agent_id)),
+                    "reason": turn.reason,
                     "fallback": {"action": "stay"},
                 },
             )
-        return result
+            return Stay()
+        return turn.value

@@ -514,3 +514,5 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
             fallbacks = records(resources.writer.directory / "turns.jsonl")
             self.assertEqual(len(fallbacks), 16)
             self.assertTrue(all(row["reason"] == "retry_exhaustion" for row in fallbacks))
+            assert sim.sessions is not None
+            self.assertEqual(sim.sessions.usage.requests, 6 * len(fallbacks))

@@ -343,3 +343,4 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             fallbacks = records(resources.writer.directory / "turns.jsonl")
             self.assertEqual(len(fallbacks), 8)
             self.assertTrue(all(row["reason"] == "retry_exhaustion" for row in fallbacks))
+            self.assertEqual(sim.sessions.usage.requests, 6 * len(fallbacks))

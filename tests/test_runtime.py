@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 from openai import omit
 from openai.types.chat import ChatCompletion
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import (
     ModelRequest,
     SystemPromptPart,
@@ -178,6 +179,65 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent["timeout"], 45)
         self.assertIs(sent["max_tokens"], omit)
         self.assertIsInstance(response.parts[0], TextPart)
+
+    async def test_compatible_endpoint_accepts_sglang_weight_version_spans(self) -> None:
+        model = create_model(
+            OpenAICompatibleModel(
+                runtime="openai-compatible",
+                model="test-model",
+                base_url="https://compatible.example.test/v1",
+                api_key_env="COMPAT_TEST_API_KEY",
+            )
+        )
+        assert isinstance(model, OpenAIChatModel)
+        self.addAsyncCleanup(model.client.close)
+        spans = [{"version": "default", "start": 0, "end": 2}]
+        for tool_call in (False, True):
+            with self.subTest(tool_call=tool_call):
+                # The OpenAI SDK constructs responses without validating this metadata.
+                raw = completion(tool_call=tool_call).model_copy(
+                    update={"metadata": {"weight_version": "default", "weight_versions": spans}}
+                )
+                with patch.object(
+                    model.client.chat.completions, "create", AsyncMock(return_value=raw)
+                ):
+                    response = await model.request(
+                        [ModelRequest(parts=[UserPromptPart("Respond.")])],
+                        None,
+                        ModelRequestParameters(),
+                    )
+                self.assertEqual(
+                    response.parts[0],
+                    ToolCallPart("stay", "{}", "stay-1")
+                    if tool_call
+                    else TextPart("Summary or response."),
+                )
+                self.assertEqual(response.usage.total_tokens, 12)
+                self.assertEqual(
+                    raw.metadata, {"weight_version": "default", "weight_versions": spans}
+                )
+
+    async def test_compatible_endpoint_still_rejects_other_invalid_metadata(self) -> None:
+        model = create_model(
+            OpenAICompatibleModel(
+                runtime="openai-compatible",
+                model="test-model",
+                base_url="https://compatible.example.test/v1",
+                api_key_env="COMPAT_TEST_API_KEY",
+            )
+        )
+        assert isinstance(model, OpenAIChatModel)
+        self.addAsyncCleanup(model.client.close)
+        raw = completion().model_copy(update={"metadata": {"unrelated": [1]}})
+        with (
+            patch.object(model.client.chat.completions, "create", AsyncMock(return_value=raw)),
+            self.assertRaisesRegex(UnexpectedModelBehavior, "metadata.unrelated"),
+        ):
+            await model.request(
+                [ModelRequest(parts=[UserPromptPart("Respond.")])],
+                None,
+                ModelRequestParameters(),
+            )
 
     async def test_summary_inherits_provider_defaults_without_agent_seed(self) -> None:
         settings = AgentSettings(

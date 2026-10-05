@@ -1,10 +1,14 @@
 """Provider construction and settings shared by every simulation."""
 
+import json
 import os
 from dataclasses import dataclass
+from typing import cast
 
 from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletion
 from pydantic import Field, SecretStr
+from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.models.openrouter import (
@@ -45,6 +49,25 @@ class OpenRouterSettings(BaseSettings):
     api_key: SecretStr = Field(min_length=1)
 
 
+class _CompatibleChatModel(OpenAIChatModel):
+    """Normalize SGLang telemetry while retaining normal completion validation."""
+
+    def _process_response(self, response: ChatCompletion | str) -> ModelResponse:
+        if isinstance(response, ChatCompletion):
+            metadata = cast(dict[str, object] | None, response.metadata)
+            if isinstance(metadata, dict) and isinstance(metadata.get("weight_versions"), list):
+                # SGLang emits spans here; OpenAI metadata permits only string values.
+                response = response.model_copy(
+                    update={
+                        "metadata": {
+                            **metadata,
+                            "weight_versions": json.dumps(metadata["weight_versions"]),
+                        }
+                    }
+                )
+        return super()._process_response(response)
+
+
 def create_model(selection: ModelSelection) -> Model:
     """Create a model whose request defaults also apply to history summaries."""
 
@@ -61,7 +84,7 @@ def create_model(selection: ModelSelection) -> Model:
     )
 
     if isinstance(selection, OpenAICompatibleModel):
-        model = OpenAIChatModel(
+        model = _CompatibleChatModel(
             selection.model,
             # Local chat templates can require exactly one leading system message.
             # Let PydanticAI combine instructions without changing their role or text.

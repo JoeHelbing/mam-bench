@@ -25,7 +25,7 @@ from pydantic_ai_harness.memory import InMemoryStore, MemoryFile
 from mam_bench.communication import MessageBoard
 from mam_bench.config import AgentSettings
 from mam_bench.diagnostics import ExecutionFailure
-from mam_bench.sessions import AgentSessions
+from mam_bench.sessions import AgentSessions, Completed, Stopped
 
 
 def _response(
@@ -191,10 +191,9 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
         sessions = AgentSessions(
             Agent(FunctionModel(model), output_type=ToolOutput(answer, name="answer"), retries=1)
         )
-        self.assertIsNone(await sessions.run("a", "go", deps=None))
-        self.assertEqual(sessions.stop_reason("a"), "output_token_limit")
+        self.assertEqual(await sessions.run("a", "go", deps=None), Stopped("output_token_limit"))
         truncate = False
-        self.assertEqual(await sessions.run("a", "again", deps=None), 7)
+        self.assertEqual(await sessions.run("a", "again", deps=None), Completed(7))
         self.assertLessEqual(calls, 3)
 
     async def test_output_token_limit_preserves_effects_usage_and_next_turn(self) -> None:
@@ -216,7 +215,7 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
 
         runtime = AgentSessions(Agent(FunctionModel(model)))
         with self.assertLogs("mam_bench.sessions", level="INFO") as logs:
-            self.assertIsNone(await runtime.run("a", "go", deps=None))
+            self.assertEqual(await runtime.run("a", "go", deps=None), Stopped("output_token_limit"))
         self.assertTrue(any("reason=output_token_limit" in line for line in logs.output))
         self.assertEqual(calls, 2)
         self.assertEqual(runtime.usage.output_tokens, 32770)
@@ -227,14 +226,14 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
                 for message in runtime.history("a")
             )
         )
-        self.assertEqual(await runtime.run("a", "again", deps=None), "recovered")
+        self.assertEqual(await runtime.run("a", "again", deps=None), Completed("recovered"))
 
     async def test_private_memory_and_history(self) -> None:
         model = MemoryModel()
         runtime = AgentSessions(Agent(FunctionModel(model)))
-        self.assertEqual(await runtime.run("a", "remember alpha", deps=None), "stored")
-        self.assertEqual(await runtime.run("a", "recall", deps=None), "remembered")
-        self.assertEqual(await runtime.run("b", "recall", deps=None), "empty")
+        self.assertEqual(await runtime.run("a", "remember alpha", deps=None), Completed("stored"))
+        self.assertEqual(await runtime.run("a", "recall", deps=None), Completed("remembered"))
+        self.assertEqual(await runtime.run("b", "recall", deps=None), Completed("empty"))
         self.assertGreater(len(runtime.history("a")), len(runtime.history("b")))
         self.assertIn("post_message", model.tool_names)
         self.assertIn("read_messages", model.tool_names)
@@ -249,10 +248,10 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
         result = await runtime.run(
             "a", "remember alpha", deps=None, usage_limits=UsageLimits(request_limit=1)
         )
-        self.assertIsNone(result)
+        self.assertEqual(result, Stopped("usage_limit"))
         self.assertEqual(runtime.usage.requests, 1)
         self.assertTrue(runtime.history("a"))
-        self.assertEqual(await runtime.run("a", "recall", deps=None), "remembered")
+        self.assertEqual(await runtime.run("a", "recall", deps=None), Completed("remembered"))
 
     async def test_successful_tool_limit_and_multi_call(self) -> None:
         async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -263,8 +262,9 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
             )
 
         runtime = AgentSessions(Agent(FunctionModel(model)))
-        self.assertIsNone(
-            await runtime.run("a", "go", deps=None, usage_limits=UsageLimits(tool_calls_limit=2))
+        self.assertEqual(
+            await runtime.run("a", "go", deps=None, usage_limits=UsageLimits(tool_calls_limit=2)),
+            Stopped("usage_limit"),
         )
         self.assertEqual(runtime.usage.tool_calls, 2)
         _assert_complete_tool_history(list(runtime.history("a")))
@@ -282,11 +282,11 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
             return _response(TextPart("recovered"))
 
         runtime = AgentSessions(Agent(FunctionModel(model), retries=2))
-        self.assertIsNone(await runtime.run("a", "go", deps=None))
+        self.assertEqual(await runtime.run("a", "go", deps=None), Stopped("retry_exhaustion"))
         self.assertEqual(runtime.usage.requests, 3)
         _assert_complete_tool_history(list(runtime.history("a")))
         invalid = False
-        self.assertEqual(await runtime.run("a", "again", deps=None), "recovered")
+        self.assertEqual(await runtime.run("a", "again", deps=None), Completed("recovered"))
 
         async def broken(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             del messages, info
@@ -310,7 +310,7 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         await runtime.run("a", "A" * 600, deps=None)
-        self.assertEqual(await runtime.run("a", "B" * 600, deps=None), "normal-2")
+        self.assertEqual(await runtime.run("a", "B" * 600, deps=None), Completed("normal-2"))
         self.assertEqual(model.summary_requests, 1)
         self.assertEqual(model.summary_max_tokens, [16])
         self.assertEqual(runtime.usage.requests, 3)
@@ -352,9 +352,31 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
             return _response(ToolCallPart("read_messages", {}, str(len(messages))))
 
         runtime = AgentSessions(Agent(FunctionModel(model)))
-        self.assertIsNone(await runtime.run("a", "go", deps=None))
+        self.assertEqual(await runtime.run("a", "go", deps=None), Stopped("usage_limit"))
         self.assertEqual(runtime.usage.requests, 25)
         self.assertEqual(runtime.usage.tool_calls, 25)
+
+    async def test_default_request_limit_does_not_cap_calls_in_one_response(self) -> None:
+        requests = 0
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal requests
+            del messages, info
+            requests += 1
+            if requests == 1:
+                return _response(
+                    *(
+                        ToolCallPart("post_message", {"text": str(i)}, f"post-{i}")
+                        for i in range(26)
+                    )
+                )
+            return _response(TextPart("done"))
+
+        runtime = AgentSessions(Agent(FunctionModel(model)))
+        self.assertEqual(await runtime.run("a", "go", deps=None), Completed("done"))
+        self.assertEqual(runtime.usage.requests, 2)
+        self.assertEqual(runtime.usage.tool_calls, 26)
+        self.assertIn("25", (await runtime.board.read("b")).content)
 
     async def test_terminal_tool_takes_precedence_over_other_calls(self) -> None:
         async def stay() -> str:
@@ -374,7 +396,7 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
                 end_strategy="early",
             )
         )
-        self.assertEqual(await runtime.run("a", "go", deps=None), "stayed")
+        self.assertEqual(await runtime.run("a", "go", deps=None), Completed("stayed"))
         self.assertEqual((await runtime.board.read("b")).content, "")
 
     async def test_tool_only_text_exhaustion_is_normal_stop(self) -> None:
@@ -388,7 +410,7 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
         runtime = AgentSessions(
             Agent(FunctionModel(model), output_type=ToolOutput(stay, name="stay"), retries=2)
         )
-        self.assertIsNone(await runtime.run("a", "go", deps=None))
+        self.assertEqual(await runtime.run("a", "go", deps=None), Stopped("retry_exhaustion"))
         self.assertEqual(runtime.usage.requests, 3)
 
     async def test_compaction_fallback_and_unrecoverable_failure(self) -> None:
@@ -402,7 +424,7 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
         fallback = CompactionModel(summary_error=ModelAPIError("scripted", "unavailable"))
         runtime = AgentSessions(Agent(FunctionModel(fallback)), settings=settings)
         await runtime.run("a", "A" * 600, deps=None)
-        self.assertEqual(await runtime.run("a", "B" * 600, deps=None), "normal-2")
+        self.assertEqual(await runtime.run("a", "B" * 600, deps=None), Completed("normal-2"))
         self.assertEqual(fallback.summary_requests, 1)
         broken = CompactionModel(
             summary_error=UnexpectedModelBehavior("Exceeded maximum output retries (2)")
@@ -435,8 +457,8 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
         second = asyncio.create_task(runtime.run("a", "second", deps=None))
         await asyncio.sleep(0)
         self.assertEqual(calls, 1)
-        self.assertEqual(await runtime.run("b", "other", deps=None), "ok")
+        self.assertEqual(await runtime.run("b", "other", deps=None), Completed("ok"))
         release_first.set()
-        self.assertEqual(await first, "ok")
-        self.assertEqual(await second, "ok")
+        self.assertEqual(await first, Completed("ok"))
+        self.assertEqual(await second, Completed("ok"))
         self.assertEqual(len(runtime.history("a")), 4)

@@ -156,12 +156,21 @@ class _Compaction[DepsT](FallbackCompaction[DepsT]):
         return result
 
 
+@dataclass(frozen=True)
+class Completed[T]:
+    value: T
+
+
+@dataclass(frozen=True)
+class Stopped:
+    reason: str
+
+
 @dataclass
 class _SessionState:
     history: list[ModelMessage] = field(default_factory=lambda: list[ModelMessage]())
     usage: RunUsage = field(default_factory=RunUsage)
     lock: Lock = field(default_factory=Lock)
-    stop_reason: str | None = None
 
 
 class AgentSessions[AgentDepsT, OutputDataT]:
@@ -202,9 +211,6 @@ class AgentSessions[AgentDepsT, OutputDataT]:
     def history(self, session_id: str) -> tuple[ModelMessage, ...]:
         return tuple(self._state(session_id).history)
 
-    def stop_reason(self, session_id: str) -> str | None:
-        return self._state(session_id).stop_reason
-
     def _board_tools(self, session_id: str) -> FunctionToolset[AgentDepsT]:
         tools: FunctionToolset[AgentDepsT] = FunctionToolset()
 
@@ -229,18 +235,17 @@ class AgentSessions[AgentDepsT, OutputDataT]:
         model_settings: ModelSettings | None = None,
         usage_limits: UsageLimits | None = None,
         capabilities: Sequence[AgentCapability[AgentDepsT]] = (),
-    ) -> OutputDataT | None:
+    ) -> Completed[OutputDataT] | Stopped:
         """Run a bounded turn; native limit/retry stops preserve the session.
 
-        None means no terminal output was accepted. The simulation decides its
-        fallback action. Execution failures stop all sessions in this world.
+        The simulation decides its fallback action for a stopped turn.
+        Execution failures stop all sessions in this world.
         """
         if not self._settings.use_sampling_seed and model_settings is not None:
             model_settings = model_settings.copy()
             model_settings.pop("seed", None)
         state = self._state(session_id)
         async with state.lock:
-            state.stop_reason = None
             self._check_active()
             usage = RunUsage()
             started = monotonic()
@@ -263,7 +268,7 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                             model_settings=model_settings,
                             usage=usage,
                             usage_limits=usage_limits
-                            or UsageLimits(request_limit=25, tool_calls_limit=25),
+                            or UsageLimits(request_limit=25),
                             capabilities=(
                                 *(
                                     (StepPersistence(store=self._archive, agent_name=session_id),)
@@ -280,11 +285,11 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                 except UsageLimitExceeded:
                     outcome = "usage_limit"
                     logger.info("turn.stop session=%s reason=usage_limit", session_id)
-                    output = None
+                    turn: Completed[OutputDataT] | Stopped = Stopped(outcome)
 
                 except IncompleteToolCall:
                     outcome = "output_token_limit"
-                    output = None
+                    turn = Stopped(outcome)
                 except UnexpectedModelBehavior as error:
                     # These native PydanticAI errors have no dedicated subtype.
                     # Only exhausted turn budgets are recoverable; other failures abort.
@@ -306,7 +311,7 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                         )
                         raise self._failure from None
                     logger.info("turn.stop session=%s reason=%s", session_id, outcome)
-                    output = None
+                    turn = Stopped(outcome)
                 except (APITimeoutError, TimeoutError) as error:
                     scope = (
                         "turn_deadline"
@@ -339,7 +344,7 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                     self._failure = error
                     raise
                 else:
-                    output = result.output
+                    turn = Completed(result.output)
                 finally:
                     if self._failure is not None:
                         outcome = "failed"
@@ -359,13 +364,12 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                         usage.input_tokens,
                         usage.output_tokens,
                     )
-                if output is None:
-                    state.stop_reason = outcome
+                if isinstance(turn, Stopped):
                     self._close_stopped_turn(messages)
                 state.history = list(messages)
                 state.usage.incr(usage)
                 self._usage.incr(usage)
-                return output
+                return turn
 
     @staticmethod
     def _close_stopped_turn(messages: list[ModelMessage]) -> None:

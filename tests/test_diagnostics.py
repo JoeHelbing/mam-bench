@@ -11,7 +11,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from mam_bench.config import AgentSettings
 from mam_bench.diagnostics import ExecutionFailure, configure_logging
-from mam_bench.sessions import AgentSessions
+from mam_bench.sessions import AgentSessions, Completed
 
 
 class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
@@ -71,7 +71,9 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
         runtime = AgentSessions(Agent(FunctionModel(scripted)))
         with self.assertLogs("mam_bench", level="DEBUG") as captured:
-            self.assertEqual(await runtime.run("a", "PRIVATE INPUT", deps=None), "PRIVATE OUTPUT")
+            self.assertEqual(
+                await runtime.run("a", "PRIVATE INPUT", deps=None), Completed("PRIVATE OUTPUT")
+            )
         log = "\n".join(captured.output)
         self.assertIn("request.start", log)
         self.assertIn("request.end", log)

@@ -1,7 +1,5 @@
 """Persistent citizen/security identities and their ordinary or model decisions."""
 
-from __future__ import annotations
-
 import json
 from dataclasses import asdict, dataclass, replace
 from math import exp

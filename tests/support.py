@@ -125,7 +125,7 @@ async def stay(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         else:
             part = ToolCallPart("act", {"active": False, "destination": None})
     else:
-        part = ToolCallPart("stay", {})
+        part = ToolCallPart("move", {"destination": None})
     return ModelResponse(parts=[part])
 
 

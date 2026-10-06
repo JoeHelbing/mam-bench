@@ -104,9 +104,12 @@ controlled identities in both worlds:
 Fractions are from zero to one. Scores are signed and unclamped: an improvement
 from 100% to 40% homophily earns 240 integration points.
 
-Civil Violence retains binary, epsilon-free Cascade activation, one-cell movement
-on a single-occupancy torus, citizen settlement before police observation, atomic
-movement/arrest reservations, off-grid custody, and cached-activity release.
+Civil Violence retains binary, epsilon-free Cascade activation, one-cell
+movement for ordinary agents, citizen settlement before police observation,
+atomic movement/arrest reservations, off-grid custody, and cached-activity
+release on a single-occupancy torus. Model-controlled citizens and police may
+move to any unclaimed phase-start vacancy, even outside their local view;
+police still arrest only adjacent active citizens from their current position.
 Every case replaces exactly 16 existing citizens or police. Either role can seek
 increased or decreased participation.
 

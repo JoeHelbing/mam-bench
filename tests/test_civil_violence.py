@@ -444,6 +444,65 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(agent.propose_action(), Defer())
                 self.assertEqual(rng_before, sim.rng.bit_generator.state)
 
+    async def test_controlled_citizens_and_police_can_move_beyond_their_view(self) -> None:
+        async def check(role: str) -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                moved: dict[int, tuple[int, int]] = {}
+
+                async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+                    identity = int(
+                        cast(str, info.instructions).split("Identity: ")[1].split(".")[0]
+                    )
+                    args: dict[str, int | bool] = {}
+                    if not moved:
+                        view = observation(messages)
+                        location = cast(
+                            list[int], cast(dict[str, object], view["self"])["location"]
+                        )
+                        adjacent = set(sim.neighborhood((location[0], location[1]), 1))
+                        state = sim.snapshot()
+                        occupied = {
+                            (point[0], point[1])
+                            for group in ("citizens", "police")
+                            for person in cast(list[dict[str, object]], state[group])
+                            if (point := cast(list[int] | None, person["location"])) is not None
+                        }
+                        destination = next(
+                            (row, column)
+                            for row in range(sim.settings.board_size)
+                            for column in range(sim.settings.board_size)
+                            if (row, column) not in occupied | adjacent
+                        )
+                        self.assertNotIn(
+                            list(destination), cast(list[list[int]], view["legal_destinations"])
+                        )
+                        moved[identity] = destination
+                        args = {"row": destination[0], "column": destination[1]}
+                    if role == "citizen":
+                        args["active"] = False
+                    return ModelResponse(
+                        parts=[
+                            ToolCallPart("participate" if role == "citizen" else "intervene", args)
+                        ]
+                    )
+
+                resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
+                settings = civil(
+                    controlled_role=role,
+                    citizen_density=0.5,
+                    police_density=0.25 if role == "police" else 0.0,
+                )
+                sim = CivilViolenceSim(settings, runtime=resources)
+                await sim.step()
+                self.assertEqual(len(moved), 1)
+                identity, destination = next(iter(moved.items()))
+                person = sim.citizens[identity] if role == "citizen" else sim.police[identity]
+                self.assertEqual(person.location, destination)
+
+        for role in ("citizen", "police"):
+            with self.subTest(role=role):
+                await check(role)
+
     async def test_police_validates_whole_action_before_reserving_and_settles_once(self) -> None:
         planned: dict[int, tuple[int, list[int]]] = {}
         phase_state: dict[str, object] | None = None

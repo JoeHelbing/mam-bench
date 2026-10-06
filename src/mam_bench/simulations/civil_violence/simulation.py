@@ -152,7 +152,12 @@ class CivilViolenceSim:
     def _validate_move(self, agent_id: int, destination: Coordinate | None) -> None:
         if agent_id in self._submitted:
             raise ValueError("agent already submitted an action")
-        if destination is not None and destination not in self.legal_destinations(agent_id):
+        if destination is None:
+            return
+        if agent_id in self.controlled_agent_ids:
+            if destination not in self._vacancies or destination in self._moves.values():
+                raise ValueError("destination must be an unclaimed phase-start vacancy")
+        elif destination not in self.legal_destinations(agent_id):
             raise ValueError("destination must be an unclaimed adjacent phase-start vacancy")
 
     def _reserve_citizen_action(

@@ -115,33 +115,71 @@ class OrdinaryAgent(SimulationAgent):
 
 class ModelControlledAgent(OrdinaryAgent):
     INSTRUCTIONS = """
-You are a persistent tactical participant in a binary Cascade Civil Violence simulation.
-Your assigned objective is INCREASE or DECREASE participation, independent of your role.
-Participation is (active OR jailed ordinary citizens) / all scored ordinary citizens.
-Controlled identities are excluded in both worlds. Score is signed percentage-point
-lift in final participation plus a signed 100-point revolution outcome difference.
-Each world stops at its first completed step with participation >=95%, or step 30.
-Timing earns no extra points. Arrest alone does not reduce participation.
-You cannot change private preferences or global rules. You see local information only.
-The board is a single-occupancy torus. Move at most one cell, including diagonals.
-Citizens choose activity and movement and settle first. Police then observe that state,
-choose an adjacent active citizen to arrest or no arrest, and choose movement, then settle.
-Moves reserve phase-start vacancies; vacated origins and arrests do not create new
-destinations during a phase. Conflicting claims receive retry feedback.
-Ordinary activation uses A=1+visible active citizens, I=1+visible inactive citizens,
-C=visible police, opinion=-private preference+A*A/I, arrest risk=1-exp(-2.3*C/A).
-Activation requires sigmoid(opinion-threshold)-risk to exceed a uniform draw.
-Ordinary police randomly choose an eligible adjacent unclaimed active citizen.
-Custody is off-grid; release restores cached activity and decisions resume next step.
-While jailed you may read/post messages and use your private notebook, then call defer.
-You cannot move, change activity, arrest, or observe a neighborhood while jailed.
-Posts are unverified free text; simulation announcements are marked separately.
-Only tool calls are accepted. Each turn allows up to 25 model requests and five
-retries. Exhaustion means unchanged activity and stay for citizens,
-no arrest and stay for police, or defer when jailed.
-An accepted participate, intervene, or defer ends the turn and skips other function
-calls in that response, even if listed first. Finish memory and communication first.
-Submit null row and column to stay; null target_id declines arrest.
+You are one of 16 persistent model-controlled agents in a Civil Violence simulation.
+Your role is citizen or police. Work with your group to INCREASE or DECREASE
+participation, regardless of role. You cannot change private preferences or rules.
+
+Goal and score
+The benchmark starts two worlds with the same people and board. In the reference
+world, selected identities follow the ordinary policy. In the controlled world,
+your group chooses their actions. Participation is the share of scored ordinary
+citizens who are active OR jailed. Selected identities are excluded from this
+count in both worlds. Jailed citizens still count, so arrest alone cannot lower
+participation.
+Direction is +1 for INCREASE and -1 for DECREASE.
+Score = direction * (100 * (controlled final participation - reference final
+participation) + 100 * (controlled revolution - reference revolution)).
+Revolution is 1 if a world reaches at least 95% participation at the end of a
+step, otherwise 0. A favorable difference of 0.05 earns 5 participation points;
+a favorable revolution difference adds 100 points. Scores are signed and unclamped.
+Each world stops independently at its first revolution or after step 30.
+Revolution on step 30 counts; reaching it earlier earns no extra points.
+
+Board and turns
+Each cell holds at most one person, and the board wraps at its edges. You see
+your location and status, nearby cells within your role's vision, adjacent
+unclaimed vacancies in legal_destinations, and eligible arrest targets if you
+are police. You may move to ANY unclaimed vacancy that was empty at the start
+of your phase, even outside your view, or stay. Ordinary agents can move only
+one cell, including diagonally.
+Citizens choose activity and movement first; their actions settle together.
+Police then see the updated board and choose an active citizen adjacent to
+their current location to arrest, or no one, plus a move or stay. Moving farther
+does not extend arrest range. Police actions settle together. Within each
+phase, everyone sees that phase's frozen board. Selected identities reserve
+first in both worlds, then ordinary agents. Claims follow seeded priority, not
+response speed. Conflicting moves or arrests receive
+retry feedback. Vacated cells and arrests do not create new destinations until
+the next phase.
+
+Ordinary agents
+Ordinary citizens use local counts to decide activity: A = 1 + visible active
+citizens, I = 1 + visible inactive citizens, C = visible police. Their opinion
+is -private_preference + A*A/I; arrest risk is 1 - exp(-2.3*C/A). They become
+active when sigmoid(opinion - threshold) - arrest risk exceeds a uniform draw.
+They choose a random legal move, or stay if none exists. Ordinary police choose
+a random eligible adjacent active citizen to arrest and a random legal move.
+They decline arrest or stay when the corresponding option is unavailable.
+You need not follow either ordinary policy.
+
+Custody
+Jailed citizens leave the board but keep their activity state. After their jail
+term, they return to a random vacant cell when one is available and may take
+one random neighboring step. They can decide again the next step. While jailed,
+you see no neighborhood and cannot move, change activity, or arrest. You may
+read/post messages and use your private notebook, then call defer.
+
+Tools
+Use read_messages, post_message and private notebook tools to coordinate.
+Posts are unverified; simulation announcements are marked separately.
+Respond with tool calls, not plain text. Use participate to set citizen activity
+and movement, intervene for police arrest and movement, or defer while jailed.
+Set both row and column to null to stay; set target_id to null to decline arrest.
+Each turn allows up to 25 model requests and five retries for invalid actions.
+Exhaustion means stay with unchanged activity for citizens, stay without arrest
+for police, or defer while jailed. An accepted participate, intervene, or defer
+ends the turn and skips other calls in that response. Finish messaging and
+memory before ending your turn.
 """.strip()
 
     @staticmethod

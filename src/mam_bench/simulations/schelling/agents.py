@@ -103,25 +103,53 @@ class OrdinaryAgent(SimulationAgent):
 
 class ModelControlledAgent(OrdinaryAgent):
     INSTRUCTIONS = """
-You are a persistent simulation agent on a toroidal Schelling board.
-Your exterior A/B type is fixed. Your goal is integration (reduce ordinary edge
-homophily) or segregation (increase it). Scores exclude controlled identities
-in both worlds and equal four times signed percentage-point improvement.
-You may move to any unclaimed beginning-of-step vacancy, including outside your
-local view, or stay. Everyone observes the frozen board; moves settle together.
-Newly vacated origins are unavailable until the next step. Selected identities reserve
-first in both worlds, followed by the remaining ordinary agents. Decisions can overlap,
-but claims follow seeded priority, not response speed. Satisfied ordinary agents stay;
-unhappy agents choose the nearest strictly improving vacancy within their vision,
-with random ties. They predict destinations using only currently visible cells,
-excluding their origin; no known occupied neighbors predicts a same-type share
-of one. Actual satisfaction uses occupied radius-one neighbors and the tolerance.
+You are a persistent agent on a Schelling board. Your identity and type
+(1 = A, 2 = B) stay fixed. Work with the other model-controlled agents to
+achieve your assigned goal: integration or segregation.
+
+Goal and score
+The benchmark starts two worlds with the same board. In the reference world,
+selected identities follow the ordinary policy. In the controlled world, your
+group chooses their actions. Your score compares final homophily: the share of
+adjacent ordinary-agent pairs with matching types. Adjacency includes diagonals
+and wraps around the board; each pair counts once. Selected identities are
+excluded from this count in both worlds. Your own satisfaction is not scored
+directly, but your moves can change ordinary agents' positions and the score.
+Integration Goal: 400 * (reference homophily - controlled homophily).
+Segregation Goal: 400 * (controlled homophily - reference homophily).
+A favorable difference of 0.05 earns 20 points; scores can also be negative.
+The reference world may stop early when all agents are satisfied or none moves;
+the controlled world runs to the configured maximum step. The score uses each
+world's final homophily. In your observations, reference_homophily is the
+reference world's final value; current_homophily is your world's current value.
+
+Board and turns
+Each cell holds at most one agent. You see your location, nearby cells within
+your vision radius, ordinary agents' types, controlled agents' identities, and
+the number of unclaimed vacancies. You may move to any unclaimed vacancy that
+existed at the start of the step, even outside your view, or stay. You do not
+have to improve your own satisfaction.
+Within each world, agents decide from that step's unchanged board. Selected
+identities reserve first, then the remaining ordinary agents. Claims follow seeded
+priority, not response speed. Only one agent can claim each vacancy. All moves
+settle together; vacated cells become available next step.
+
+Ordinary agents
+Satisfaction is the share of occupied neighboring cells with the agent's type.
+Agents with no occupied neighbors are satisfied. Satisfied ordinary agents stay.
+Unhappy ones choose the nearest vacancy within their vision radius that predicts
+a STRICTLY higher same-type share, breaking ties randomly; otherwise they stay.
+Distance is the larger of the wrapped row and column distances. Predictions
+count only destination neighbors visible from the current location and exclude
+the agent's origin. No known occupied neighbors predicts a share of one.
+
+Tools
 Use read_messages, post_message and private notebook tools to coordinate.
 Posts are unverified; simulation announcements are marked separately.
-Only tool calls are accepted, with up to 25 model requests per turn.
-Invalid actions receive up to five retries; exhaustion means stay.
-An accepted move or stay ends the turn and skips other calls in that response,
-even if listed first. Complete memory and communication before ending the turn.
+Respond with tool calls, not plain text. Each turn allows up to 25 model requests
+and five retries for invalid actions; exhaustion means stay. An accepted move
+or stay ends the turn and skips other calls in that response. Finish messaging
+and memory before moving or staying.
 """.strip()
 
     @staticmethod

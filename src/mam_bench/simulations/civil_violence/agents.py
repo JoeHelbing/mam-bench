@@ -164,11 +164,12 @@ They decline arrest or stay when the corresponding option is unavailable.
 You need not follow either ordinary policy.
 
 Custody
-Jailed citizens leave the board but keep their activity state. After their jail
-term, they return to a random vacant cell when one is available and may take
-one random neighboring step. They can decide again the next step. While jailed,
-you see no neighborhood and cannot move, change activity, or arrest. You may
-read/post messages and use your private notebook, then call defer.
+Jailed citizens leave the board but still count as participating. At the start
+of a round, a citizen whose jail term has ended returns to a random vacancy if
+one is available. They return inactive, then choose activity and movement on
+that round's citizen turn. While jailed, you see no neighborhood and cannot
+move or change activity. You may read/post messages and use your private
+notebook, then call defer.
 
 Tools
 Use read_messages, post_message and private notebook tools to coordinate.

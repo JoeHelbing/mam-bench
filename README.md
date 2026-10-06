@@ -106,10 +106,12 @@ from 100% to 40% homophily earns 240 integration points.
 
 Civil Violence retains binary, epsilon-free Cascade activation, one-cell
 movement for ordinary agents, citizen settlement before police observation,
-atomic movement/arrest reservations, off-grid custody, and cached-activity
-release on a single-occupancy torus. Model-controlled citizens and police may
-move to any unclaimed phase-start vacancy, even outside their local view;
-police still arrest only adjacent active citizens from their current position.
+atomic movement/arrest reservations, and off-grid custody on a
+single-occupancy torus. Released citizens start the round inactive and choose
+activity and movement on their citizen turn. Model-controlled citizens and
+police may move to any unclaimed phase-start vacancy, even outside their local
+view. Police still arrest only adjacent active citizens from their current
+position.
 Every case replaces exactly 16 existing citizens or police. Either role can seek
 increased or decreased participation.
 

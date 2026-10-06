@@ -49,19 +49,55 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
             await sim.step()
             self.assertEqual(sim.citizens[0].active, expected)
 
-    async def test_release_retains_activity_one_cycle_and_never_overlaps(self) -> None:
+    async def test_released_ordinary_citizens_choose_activity_and_never_overlap(self) -> None:
         sim = CivilViolenceSim(civil(threshold=10_000))
         for citizen in list(sim.citizens.values())[:3]:
             citizen.location, citizen.active, citizen.jail_remaining = None, True, 0
-        before = sim.snapshot()
         await sim.step()
-        self.assertTrue(all(sim.citizens[i].active for i in range(3)))
-        positions = [c.location for c in sim.citizens.values()]
-        self.assertNotIn(None, positions)
-        self.assertEqual(len(positions), len(set(positions)))
-        await sim.step()
+        self.assertTrue(all(sim.citizens[i].location is not None for i in range(3)))
         self.assertTrue(all(not sim.citizens[i].active for i in range(3)))
-        self.assertIsNone(cast(list[dict[str, object]], before["citizens"])[0]["location"])
+        positions = [c.location for c in sim.citizens.values()]
+        self.assertEqual(len(positions), len(set(positions)))
+
+    async def test_released_model_citizen_starts_inactive_and_decides_this_round(self) -> None:
+        views: list[dict[str, object]] = []
+
+        async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            identity = int(cast(str, info.instructions).split("Identity: ")[1].split(".")[0])
+            if identity == released_id:
+                view = observation(messages)
+                views.append(view)
+                action = (
+                    ToolCallPart("defer", {})
+                    if cast(dict[str, object], view["self"])["jailed"]
+                    else ToolCallPart("participate", {"active": True})
+                )
+            else:
+                action = ToolCallPart("participate", {"active": False})
+            return ModelResponse(parts=[action])
+
+        with tempfile.TemporaryDirectory() as directory:
+            resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
+            sim = CivilViolenceSim(civil(threshold=10_000), runtime=resources)
+            released_id = sim.controlled_agent_ids[0]
+            citizen = sim.citizens[released_id]
+            citizen.location, citizen.active, citizen.jail_remaining = None, True, 0
+            occupied = {c.location for c in sim.citizens.values() if c.location is not None}
+            occupied.update(p.location for p in sim.police.values())
+            vacancies = sorted(
+                (r, c)
+                for r in range(sim.settings.board_size)
+                for c in range(sim.settings.board_size)
+                if (r, c) not in occupied
+            )
+            rng = sim.scheduler.rng(0, "citizen", released_id, "release")
+            expected_location = vacancies[int(rng.integers(len(vacancies)))]
+            await sim.step()
+            self.assertEqual(len(views), 1)
+            self.assertEqual(cast(dict[str, object], views[0]["self"])["active"], False)
+            self.assertEqual(cast(dict[str, object], views[0]["self"])["jailed"], False)
+            self.assertEqual(citizen.location, expected_location)
+            self.assertTrue(citizen.active)
 
     async def test_arrests_are_unique_adjacent_and_jail_term_endpoints_are_inclusive(self) -> None:
         terms: set[int] = set()
@@ -401,7 +437,7 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(citizen.jail_remaining, 0)
             await sim.step()
             self.assertIsNotNone(citizen.location)
-            self.assertTrue(citizen.active)
+            self.assertFalse(citizen.active)
             await sim.step()
             self.assertFalse(citizen.active)
             self.assertIs(agent, sim.agents[jailed_id])

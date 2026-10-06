@@ -141,6 +141,18 @@ class CivilViolenceSim:
 
     def _begin_citizen_phase(self) -> tuple[int, ...]:
         self._begin_phase("citizen")
+        for citizen in self.citizens.values():
+            if citizen.location is not None:
+                continue
+            if citizen.jail_remaining > 0:
+                citizen.jail_remaining -= 1
+            elif self._vacancies:
+                choices = sorted(self._vacancies)
+                release = self.scheduler.rng(self.steps, "citizen", citizen.agent_id, "release")
+                citizen.location = choices[int(release.integers(len(choices)))]
+                citizen.active = False
+                self._phase_locations[citizen.agent_id] = citizen.location
+                self._vacancies.remove(citizen.location)
         self._custody = tuple(c.agent_id for c in self.citizens.values() if c.location is None)
         return tuple(self.citizens)
 
@@ -176,29 +188,6 @@ class CivilViolenceSim:
             self.citizens[agent_id].active = active
         for agent_id, destination in self._moves.items():
             self.citizens[agent_id].location = destination
-
-        # Release after movement settlement so neither placement can consume
-        # the other's reserved cell. Released citizens keep cached activity.
-        occupied = {c.location for c in self.citizens.values() if c.location is not None}
-        occupied.update(p.location for p in self.police.values())
-        empty = {
-            (r, c) for r in range(self.settings.board_size) for c in range(self.settings.board_size)
-        } - occupied
-        for agent_id in self._custody:
-            citizen = self.citizens[agent_id]
-            if citizen.jail_remaining > 0:
-                citizen.jail_remaining -= 1
-            elif empty:
-                choices = sorted(empty)
-                release = self.scheduler.rng(self.steps, "citizen", agent_id, "release")
-                citizen.location = choices[int(release.integers(len(choices)))]
-                # Cascade releases into a random vacancy, then makes the usual
-                # one-cell random move; neither choice consumes a reserved cell.
-                hops = [p for p in self.neighborhood(citizen.location, 1) if p in empty]
-                if hops:
-                    hop = self.scheduler.rng(self.steps, "citizen", agent_id, "release-hop")
-                    citizen.location = hops[int(hop.integers(len(hops)))]
-                empty.remove(citizen.location)
 
     def _begin_police_phase(self) -> tuple[int, ...]:
         self._begin_phase("police")

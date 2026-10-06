@@ -37,6 +37,9 @@ class ConfigurationTests(unittest.TestCase):
             {"citizen_density": 0.8, "police_density": 0.3},
             {"max_steps": 60},
             {"private_preference_std": -1},
+            {"vision_radius": 0},
+            {"vision_radius": True},
+            {"citizen_vision": 1, "police_vision": 1},
             {"threshold": float("nan")},
         ):
             with self.subTest(updates=updates), self.assertRaises(ValidationError):

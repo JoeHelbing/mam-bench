@@ -104,9 +104,14 @@ controlled identities in both worlds:
 Fractions are from zero to one. Scores are signed and unclamped: an improvement
 from 100% to 40% homophily earns 240 integration points.
 
-Civil Violence retains binary, epsilon-free Cascade activation, one-cell movement
-on a single-occupancy torus, citizen settlement before police observation, atomic
-movement/arrest reservations, off-grid custody, and cached-activity release.
+Civil Violence retains binary, epsilon-free Cascade activation, one-cell
+movement for ordinary agents, citizen settlement before police observation,
+atomic movement/arrest reservations, and off-grid custody on a
+single-occupancy torus. Released citizens start the round inactive and choose
+activity and movement on their citizen turn. Model-controlled citizens and
+police may move to any unclaimed phase-start vacancy, even outside their local
+view. Police still arrest only adjacent active citizens from their current
+position.
 Every case replaces exactly 16 existing citizens or police. Either role can seek
 increased or decreased participation.
 
@@ -198,9 +203,13 @@ choose actions; the simulation validates/reserves and settles them. Its
 For Civil Violence,
 [simulation.py](src/mam_bench/simulations/civil_violence/simulation.py) follows the
 same evaluate/run/step path. One citizen-then-police sequence serves both worlds.
-Persistent [agents](src/mam_bench/simulations/civil_violence/agents.py) select
-role-specific proposals or model actions; the simulation applies custody and
-atomic phase settlement before measuring participation and checking revolution.
+Persistent [agents](src/mam_bench/simulations/civil_violence/agents.py) use
+citizen and police role bases with ordinary and model-controlled variants.
+Ordinary proposals remain combined;
+model-controlled agents choose activity or an arrest target and move or stay in
+either order, then `submit` the combined action. Jailed citizens `defer`.
+The simulation applies custody and atomic phase settlement before measuring
+participation and checking revolution.
 Its [result](src/mam_bench/simulations/civil_violence/results.py) calculates the
 participation and revolution components through the same `score` property.
 

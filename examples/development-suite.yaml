@@ -24,8 +24,7 @@ cases:
   board_size: 8
   citizen_density: 0.75
   police_density: 0.0
-  citizen_vision: 1
-  police_vision: 1
+  vision_radius: 1
   threshold: -100.0
   private_preference_mean: 0.0
   private_preference_std: 0.0
@@ -39,8 +38,7 @@ cases:
   board_size: 8
   citizen_density: 0.75
   police_density: 0.0
-  citizen_vision: 1
-  police_vision: 1
+  vision_radius: 1
   threshold: -100.0
   private_preference_mean: 0.0
   private_preference_std: 0.0
@@ -54,8 +52,7 @@ cases:
   board_size: 8
   citizen_density: 0.75
   police_density: 0.25
-  citizen_vision: 1
-  police_vision: 1
+  vision_radius: 1
   threshold: -100.0
   private_preference_mean: 0.0
   private_preference_std: 0.0
@@ -69,8 +66,7 @@ cases:
   board_size: 8
   citizen_density: 0.75
   police_density: 0.25
-  citizen_vision: 1
-  police_vision: 1
+  vision_radius: 1
   threshold: -100.0
   private_preference_mean: 0.0
   private_preference_std: 0.0

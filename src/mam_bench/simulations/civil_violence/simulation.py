@@ -16,8 +16,10 @@ from .agents import (
     Action,
     CitizenAction,
     Defer,
-    ModelControlledAgent,
-    OrdinaryAgent,
+    ModelCitizenAgent,
+    ModelPoliceAgent,
+    OrdinaryCitizenAgent,
+    OrdinaryPoliceAgent,
     SimulationAgent,
 )
 from .results import Citizen, Coordinate, EvaluationResult, Outcome, Police
@@ -60,15 +62,21 @@ class CivilViolenceSim:
         )
         self.scored_agent_ids = tuple(i for i in self.citizens if i not in self.replacement_ids)
         self.controlled_agent_ids: tuple[int, ...] = self.replacement_ids if runtime else ()
-        self.agents: dict[int, SimulationAgent] = {
-            i: ModelControlledAgent(self, i)
-            if i in self.controlled_agent_ids
-            else OrdinaryAgent(self, i)
-            for i in (*self.citizens, *self.police)
-        }
+        self.agents: dict[int, SimulationAgent] = {}
+        for i in self.citizens:
+            agent_type = (
+                ModelCitizenAgent if i in self.controlled_agent_ids else OrdinaryCitizenAgent
+            )
+            self.agents[i] = agent_type(self, i)
+        for i in self.police:
+            agent_type = ModelPoliceAgent if i in self.controlled_agent_ids else OrdinaryPoliceAgent
+            self.agents[i] = agent_type(self, i)
+        model_agent = (
+            ModelCitizenAgent if settings.controlled_role == "citizen" else ModelPoliceAgent
+        )
         self.sessions = (
             AgentSessions(
-                ModelControlledAgent.model_interface(runtime, settings.controlled_role),
+                model_agent.model_interface(runtime),
                 settings=runtime.settings,
                 artifact_directory=runtime.writer.directory,
             )
@@ -141,6 +149,18 @@ class CivilViolenceSim:
 
     def _begin_citizen_phase(self) -> tuple[int, ...]:
         self._begin_phase("citizen")
+        for citizen in self.citizens.values():
+            if citizen.location is not None:
+                continue
+            if citizen.jail_remaining > 0:
+                citizen.jail_remaining -= 1
+            elif self._vacancies:
+                choices = sorted(self._vacancies)
+                release = self.scheduler.rng(self.steps, "citizen", citizen.agent_id, "release")
+                citizen.location = choices[int(release.integers(len(choices)))]
+                citizen.active = False
+                self._phase_locations[citizen.agent_id] = citizen.location
+                self._vacancies.remove(citizen.location)
         self._custody = tuple(c.agent_id for c in self.citizens.values() if c.location is None)
         return tuple(self.citizens)
 
@@ -152,7 +172,12 @@ class CivilViolenceSim:
     def _validate_move(self, agent_id: int, destination: Coordinate | None) -> None:
         if agent_id in self._submitted:
             raise ValueError("agent already submitted an action")
-        if destination is not None and destination not in self.legal_destinations(agent_id):
+        if destination is None:
+            return
+        if agent_id in self.controlled_agent_ids:
+            if destination not in self._vacancies or destination in self._moves.values():
+                raise ValueError("destination must be an unclaimed phase-start vacancy")
+        elif destination not in self.legal_destinations(agent_id):
             raise ValueError("destination must be an unclaimed adjacent phase-start vacancy")
 
     def _reserve_citizen_action(
@@ -171,29 +196,6 @@ class CivilViolenceSim:
             self.citizens[agent_id].active = active
         for agent_id, destination in self._moves.items():
             self.citizens[agent_id].location = destination
-
-        # Release after movement settlement so neither placement can consume
-        # the other's reserved cell. Released citizens keep cached activity.
-        occupied = {c.location for c in self.citizens.values() if c.location is not None}
-        occupied.update(p.location for p in self.police.values())
-        empty = {
-            (r, c) for r in range(self.settings.board_size) for c in range(self.settings.board_size)
-        } - occupied
-        for agent_id in self._custody:
-            citizen = self.citizens[agent_id]
-            if citizen.jail_remaining > 0:
-                citizen.jail_remaining -= 1
-            elif empty:
-                choices = sorted(empty)
-                release = self.scheduler.rng(self.steps, "citizen", agent_id, "release")
-                citizen.location = choices[int(release.integers(len(choices)))]
-                # Cascade releases into a random vacancy, then makes the usual
-                # one-cell random move; neither choice consumes a reserved cell.
-                hops = [p for p in self.neighborhood(citizen.location, 1) if p in empty]
-                if hops:
-                    hop = self.scheduler.rng(self.steps, "citizen", agent_id, "release-hop")
-                    citizen.location = hops[int(hop.integers(len(hops)))]
-                empty.remove(citizen.location)
 
     def _begin_police_phase(self) -> tuple[int, ...]:
         self._begin_phase("police")

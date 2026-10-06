@@ -66,7 +66,7 @@ class MainTests(unittest.TestCase):
 
     def test_failed_case_is_visible_but_never_prints_total_or_sensitive_body(self) -> None:
         async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            if any(tool.name == "submit" for tool in info.output_tools):
+            if any(tool.name == "act" for tool in info.output_tools):
                 raise ModelAPIError("offline", "SECRET-PROVIDER")
             return await stay(messages, info)
 

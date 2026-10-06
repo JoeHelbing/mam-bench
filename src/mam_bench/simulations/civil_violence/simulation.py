@@ -201,8 +201,12 @@ class CivilViolenceSim:
         self._begin_phase("police")
         return tuple(self.police)
 
-    def eligible_targets(self, agent_id: int) -> tuple[int, ...]:
-        adjacent = self.neighborhood(self._phase_locations[agent_id], 1)
+    def eligible_targets(
+        self, agent_id: int, location: Coordinate | None = None
+    ) -> tuple[int, ...]:
+        adjacent = self.neighborhood(
+            location if location is not None else self._phase_locations[agent_id], 1
+        )
         claimed = set(self._targets.values())
         return tuple(
             c.agent_id
@@ -211,13 +215,25 @@ class CivilViolenceSim:
         )
 
     def _reserve_police_action(
-        self, agent_id: int, target_id: int | None = None, destination: Coordinate | None = None
+        self,
+        agent_id: int,
+        target_location: Coordinate | None = None,
+        destination: Coordinate | None = None,
     ) -> None:
         if self._phase != "police" or agent_id not in self.police:
             raise ValueError("police officer is not eligible in this phase")
         self._validate_move(agent_id, destination)
-        if target_id is not None and target_id not in self.eligible_targets(agent_id):
-            raise ValueError("target must be an unclaimed adjacent active citizen")
+        location = destination if destination is not None else self._phase_locations[agent_id]
+        target_id = next(
+            (
+                target
+                for target in self.eligible_targets(agent_id, location=location)
+                if self.citizens[target].location == target_location
+            ),
+            None,
+        )
+        if target_location is not None and target_id is None:
+            raise ValueError("target square must hold an unclaimed adjacent active citizen")
         self._submitted.add(agent_id)
         if target_id is not None:
             self._targets[agent_id] = target_id
@@ -250,7 +266,9 @@ class CivilViolenceSim:
                 elif isinstance(action, CitizenAction):
                     self._reserve_citizen_action(agent_id, action.active, action.destination)
                 else:
-                    self._reserve_police_action(agent_id, action.target_id, action.destination)
+                    self._reserve_police_action(
+                        agent_id, action.target_location, action.destination
+                    )
             except ValueError as error:
                 raise ModelRetry(str(error)) from None
             self._submitted.add(agent_id)

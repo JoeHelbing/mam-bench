@@ -12,13 +12,49 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from mam_bench.scheduling import TurnScheduler
-from mam_bench.simulations.civil_violence.agents import CitizenAction, Defer, OrdinaryAgent
+from mam_bench.simulations.civil_violence.agents import (
+    CitizenAction,
+    CitizenAgent,
+    Defer,
+    ModelCitizenAgent,
+    ModelPoliceAgent,
+    OrdinaryCitizenAgent,
+    OrdinaryPoliceAgent,
+    PoliceAgent,
+)
 from mam_bench.simulations.civil_violence.results import EvaluationResult, Outcome
 from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
-from support import civil, observation, records, runtime
+from support import civil, observation, records, runtime, stay, turn_calls
 
 
 class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_all_roles_share_vision_radius(self) -> None:
+        for role in ("citizen", "police"):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as directory:
+                seen: dict[int, int] = {}
+
+                async def script(
+                    messages: list[ModelMessage],
+                    info: AgentInfo,
+                    *,
+                    seen: dict[int, int] = seen,
+                ) -> ModelResponse:
+                    if not turn_calls(messages):
+                        identity = int(
+                            cast(str, info.instructions).split("Identity: ")[1].split(".")[0]
+                        )
+                        view = observation(messages)
+                        seen[identity] = len(cast(list[object], view["neighborhood"]))
+                    return await stay(messages, info)
+
+                sim = CivilViolenceSim(
+                    civil(controlled_role=role, police_density=0.25, vision_radius=2),
+                    runtime=runtime(Path(directory) / "case", FunctionModel(script)),
+                )
+                await sim.step()
+                self.assertEqual(set(seen), set(sim.controlled_agent_ids))
+                self.assertEqual(set(seen.values()), {24})
+
     async def test_activation_pseudocounts_and_unrounded_arrest_risk(self) -> None:
         # With one visible active citizen, A=2, I=1. Threshold 4 gives p=0.5.
         # Citizen 0 activation slots are 0.135 (seed 0) and 0.726 (seed 3).
@@ -37,7 +73,7 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
         # Rounding that ratio to zero would incorrectly activate seed 3.
         for seed, expected in ((0, True), (3, False)):
             sim = CivilViolenceSim(
-                civil(police_density=0.25, citizen_vision=2, threshold=-1000, seed=seed)
+                civil(police_density=0.25, vision_radius=2, threshold=-1000, seed=seed)
             )
             for citizen in sim.citizens.values():
                 citizen.location, citizen.jail_remaining = None, 99
@@ -64,17 +100,20 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
 
         async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             identity = int(cast(str, info.instructions).split("Identity: ")[1].split(".")[0])
+            view = observation(messages)
             if identity == released_id:
-                view = observation(messages)
-                views.append(view)
-                action = (
-                    ToolCallPart("defer", {})
-                    if cast(dict[str, object], view["self"])["jailed"]
-                    else ToolCallPart("participate", {"active": True})
-                )
-            else:
-                action = ToolCallPart("participate", {"active": False})
-            return ModelResponse(parts=[action])
+                if not turn_calls(messages):
+                    views.append(view)
+                if cast(dict[str, object], view["self"])["jailed"]:
+                    return ModelResponse(parts=[ToolCallPart("defer", {})])
+            if turn_calls(messages):
+                return ModelResponse(parts=[ToolCallPart("submit", {})])
+            return ModelResponse(
+                parts=[
+                    ToolCallPart("choose_activity", {"active": identity == released_id}),
+                    ToolCallPart("stay", {}),
+                ]
+            )
 
         with tempfile.TemporaryDirectory() as directory:
             resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
@@ -195,6 +234,8 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                     identity = int(
                         cast(str, info.instructions).split("Identity: ")[1].split(".")[0]
                     )
+                    if turn_calls(messages):
+                        return ModelResponse(parts=[ToolCallPart("submit", {})])
                     calls.add(identity)
                     if cast(int, observation(messages)["step"]) == 1:
                         priority = sorted(sim.replacement_ids)
@@ -210,37 +251,22 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                     # claims can remove legal destinations and arrest targets.
                     await sim.scheduler.wait_turn(identity)
                     agent = sim.agents[identity]
-                    assert isinstance(agent, OrdinaryAgent)
+                    assert isinstance(agent, (CitizenAgent, PoliceAgent))
                     action = agent.propose_action()
                     if isinstance(action, Defer):
                         return ModelResponse(parts=[ToolCallPart("defer", {})])
-                    if isinstance(action, CitizenAction):
-                        point = action.destination
-                        return ModelResponse(
-                            parts=[
-                                ToolCallPart(
-                                    "participate",
-                                    {
-                                        "active": action.active,
-                                        "row": point[0] if point else None,
-                                        "column": point[1] if point else None,
-                                    },
-                                )
-                            ]
-                        )
                     point = action.destination
-                    return ModelResponse(
-                        parts=[
-                            ToolCallPart(
-                                "intervene",
-                                {
-                                    "target_id": action.target_id,
-                                    "row": point[0] if point else None,
-                                    "column": point[1] if point else None,
-                                },
-                            )
-                        ]
+                    movement = (
+                        ToolCallPart("move", {"row": point[0], "column": point[1]})
+                        if point
+                        else ToolCallPart("stay", {})
                     )
+                    choice = (
+                        ToolCallPart("choose_activity", {"active": action.active})
+                        if isinstance(action, CitizenAction)
+                        else ToolCallPart("choose_arrest", {"target_id": action.target_id})
+                    )
+                    return ModelResponse(parts=[choice, movement])
 
                 resources = runtime(
                     Path(directory) / "case", FunctionModel(ordinary_policy), concurrency=16
@@ -297,6 +323,8 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                         cast(str, info.instructions).split("Identity: ")[1].split(".")[0]
                     )
                     called.add(identity)
+                    if turn_calls(messages):
+                        return ModelResponse(parts=[ToolCallPart("submit", {})])
                     view = observation(messages)
                     step = cast(int, view["step"]) - 1
                     phase = role
@@ -307,19 +335,20 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                         if destinations
                         else None
                     )
-                    position = {
-                        "row": point[0] if point else None,
-                        "column": point[1] if point else None,
-                    }
+                    movement_tool = (
+                        ToolCallPart("move", {"row": point[0], "column": point[1]})
+                        if point
+                        else ToolCallPart("stay", {})
+                    )
                     if role == "citizen":
                         return ModelResponse(
-                            parts=[ToolCallPart("participate", {"active": True, **position})]
+                            parts=[ToolCallPart("choose_activity", {"active": True}), movement_tool]
                         )
                     targets = cast(list[int], view["eligible_targets"])
                     choice = slots.rng(step, phase, identity, "target")
                     target = targets[int(choice.integers(len(targets)))] if targets else None
                     return ModelResponse(
-                        parts=[ToolCallPart("intervene", {"target_id": target, **position})]
+                        parts=[ToolCallPart("choose_arrest", {"target_id": target}), movement_tool]
                     )
 
                 resources = runtime(
@@ -420,9 +449,15 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                     jailed_views.append(view)
                     if calls[key] == 2 and step == 1:
                         # A physical action must retry without changing cached activity.
-                        return ModelResponse(parts=[ToolCallPart("participate", {"active": False})])
+                        return ModelResponse(
+                            parts=[ToolCallPart("choose_activity", {"active": False})]
+                        )
                     return ModelResponse(parts=[ToolCallPart("defer", {})])
-            return ModelResponse(parts=[ToolCallPart("participate", {"active": False})])
+            if turn_calls(messages):
+                return ModelResponse(parts=[ToolCallPart("submit", {})])
+            return ModelResponse(
+                parts=[ToolCallPart("choose_activity", {"active": False}), ToolCallPart("stay", {})]
+            )
 
         with tempfile.TemporaryDirectory() as directory:
             resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
@@ -466,7 +501,7 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                     citizen.active = True
             identity = sim.replacement_ids[0]
             agent = sim.agents[identity]
-            assert isinstance(agent, OrdinaryAgent)
+            assert isinstance(agent, (CitizenAgent, PoliceAgent))
             before, rng_before = sim.snapshot(), deepcopy(sim.rng.bit_generator.state)
             destinations = sim.legal_destinations(identity)
             agent.propose_action()
@@ -489,7 +524,9 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                     identity = int(
                         cast(str, info.instructions).split("Identity: ")[1].split(".")[0]
                     )
-                    args: dict[str, int | bool] = {}
+                    if turn_calls(messages):
+                        return ModelResponse(parts=[ToolCallPart("submit", {})])
+                    destination: tuple[int, int] | None = None
                     if not moved:
                         view = observation(messages)
                         location = cast(
@@ -513,14 +550,17 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                             list(destination), cast(list[list[int]], view["legal_destinations"])
                         )
                         moved[identity] = destination
-                        args = {"row": destination[0], "column": destination[1]}
-                    if role == "citizen":
-                        args["active"] = False
-                    return ModelResponse(
-                        parts=[
-                            ToolCallPart("participate" if role == "citizen" else "intervene", args)
-                        ]
+                    choice = (
+                        ToolCallPart("choose_activity", {"active": False})
+                        if role == "citizen"
+                        else ToolCallPart("choose_arrest", {"target_id": None})
                     )
+                    movement = (
+                        ToolCallPart("move", {"row": destination[0], "column": destination[1]})
+                        if destination
+                        else ToolCallPart("stay", {})
+                    )
+                    return ModelResponse(parts=[choice, movement])
 
                 resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
                 settings = civil(
@@ -547,34 +587,46 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
             nonlocal phase_state
             identity = int(cast(str, info.instructions).split("Identity: ")[1].split(".")[0])
             view = observation(messages)
+            calls = turn_calls(messages)
             if phase_state is None:
                 phase_state = sim.snapshot()
             self.assertEqual(sim.snapshot(), phase_state)
             if identity in planned:
                 target, point = planned[identity]
-                # Neither half of the rejected action may have claimed a resource.
-                self.assertIn(target, sim.eligible_targets(identity))
-                self.assertIn(tuple(point), sim.legal_destinations(identity))
-                self.assertIn("RetryPromptPart", str(messages))
-                return ModelResponse(
-                    parts=[
-                        ToolCallPart(
-                            "intervene", {"target_id": target, "row": point[0], "column": point[1]}
-                        )
-                    ]
-                )
+                if calls[-1:] == ["submit"] and "RetryPromptPart" in str(messages):
+                    # Neither half of the rejected action may have claimed a resource.
+                    self.assertIn(target, sim.eligible_targets(identity))
+                    self.assertIn(tuple(point), sim.legal_destinations(identity))
+                    correction = (
+                        ToolCallPart("move", {"row": point[0], "column": point[1]})
+                        if calls[0] == "choose_arrest" and calls[1] == "move" and len(planned) == 1
+                        else ToolCallPart("choose_arrest", {"target_id": target})
+                    )
+                    return ModelResponse(parts=[correction])
+                return ModelResponse(parts=[ToolCallPart("submit", {})])
+            if calls:
+                return ModelResponse(parts=[ToolCallPart("submit", {})])
             targets = cast(list[int], view["eligible_targets"])
             destinations = cast(list[list[int]], view["legal_destinations"])
             if len(planned) < 2 and targets and destinations:
                 target, point = targets[0], destinations[0]
                 planned[identity] = target, point
-                args = (
-                    {"target_id": target, "row": 99, "column": 99}
-                    if len(planned) == 1
-                    else {"target_id": -1, "row": point[0], "column": point[1]}
+                if len(planned) == 1:
+                    return ModelResponse(
+                        parts=[
+                            ToolCallPart("choose_arrest", {"target_id": target}),
+                            ToolCallPart("move", {"row": 99, "column": 99}),
+                        ]
+                    )
+                return ModelResponse(
+                    parts=[
+                        ToolCallPart("move", {"row": point[0], "column": point[1]}),
+                        ToolCallPart("choose_arrest", {"target_id": -1}),
+                    ]
                 )
-                return ModelResponse(parts=[ToolCallPart("intervene", args)])
-            return ModelResponse(parts=[ToolCallPart("intervene", {})])
+            return ModelResponse(
+                parts=[ToolCallPart("choose_arrest", {"target_id": None}), ToolCallPart("stay", {})]
+            )
 
         with tempfile.TemporaryDirectory() as directory:
             resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
@@ -591,10 +643,142 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
             locations.extend(p.location for p in sim.police.values())
             self.assertEqual(len(locations), len(set(locations)))
 
+    async def test_choices_and_movement_stage_in_either_order_before_submit(self) -> None:
+        self.assertFalse(hasattr(OrdinaryCitizenAgent, "INSTRUCTIONS"))
+        self.assertFalse(hasattr(OrdinaryPoliceAgent, "INSTRUCTIONS"))
+        for role in ("citizen", "police"):
+            for first in ("choice", "movement"):
+                with (
+                    self.subTest(role=role, first=first),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    targets: dict[int, int] = {}
+
+                    async def script(
+                        messages: list[ModelMessage],
+                        info: AgentInfo,
+                        *,
+                        role: str = role,
+                        first: str = first,
+                        targets: dict[int, int] = targets,
+                    ) -> ModelResponse:
+                        identity = int(
+                            cast(str, info.instructions).split("Identity: ")[1].split(".")[0]
+                        )
+                        tools = {tool.name for tool in info.function_tools}
+                        instructions = cast(str, info.instructions)
+                        self.assertIn("Ordinary citizens use local counts", instructions)
+                        self.assertIn("They return inactive, then choose activity", instructions)
+                        if role == "citizen":
+                            self.assertIn("choose_activity", tools)
+                            self.assertNotIn("choose_arrest", tools)
+                            self.assertIn("Citizen decisions", instructions)
+                            self.assertNotIn("Police decisions", instructions)
+                        else:
+                            self.assertIn("choose_arrest", tools)
+                            self.assertNotIn("choose_activity", tools)
+                            self.assertIn("Police decisions", instructions)
+                            self.assertNotIn("Citizen decisions", instructions)
+                        calls = turn_calls(messages)
+                        if calls:
+                            if (
+                                role == "police"
+                                and calls[-1] == "submit"
+                                and ("RetryPromptPart" in str(messages))
+                            ):
+                                targets.pop(identity, None)
+                                return ModelResponse(
+                                    parts=[ToolCallPart("choose_arrest", {"target_id": None})]
+                                )
+                            return ModelResponse(parts=[ToolCallPart("submit", {})])
+                        view = observation(messages)
+                        eligible = cast(list[int], view["eligible_targets"])
+                        if role == "citizen":
+                            choice = ToolCallPart("choose_activity", {"active": True})
+                        else:
+                            target = eligible[0] if eligible else None
+                            if target is not None:
+                                targets[identity] = target
+                            choice = ToolCallPart("choose_arrest", {"target_id": target})
+                        movement = ToolCallPart("stay", {})
+                        parts = [choice, movement] if first == "choice" else [movement, choice]
+                        return ModelResponse(parts=parts)
+
+                    resources = runtime(
+                        Path(directory) / "case", FunctionModel(script), concurrency=1
+                    )
+                    sim = CivilViolenceSim(
+                        civil(
+                            controlled_role=role,
+                            police_density=0.25 if role == "police" else 0,
+                            threshold=-10_000,
+                        ),
+                        runtime=resources,
+                    )
+                    model_type = ModelCitizenAgent if role == "citizen" else ModelPoliceAgent
+                    self.assertTrue(
+                        all(isinstance(sim.agents[i], model_type) for i in sim.controlled_agent_ids)
+                    )
+                    self.assertTrue(
+                        all(
+                            isinstance(sim.agents[i], OrdinaryCitizenAgent)
+                            for i in sim.citizens
+                            if i not in sim.controlled_agent_ids
+                        )
+                    )
+                    self.assertTrue(
+                        all(
+                            isinstance(sim.agents[i], OrdinaryPoliceAgent)
+                            for i in sim.police
+                            if i not in sim.controlled_agent_ids
+                        )
+                    )
+                    origins = {
+                        identity: sim.agents[identity].location
+                        for identity in sim.controlled_agent_ids
+                    }
+                    await sim.step()
+                    self.assertEqual(
+                        origins,
+                        {identity: sim.agents[identity].location for identity in origins},
+                    )
+                    if role == "citizen":
+                        self.assertTrue(
+                            all(sim.citizens[i].active for i in sim.controlled_agent_ids)
+                        )
+                    else:
+                        self.assertTrue(targets)
+                        self.assertTrue(
+                            all(sim.citizens[i].location is None for i in targets.values())
+                        )
+                    self.assertFalse((resources.writer.directory / "turns.jsonl").exists())
+
+    async def test_submit_missing_choice_retries_then_falls_back(self) -> None:
+        async def missing(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if turn_calls(messages):
+                return ModelResponse(parts=[ToolCallPart("submit", {})])
+            return ModelResponse(parts=[ToolCallPart("stay", {})])
+
+        with tempfile.TemporaryDirectory() as directory:
+            resources = runtime(Path(directory) / "case", FunctionModel(missing))
+            sim = CivilViolenceSim(civil(threshold=10_000), runtime=resources)
+            origins = {i: sim.citizens[i].location for i in sim.controlled_agent_ids}
+            await sim.step()
+            self.assertEqual(origins, {i: sim.citizens[i].location for i in origins})
+            self.assertTrue(all(not sim.citizens[i].active for i in origins))
+            fallbacks = records(resources.writer.directory / "turns.jsonl")
+            self.assertEqual(len(fallbacks), 16)
+            self.assertTrue(all(row["reason"] == "retry_exhaustion" for row in fallbacks))
+
     async def test_invalid_police_action_exhausts_then_falls_back(self) -> None:
         async def invalid(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if turn_calls(messages):
+                return ModelResponse(parts=[ToolCallPart("submit", {})])
             return ModelResponse(
-                parts=[ToolCallPart("intervene", {"target_id": -1, "row": 99, "column": 99})]
+                parts=[
+                    ToolCallPart("choose_arrest", {"target_id": -1}),
+                    ToolCallPart("move", {"row": 99, "column": 99}),
+                ]
             )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -610,4 +794,4 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(fallbacks), 16)
             self.assertTrue(all(row["reason"] == "retry_exhaustion" for row in fallbacks))
             assert sim.sessions is not None
-            self.assertEqual(sim.sessions.usage.requests, 6 * len(fallbacks))
+            self.assertEqual(sim.sessions.usage.requests, 7 * len(fallbacks))

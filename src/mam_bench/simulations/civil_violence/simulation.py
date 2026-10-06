@@ -16,8 +16,10 @@ from .agents import (
     Action,
     CitizenAction,
     Defer,
-    ModelControlledAgent,
-    OrdinaryAgent,
+    ModelCitizenAgent,
+    ModelPoliceAgent,
+    OrdinaryCitizenAgent,
+    OrdinaryPoliceAgent,
     SimulationAgent,
 )
 from .results import Citizen, Coordinate, EvaluationResult, Outcome, Police
@@ -60,15 +62,21 @@ class CivilViolenceSim:
         )
         self.scored_agent_ids = tuple(i for i in self.citizens if i not in self.replacement_ids)
         self.controlled_agent_ids: tuple[int, ...] = self.replacement_ids if runtime else ()
-        self.agents: dict[int, SimulationAgent] = {
-            i: ModelControlledAgent(self, i)
-            if i in self.controlled_agent_ids
-            else OrdinaryAgent(self, i)
-            for i in (*self.citizens, *self.police)
-        }
+        self.agents: dict[int, SimulationAgent] = {}
+        for i in self.citizens:
+            agent_type = (
+                ModelCitizenAgent if i in self.controlled_agent_ids else OrdinaryCitizenAgent
+            )
+            self.agents[i] = agent_type(self, i)
+        for i in self.police:
+            agent_type = ModelPoliceAgent if i in self.controlled_agent_ids else OrdinaryPoliceAgent
+            self.agents[i] = agent_type(self, i)
+        model_agent = (
+            ModelCitizenAgent if settings.controlled_role == "citizen" else ModelPoliceAgent
+        )
         self.sessions = (
             AgentSessions(
-                ModelControlledAgent.model_interface(runtime, settings.controlled_role),
+                model_agent.model_interface(runtime),
                 settings=runtime.settings,
                 artifact_directory=runtime.writer.directory,
             )

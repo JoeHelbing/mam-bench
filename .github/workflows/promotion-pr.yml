@@ -1,0 +1,35 @@
+name: Promotion PR
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: promotion-pr
+  cancel-in-progress: false
+
+jobs:
+  open-promotion-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        id: app-token
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: read
+          permission-pull-requests: write
+      - name: Open PR if dev has unpromoted commits
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ "$(gh api "repos/$GH_REPO/compare/main...dev" --jq 'if .ahead_by > 0 and (.files | length) > 0 then "yes" else "no" end')" = yes ] &&
+             [ -z "$(gh pr list --base main --head dev --state open --json number --jq '.[0].number // empty')" ]; then
+            gh pr create --base main --head dev \
+              --title 'chore(release): promote dev to main' \
+              --body 'Promote tested changes from dev to main. Merge this PR with a merge commit (not squash) so release-please can read each Conventional Commit. Review the release-please PR after promotion; merge main back into dev after release.'
+          fi

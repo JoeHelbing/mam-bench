@@ -163,10 +163,10 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
                     origin = cast(list[int], before["agent_locations"])[identity]
                     destination = cast(list[int], after["agent_locations"])[identity]
                     if origin == destination:
-                        return ModelResponse(parts=[ToolCallPart("stay", {})])
+                        return ModelResponse(parts=[ToolCallPart("move", {"destination": None})])
                     row, column = divmod(destination, 8)
                     return ModelResponse(
-                        parts=[ToolCallPart("move", {"row": row, "column": column})]
+                        parts=[ToolCallPart("move", {"destination": [row, column]})]
                     )
 
                 # Offline replay is a test policy, never an observation exposed to real models.
@@ -251,9 +251,9 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
                     destination = vacancies[0] if calls[identity] == 1 else vacancies[1]
                     row, column = divmod(destination, 8)
                     return ModelResponse(
-                        parts=[ToolCallPart("move", {"row": row, "column": column})]
+                        parts=[ToolCallPart("move", {"destination": [row, column]})]
                     )
-                return ModelResponse(parts=[ToolCallPart("stay", {})])
+                return ModelResponse(parts=[ToolCallPart("move", {"destination": None})])
             finally:
                 active -= 1
 
@@ -297,7 +297,7 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
                     sim.scheduler.rng(0, "schelling", 10, "movement").random(), expected_draw
                 )
                 checked = True
-            return ModelResponse(parts=[ToolCallPart("stay", {})])
+            return ModelResponse(parts=[ToolCallPart("move", {"destination": None})])
 
         with tempfile.TemporaryDirectory() as directory:
             settings = schelling()
@@ -375,6 +375,24 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             rendered = cast(list[str], other.observation()["rendered_map"])
             self.assertTrue(any("B#24" in line for line in rendered))
 
+    async def test_move_with_null_destination_is_stay(self) -> None:
+        async def stay(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            self.assertEqual([tool.name for tool in info.output_tools], ["move"])
+            self.assertIn("destination", str(info.output_tools[0].parameters_json_schema))
+            return ModelResponse(parts=[ToolCallPart("move", {"destination": None})])
+
+        with tempfile.TemporaryDirectory() as directory:
+            resources = runtime(Path(directory) / "case", FunctionModel(stay))
+            sim = SchellingSim(schelling(), runtime=resources)
+            origin = sim.agents[0].position
+            await sim.step()
+            announcements = records(resources.writer.directory / "message-board.jsonl")
+            row, column = divmod(origin, sim.settings.board_size)
+            self.assertIn(
+                f"Step 1: agent 0 accepted stay at [{row},{column}].",
+                {row["text"] for row in announcements},
+            )
+
     async def test_json_local_observations_and_exhaustion_retains_identity(self) -> None:
         async def invalid(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             view = observation(messages)
@@ -389,7 +407,7 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("integration", info.instructions or "")
             self.assertRegex(info.instructions or "", r"exterior type: [AB]\.")
             self.assertNotIn("(1 = A, 2 = B)", info.instructions or "")
-            return ModelResponse(parts=[ToolCallPart("move", {"row": -1, "column": 0})])
+            return ModelResponse(parts=[ToolCallPart("move", {"destination": [-1, 0]})])
 
         with tempfile.TemporaryDirectory() as directory:
             resources = runtime(Path(directory) / "case", FunctionModel(invalid))

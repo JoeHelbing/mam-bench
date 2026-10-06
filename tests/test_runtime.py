@@ -31,7 +31,9 @@ from mam_bench.simulations.schelling.simulation import SchellingSim
 from support import civil, schelling
 
 
-def completion(*, tool_call: bool = False, tool_name: str = "stay") -> ChatCompletion:
+def completion(
+    *, tool_call: bool = False, tool_name: str = "stay", tool_args: str = "{}"
+) -> ChatCompletion:
     return ChatCompletion.model_validate(
         {
             "id": "offline-response",
@@ -50,7 +52,7 @@ def completion(*, tool_call: bool = False, tool_name: str = "stay") -> ChatCompl
                             {
                                 "id": "stay-1",
                                 "type": "function",
-                                "function": {"name": tool_name, "arguments": "{}"},
+                                "function": {"name": tool_name, "arguments": tool_args},
                             }
                         ]
                         if tool_call
@@ -215,7 +217,13 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                         schelling(),
                         runtime=CaseRuntime(model=model, settings=settings, writer=writer),
                     )
-                    request = AsyncMock(return_value=completion(tool_call=True))
+                    request = AsyncMock(
+                        return_value=completion(
+                            tool_call=True,
+                            tool_name="move",
+                            tool_args='{"destination": null}',
+                        )
+                    )
                     with patch.object(model.client.chat.completions, "create", request):
                         await sim.step()
 
@@ -227,12 +235,16 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                         tools = cast(list[dict[str, object]], sent["tools"])
                         functions = [cast(dict[str, object], tool["function"]) for tool in tools]
                         by_name = {cast(str, function["name"]): function for function in functions}
-                        for name in ("stay", "read_messages"):
-                            self.assertEqual(
-                                cast(dict[str, object], by_name[name]["parameters"])["properties"],
-                                {},
-                            )
-                            self.assertEqual(by_name[name].get("strict"), True if strict else None)
+                        self.assertNotIn("stay", by_name)
+                        self.assertEqual(
+                            cast(dict[str, object], by_name["read_messages"]["parameters"])[
+                                "properties"
+                            ],
+                            {},
+                        )
+                        self.assertEqual(
+                            by_name["read_messages"].get("strict"), True if strict else None
+                        )
                         for name in ("move", "post_message"):
                             self.assertIs(by_name[name].get("strict"), True)
 

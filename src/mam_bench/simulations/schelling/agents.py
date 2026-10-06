@@ -99,16 +99,17 @@ class OrdinaryAgent(SimulationAgent):
         return self.propose_action()
 
 
-async def _move(ctx: RunContext[ModelControlledAgent], row: StrictInt, column: StrictInt) -> Move:
-    if row < 0 or column < 0:
-        raise ModelRetry("coordinates must be nonnegative")
-    action = Move(row=row, column=column)
-    await ctx.deps.simulation.reserve_action(ctx.deps.agent_id, action)
-    return action
-
-
-async def _stay(ctx: RunContext[ModelControlledAgent]) -> Stay:
-    action = Stay()
+async def _move(
+    ctx: RunContext[ModelControlledAgent], destination: tuple[StrictInt, StrictInt] | None
+) -> Action:
+    """Move to destination [row, column], or pass null to stay."""
+    if destination is None:
+        action: Action = Stay()
+    else:
+        row, column = destination
+        if row < 0 or column < 0:
+            raise ModelRetry("coordinates must be nonnegative")
+        action = Move(row=row, column=column)
     await ctx.deps.simulation.reserve_action(ctx.deps.agent_id, action)
     return action
 
@@ -174,10 +175,11 @@ the agent's origin. No known occupied neighbors predicts a share of one.
 Tools
 Use read_messages, post_message and private notebook tools to coordinate.
 Posts are unverified; simulation announcements are marked separately.
-Respond with tool calls, not plain text. Each turn allows up to 25 model requests
-and five retries for invalid actions; exhaustion means stay. An accepted move
-or stay ends the turn and skips other calls in that response. Finish messaging
-and memory before moving or staying.
+Respond with tool calls, not plain text. Finish messaging and memory first.
+End your turn with move(destination=[row, column]), or pass destination=null
+to stay. An accepted move ends the turn and skips other calls in that response.
+Each turn allows up to 25 model requests and five retries for invalid actions;
+exhaustion means stay.
 """.strip()
 
     @staticmethod
@@ -185,12 +187,7 @@ and memory before moving or staying.
         interface: ModelInterface[ModelControlledAgent, Action] = ModelInterface(
             runtime.model,
             deps_type=ModelControlledAgent,
-            output_type=[
-                ToolOutput(_move, name="move"),
-                ToolOutput(
-                    _stay, name="stay", strict=runtime.settings.strict_parameterless_tools or None
-                ),
-            ],
+            output_type=[ToolOutput(_move, name="move")],
             instructions=ModelControlledAgent.INSTRUCTIONS,
             retries=5,
             end_strategy="early",

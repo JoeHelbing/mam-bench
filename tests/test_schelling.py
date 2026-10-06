@@ -332,6 +332,7 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             sim = SchellingSim(schelling(), runtime=resources)
             agent = sim.agents[0]
             assert isinstance(agent, ModelControlledAgent)
+            self.assertNotIsInstance(agent, OrdinaryAgent)
             origin = agent.position
             await sim.step()
             assert sim.sessions is not None

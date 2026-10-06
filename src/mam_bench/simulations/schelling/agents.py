@@ -101,7 +101,30 @@ class OrdinaryAgent(SimulationAgent):
         return self.propose_action()
 
 
-class ModelControlledAgent(OrdinaryAgent):
+async def _move(ctx: RunContext[ModelControlledAgent], row: StrictInt, column: StrictInt) -> Move:
+    if row < 0 or column < 0:
+        raise ModelRetry("coordinates must be nonnegative")
+    action = Move(row=row, column=column)
+    await ctx.deps.simulation.reserve_action(ctx.deps.agent_id, action)
+    return action
+
+
+async def _stay(ctx: RunContext[ModelControlledAgent]) -> Stay:
+    action = Stay()
+    await ctx.deps.simulation.reserve_action(ctx.deps.agent_id, action)
+    return action
+
+
+def _identity(ctx: RunContext[ModelControlledAgent]) -> str:
+    agent = ctx.deps
+    return (
+        f"Identity: {agent.agent_id}; exterior type: {agent.agent_type}. "
+        "Case rules and assigned goal: "
+        + agent.simulation.settings.model_dump_json(exclude={"seed"})
+    )
+
+
+class ModelControlledAgent(SimulationAgent):
     INSTRUCTIONS = """
 You are a persistent agent on a Schelling board. Your identity and type
 (1 = A, 2 = B) stay fixed. Work with the other model-controlled agents to
@@ -154,38 +177,15 @@ and memory before moving or staying.
 
     @staticmethod
     def model_interface(runtime: CaseRuntime) -> ModelInterface[ModelControlledAgent, Action]:
-        async def move(
-            ctx: RunContext[ModelControlledAgent], row: StrictInt, column: StrictInt
-        ) -> Move:
-            if row < 0 or column < 0:
-                raise ModelRetry("coordinates must be nonnegative")
-            action = Move(row=row, column=column)
-            await ctx.deps.simulation.reserve_action(ctx.deps.agent_id, action)
-            return action
-
-        async def stay(ctx: RunContext[ModelControlledAgent]) -> Stay:
-            action = Stay()
-            await ctx.deps.simulation.reserve_action(ctx.deps.agent_id, action)
-            return action
-
         interface: ModelInterface[ModelControlledAgent, Action] = ModelInterface(
             runtime.model,
             deps_type=ModelControlledAgent,
-            output_type=[ToolOutput(move, name="move"), ToolOutput(stay, name="stay")],
+            output_type=[ToolOutput(_move, name="move"), ToolOutput(_stay, name="stay")],
             instructions=ModelControlledAgent.INSTRUCTIONS,
             retries=5,
             end_strategy="early",
         )
-
-        def identity(ctx: RunContext[ModelControlledAgent]) -> str:
-            agent = ctx.deps
-            return (
-                f"Identity: {agent.agent_id}; exterior type: {agent.agent_type}. "
-                "Case rules and assigned goal: "
-                + agent.simulation.settings.model_dump_json(exclude={"seed"})
-            )
-
-        interface.instructions(identity)
+        interface.instructions(_identity)
         return interface
 
     def observation(self) -> dict[str, object]:

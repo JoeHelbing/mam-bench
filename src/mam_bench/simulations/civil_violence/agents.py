@@ -355,7 +355,12 @@ Exhaustion means stay with unchanged activity, or defer while jailed.
         interface = _model_interface(
             runtime,
             ModelCitizenAgent.INSTRUCTIONS,
-            [ToolOutput(_act_citizen, name="act"), ToolOutput(_defer, name="defer")],
+            [
+                ToolOutput(_act_citizen, name="act"),
+                ToolOutput(
+                    _defer, name="defer", strict=runtime.settings.strict_parameterless_tools or None
+                ),
+            ],
         )
         return interface
 

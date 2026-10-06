@@ -72,6 +72,29 @@ class ConfigurationTests(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 load_benchmark_config(model, output_directory=root)
 
+    def test_model_yaml_selects_strict_parameterless_tools_per_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_path, suite_path = root / "model.yaml", root / "suite.yaml"
+            suite_path.write_text(yaml.safe_dump({"cases": [schelling().model_dump()]}))
+            model = selection().model_dump()
+            model["settings"] = {"tool_choice": "auto", "strict_parameterless_tools": True}
+            model_path.write_text(yaml.safe_dump(model))
+            loaded = load_benchmark_config(model_path, suite_path, output_directory=root)
+            self.assertEqual(loaded.model.settings.tool_choice, "auto")
+            self.assertTrue(loaded.model.settings.strict_parameterless_tools)
+
+            model["settings"] = {"tool_choice": "required"}
+            model_path.write_text(yaml.safe_dump(model))
+            loaded = load_benchmark_config(model_path, suite_path, output_directory=root)
+            self.assertFalse(loaded.model.settings.strict_parameterless_tools)
+
+            for invalid in ("true", 1):
+                with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
+                    model["settings"] = {"strict_parameterless_tools": invalid}
+                    model_path.write_text(yaml.safe_dump(model))
+                    load_benchmark_config(model_path, suite_path, output_directory=root)
+
     def test_float_proportions_and_vacancy_rounding(self) -> None:
         for field in ("tolerance", "vacancy_fraction"):
             for value in (-0.1, 1.1, float("nan"), float("inf"), "3/4", "0.75", True):

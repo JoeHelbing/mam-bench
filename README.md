@@ -34,8 +34,11 @@ variable holding its credential. YAML must not contain credentials.
 The required `--model` file selects exactly one model. Model files also accept
 `settings` for sampling, request/turn timeouts, concurrency, and compaction;
 [config.py](src/mam_bench/config.py) defines those validated settings.
-The Muse and Qwen files preserve the existing provider examples; they are not
-recommendations or completed evaluations.
+Choose `settings.tool_choice: auto` or `required` per model file. Independently,
+`settings.strict_parameterless_tools: true` marks the no-argument `stay`, `defer`,
+and `read_messages` tools as strict. It defaults to `false`, preserving existing
+model files; provider support for strict tools varies. The Muse and Qwen files
+preserve the existing provider examples, not recommendations or completed evaluations.
 
 `--suite` selects a YAML mapping containing `cases`. Every simulation parameter
 must be explicit, including objective and seed. The entire case list replaces

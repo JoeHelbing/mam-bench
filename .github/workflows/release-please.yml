@@ -21,6 +21,22 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
         with:
           token: ${{ steps.app-token.outputs.token }}
           target-branch: main
+      - name: Queue main-to-dev back-merge
+        if: ${{ steps.release.outputs.releases_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          pr=$(gh pr list --base dev --head main --state open --json number --jq '.[0].number // empty')
+          if [ -z "$pr" ]; then
+            pr=$(gh pr create --base dev --head main \
+              --title 'chore(release): sync main into dev' \
+              --body 'Sync the release commit back into dev. GitHub will merge this PR after the required checks pass.')
+          fi
+          if [ "$(gh pr view "$pr" --json autoMergeRequest --jq '.autoMergeRequest != null')" = false ]; then
+            gh pr merge "$pr" --auto --merge
+          fi

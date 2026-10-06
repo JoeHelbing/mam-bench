@@ -155,8 +155,9 @@ the next phase.
 Ordinary agents
 Ordinary citizens use local counts to decide activity: A = 1 + visible active
 citizens, I = 1 + visible inactive citizens, C = visible police. Their opinion
-is -private_preference + A*A/I; arrest risk is 1 - exp(-2.3*C/A). They become
-active when sigmoid(opinion - threshold) - arrest risk exceeds a uniform draw.
+is -private_preference + A*A/I; arrest risk is 1 - exp(-2.3*C/A).
+Their activation value is sigmoid(opinion - threshold) - arrest risk. They draw
+a random number between 0 and 1 and become active if the value exceeds the draw.
 They choose a random legal move, or stay if none exists. Ordinary police choose
 a random eligible adjacent active citizen to arrest and a random legal move.
 They decline arrest or stay when the corresponding option is unavailable.

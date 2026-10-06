@@ -1,7 +1,7 @@
 """Persistent citizen/security identities and their ordinary or model decisions."""
 
 import json
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from math import exp
 from typing import TYPE_CHECKING
 
@@ -27,7 +27,7 @@ class CitizenAction:
 
 @dataclass(frozen=True)
 class PoliceAction:
-    target_id: int | None = None
+    target_location: Coordinate | None = None
     destination: Coordinate | None = None
 
 
@@ -87,14 +87,13 @@ that round's citizen turn.
 
 Use read_messages, post_message and private notebook tools to coordinate.
 Posts are unverified; simulation announcements are marked separately.
-Respond with tool calls, not plain text. Choice tools only record choices;
-they do not change the world. Choose role action and move(row, column) or
-stay() in EITHER order. Staying does not prevent activity or arrest. After
-BOTH choices are recorded, call submit() in a later response to validate and
-reserve the whole action. If rejected, revise the choice and submit again.
-An accepted submit ends the turn and skips other calls in that response.
-Finish messaging and memory first. Each turn allows up to 25 model requests
-and five retries for invalid actions.
+Respond with tool calls, not plain text. Read messages and use memory before
+your action. End a free turn with one act(...) call containing your role choice
+and movement destination (null to stay). Movement is validated first, then the
+whole action is reserved only if valid. An invalid action
+returns retry feedback without reserving any part. A valid act ends the turn;
+other calls in the same response are skipped. Each turn allows up to 25 model
+requests and five retries for invalid actions.
 """.strip()
 
 
@@ -186,8 +185,6 @@ class CitizenAgent(SimulationAgent):
             "legal_destinations": simulation.legal_destinations(self.agent_id)
             if location is not None
             else (),
-            "eligible_targets": (),
-            "terminal_action": "defer" if location is None else "submit",
         }
 
 
@@ -203,8 +200,8 @@ class PoliceAgent(SimulationAgent):
         destination = (
             destinations[int(movement.integers(len(destinations)))] if destinations else None
         )
-        targets = simulation.eligible_targets(self.agent_id)
-        target = (
+        targets = simulation.eligible_targets(self.agent_id, location=destination)
+        target_id = (
             targets[
                 int(
                     simulation.scheduler.rng(
@@ -215,7 +212,8 @@ class PoliceAgent(SimulationAgent):
             if targets
             else None
         )
-        return PoliceAction(target, destination)
+        target_location = simulation.citizens[target_id].location if target_id is not None else None
+        return PoliceAction(target_location, destination)
 
     def observation(self) -> dict[str, object]:
         simulation = self.simulation
@@ -229,8 +227,10 @@ class PoliceAgent(SimulationAgent):
             },
             "neighborhood": self.visible_neighborhood(simulation.settings.vision_radius),
             "legal_destinations": simulation.legal_destinations(self.agent_id),
-            "eligible_targets": simulation.eligible_targets(self.agent_id),
-            "terminal_action": "submit",
+            "eligible_target_locations_if_staying": tuple(
+                simulation.citizens[target].location
+                for target in simulation.eligible_targets(self.agent_id)
+            ),
         }
 
 
@@ -243,13 +243,6 @@ class OrdinaryPoliceAgent(PoliceAgent, OrdinaryAgent):
 
 
 class ModelControlledAgent(SimulationAgent):
-    def __init__(self, simulation: CivilViolenceSim, agent_id: int) -> None:
-        super().__init__(simulation, agent_id)
-        # Draft choices shared with this agent's model-tool callbacks.
-        self.pending_action: CitizenAction | PoliceAction | None = None
-        self.pending_destination: Coordinate | None = None
-        self.movement_selected = False
-
     def observation(self) -> dict[str, object]:
         raise NotImplementedError
 
@@ -261,9 +254,6 @@ class ModelControlledAgent(SimulationAgent):
         # Ordinary random slots are addressed by identity and purpose, not consumed here.
         sessions, runtime = simulation.sessions, simulation.runtime
         assert sessions is not None and runtime is not None
-        self.pending_action = None
-        self.pending_destination = None
-        self.movement_selected = False
         turn = await sessions.run(
             str(self.agent_id),
             json.dumps(self.observation()),
@@ -285,15 +275,27 @@ class ModelControlledAgent(SimulationAgent):
         return turn.value
 
 
-async def _submit(ctx: RunContext[ModelControlledAgent]) -> CitizenAction | PoliceAction:
-    """Submit the chosen activity/arrest and movement together to end your turn."""
-    agent = ctx.deps
-    if agent.location is None:
+async def _act_citizen(
+    ctx: RunContext[ModelControlledAgent],
+    active: StrictBool,
+    destination: tuple[StrictInt, StrictInt] | None,
+) -> CitizenAction:
+    """Choose activity and destination [row, column] together; null means stay."""
+    if ctx.deps.location is None:
         raise ModelRetry("jailed citizens must defer")
-    if agent.pending_action is None or not agent.movement_selected:
-        raise ModelRetry("choose activity or arrest and move or stay before submitting")
-    action = replace(agent.pending_action, destination=agent.pending_destination)
-    await agent.simulation.reserve_action(agent.agent_id, action)
+    action = CitizenAction(active, destination)
+    await ctx.deps.simulation.reserve_action(ctx.deps.agent_id, action)
+    return action
+
+
+async def _act_police(
+    ctx: RunContext[ModelControlledAgent],
+    destination: tuple[StrictInt, StrictInt] | None,
+    target_location: tuple[StrictInt, StrictInt] | None,
+) -> PoliceAction:
+    """Move first, then arrest at target square [row, column]; null declines either."""
+    action = PoliceAction(target_location, destination)
+    await ctx.deps.simulation.reserve_action(ctx.deps.agent_id, action)
     return action
 
 
@@ -302,38 +304,6 @@ async def _defer(ctx: RunContext[ModelControlledAgent]) -> Defer:
     action = Defer()
     await ctx.deps.simulation.reserve_action(ctx.deps.agent_id, action)
     return action
-
-
-async def _move(ctx: RunContext[ModelControlledAgent], row: StrictInt, column: StrictInt) -> str:
-    """Choose an unclaimed phase-start vacancy; settle only after submit."""
-    if ctx.deps.location is None:
-        raise ModelRetry("jailed citizens must defer")
-    ctx.deps.pending_destination = (row, column)
-    ctx.deps.movement_selected = True
-    return "Move choice recorded; submit when both choices are recorded."
-
-
-async def _stay(ctx: RunContext[ModelControlledAgent]) -> str:
-    """Choose no movement; you may still activate or arrest."""
-    if ctx.deps.location is None:
-        raise ModelRetry("jailed citizens must defer")
-    ctx.deps.pending_destination = None
-    ctx.deps.movement_selected = True
-    return "Stay choice recorded; submit when both choices are recorded."
-
-
-async def _choose_activity(ctx: RunContext[ModelControlledAgent], active: StrictBool) -> str:
-    """Choose active or inactive for this turn; settle only after submit."""
-    if ctx.deps.location is None:
-        raise ModelRetry("jailed citizens must defer")
-    ctx.deps.pending_action = CitizenAction(active)
-    return "Activity choice recorded; submit when both choices are recorded."
-
-
-async def _choose_arrest(ctx: RunContext[ModelControlledAgent], target_id: StrictInt | None) -> str:
-    """Choose an adjacent active citizen, or null for no arrest."""
-    ctx.deps.pending_action = PoliceAction(target_id)
-    return "Arrest choice recorded; submit when both choices are recorded."
 
 
 def _identity(ctx: RunContext[ModelControlledAgent]) -> str:
@@ -356,8 +326,6 @@ def _model_interface(
         retries=5,
         end_strategy="early",
     )
-    interface.tool(name="move", sequential=True)(_move)
-    interface.tool(name="stay", sequential=True)(_stay)
     interface.instructions(_identity)
     return interface
 
@@ -369,11 +337,10 @@ class ModelCitizenAgent(CitizenAgent, ModelControlledAgent):
         + """
 
 Citizen decisions
-You choose activity and movement on your citizen turn. Call
-choose_activity(active=true/false) and move(row, column) or stay(), in either
-order, then submit. Activity and movement settle together. Police see the
-settled board and may arrest active citizens adjacent to their current location.
-You need not follow the ordinary citizen policy.
+Call act(active=true/false, destination=[row, column] or null to stay).
+Activity and movement settle together. Police see the settled board and may
+arrest active citizens adjacent to their destination after moving (or their
+current location if staying). You need not follow the ordinary citizen policy.
 
 Your jailed turn
 While jailed, you see no neighborhood and cannot move or change activity.
@@ -388,9 +355,8 @@ Exhaustion means stay with unchanged activity, or defer while jailed.
         interface = _model_interface(
             runtime,
             ModelCitizenAgent.INSTRUCTIONS,
-            [ToolOutput(_submit, name="submit"), ToolOutput(_defer, name="defer")],
+            [ToolOutput(_act_citizen, name="act"), ToolOutput(_defer, name="defer")],
         )
-        interface.tool(name="choose_activity", sequential=True)(_choose_activity)
         return interface
 
     def fallback_action(self) -> CitizenAction | Defer:
@@ -405,23 +371,26 @@ class ModelPoliceAgent(PoliceAgent, ModelControlledAgent):
         + """
 
 Police decisions
-After citizens settle, choose an active citizen adjacent to your CURRENT
-location to arrest, or no one, plus a move or stay. Moving farther does not
-extend arrest range. Call choose_arrest(target_id=an eligible citizen ID or
-null for no arrest) and move(row, column) or stay(), in either order, then
-submit. Arrests and movement settle together. Ordinary police choose a random
-eligible adjacent active citizen to arrest and a random legal move; they
-decline arrest or stay if the corresponding option is unavailable. You need
-not follow this policy. Exhaustion means stay without arrest.
+After citizens settle, call act(destination=[row, column],
+target_location=[row, column]) to move and arrest at a square adjacent to your
+destination. Pass destination=null to stay and arrest from your current
+location; pass target_location=null to decline arrest. You may move to an unseen phase-start
+vacancy and target an active citizen there using information already shared
+with you, but moving gives you no new observation before the action settles.
+The target must be an unclaimed active citizen adjacent to your destination
+(or current location if staying). eligible_target_locations_if_staying lists
+only the targets available from your current square; it is not exhaustive if
+you move. Ordinary police choose a random legal move before choosing a random
+eligible target at the resulting location. You need not follow their policy.
+Exhaustion means stay without arrest.
 """
     )
 
     @staticmethod
     def model_interface(runtime: CaseRuntime) -> ModelInterface[ModelControlledAgent, Action]:
         interface = _model_interface(
-            runtime, ModelPoliceAgent.INSTRUCTIONS, [ToolOutput(_submit, name="submit")]
+            runtime, ModelPoliceAgent.INSTRUCTIONS, [ToolOutput(_act_police, name="act")]
         )
-        interface.tool(name="choose_arrest", sequential=True)(_choose_arrest)
         return interface
 
     def fallback_action(self) -> PoliceAction:

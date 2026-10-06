@@ -116,22 +116,17 @@ def turn_calls(messages: list[ModelMessage]) -> list[str]:
 
 async def stay(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     names = {tool.name for tool in info.output_tools}
-    if "submit" in names:
+    if "act" in names:
         view = observation(messages)
         if cast(dict[str, object], view["self"])["jailed"]:
-            parts = [ToolCallPart("defer", {})]
-        elif turn_calls(messages):
-            parts = [ToolCallPart("submit", {})]
+            part = ToolCallPart("defer", {})
+        elif "eligible_target_locations_if_staying" in view:
+            part = ToolCallPart("act", {"destination": None, "target_location": None})
         else:
-            choice = (
-                ToolCallPart("choose_activity", {"active": False})
-                if "choose_activity" in {tool.name for tool in info.function_tools}
-                else ToolCallPart("choose_arrest", {"target_id": None})
-            )
-            parts = [choice, ToolCallPart("stay", {})]
+            part = ToolCallPart("act", {"active": False, "destination": None})
     else:
-        parts = [ToolCallPart("stay", {})]
-    return ModelResponse(parts=parts)
+        part = ToolCallPart("stay", {})
+    return ModelResponse(parts=[part])
 
 
 def runtime(path: Path, model: FunctionModel | None = None, **settings: object) -> CaseRuntime:

@@ -130,7 +130,7 @@ async def stay(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             )
             parts = [choice, ToolCallPart("stay", {})]
     else:
-        parts = [ToolCallPart("stay", {})]
+        parts = [ToolCallPart("move", {"destination": None})]
     return ModelResponse(parts=parts)
 
 

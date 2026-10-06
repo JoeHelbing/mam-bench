@@ -11,7 +11,7 @@ from mam_bench.runtime import CaseRuntime
 from mam_bench.scheduling import TurnScheduler
 from mam_bench.sessions import AgentSessions
 
-from .agents import Action, ModelControlledAgent, Move, OrdinaryAgent, SimulationAgent
+from .agents import Action, ModelControlledAgent, Move, OrdinaryAgent, SimulationAgent, Stay
 from .board import Board
 from .results import EvaluationResult, Outcome
 from .settings import SchellingSettings
@@ -88,9 +88,13 @@ class SchellingSim:
                 self._moves[agent_id] = destination
             self._submitted.add(agent_id)
             if self.sessions is not None and agent_id in self.controlled_agent_ids:
+                action_text = action.model_dump_json()
+                if isinstance(action, Stay):
+                    r, c = divmod(int(self.board.locations[agent_id]), self.settings.board_size)
+                    action_text = f"stay at [{r},{c}]"
                 await self.sessions.board.post(
                     "SchellingSim",
-                    f"Step {self.steps + 1}: agent {agent_id} accepted {action.model_dump_json()}.",
+                    f"Step {self.steps + 1}: agent {agent_id} accepted {action_text}.",
                     announcement=True,
                 )
 

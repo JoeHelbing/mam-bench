@@ -89,6 +89,16 @@ ordinary identities; both groups use seeded priorities and all moves settle
 together. Ordinary execution stops at equilibrium, blockage, or the horizon;
 controlled execution runs to the configured horizon.
 
+Each model-controlled Schelling agent receives a JSON observation with its step,
+location, reference-final and current homophily, and remaining vacancy count.
+Visible ordinary locations are grouped under `A_agents` and `B_agents`;
+`empty_locations` lists visible empty cells; `model_controlled_agents` lists
+visible controlled identities, including the observer, with A/B type and ID.
+`rendered_map` gives the same local cells with absolute row/column labels that
+wrap around the board (`A`/`B` ordinary, `A#id`/`B#id` controlled, `.` empty).
+Distant locations remain hidden. Model-facing types are A/B; saved trajectories
+retain their numeric internal types.
+
 Set `tolerance` and `vacancy_fraction` as numbers between zero and one (for example,
 `0.75` and `0.25`). Vacancy counts round `board_size ** 2 * vacancy_fraction` to the
 nearest integer, with ties to even; population validation still requires equal

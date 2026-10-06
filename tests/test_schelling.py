@@ -318,13 +318,77 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             expected_draw = ordinary.scheduler.rng(0, "schelling", 10, "movement").random()
             await sim.step()
             self.assertTrue(checked)
+            starts = cast(list[int], initial["agent_locations"])
+            announcements = records(resources.writer.directory / "message-board.jsonl")
+            self.assertEqual(
+                {row["text"] for row in announcements},
+                {
+                    f"Step 1: agent {identity} accepted stay at [{r},{c}]."
+                    for identity in settings.controlled_agent_ids
+                    for r, c in [divmod(starts[identity], settings.board_size)]
+                },
+            )
+            self.assertTrue(all(row["announcement"] for row in announcements))
+
+    def test_schelling_observation_groups_visible_cells_and_renders_wraparound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            sim = SchellingSim(schelling(), runtime=runtime(Path(directory) / "case"))
+            first = sim.agents[0]
+            assert isinstance(first, ModelControlledAgent)
+            view = first.observation()
+            self.assertEqual(view["step"], 1)
+            self.assertEqual(view["location"], [2, 0])
+            self.assertEqual(
+                view["A_agents"],
+                [[0, 6], [0, 0], [1, 6], [1, 2], [2, 6], [3, 0], [3, 2], [4, 7], [4, 0]],
+            )
+            self.assertEqual(
+                view["B_agents"], [[0, 7], [0, 1], [1, 0], [1, 1], [2, 1], [2, 2], [3, 6], [4, 1]]
+            )
+            self.assertEqual(
+                view["empty_locations"], [[0, 2], [1, 7], [2, 7], [3, 7], [3, 1], [4, 6], [4, 2]]
+            )
+            self.assertEqual(
+                view["model_controlled_agents"], [{"id": 0, "type": "A", "location": [2, 0]}]
+            )
+            self.assertEqual(
+                view["rendered_map"],
+                [
+                    "      c6   c7   c0   c1   c2",
+                    "r0     A    B    A    B    .",
+                    "r1     A    .    B    B    A",
+                    "r2     A    .   A#0   B    B",
+                    "r3     B    .    A    .    A",
+                    "r4     .    A    A    B    .",
+                ],
+            )
+            self.assertNotIn("neighborhood", view)
+            other = sim.agents[1]
+            assert isinstance(other, ModelControlledAgent)
+            self.assertEqual(
+                other.observation()["model_controlled_agents"],
+                [
+                    {"id": 1, "type": "A", "location": [3, 3]},
+                    {"id": 24, "type": "B", "location": [3, 4]},
+                ],
+            )
+            rendered = cast(list[str], other.observation()["rendered_map"])
+            self.assertTrue(any("B#24" in line for line in rendered))
 
     async def test_json_local_observations_and_exhaustion_retains_identity(self) -> None:
         async def invalid(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             view = observation(messages)
-            self.assertEqual(len(cast(list[object], view["neighborhood"])), 24)
+            visible = sum(
+                len(cast(list[object], view[key]))
+                for key in ("A_agents", "B_agents", "empty_locations", "model_controlled_agents")
+            )
+            self.assertEqual(visible, 25)  # Local 5x5 view includes the observing agent.
+            self.assertIn("rendered_map", view)
+            self.assertNotIn("neighborhood", view)
             self.assertNotIn("cell_types", view)
             self.assertIn("integration", info.instructions or "")
+            self.assertRegex(info.instructions or "", r"exterior type: [AB]\.")
+            self.assertNotIn("(1 = A, 2 = B)", info.instructions or "")
             return ModelResponse(parts=[ToolCallPart("move", {"row": -1, "column": 0})])
 
         with tempfile.TemporaryDirectory() as directory:

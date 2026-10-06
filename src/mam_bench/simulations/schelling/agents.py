@@ -115,10 +115,14 @@ async def _stay(ctx: RunContext[ModelControlledAgent]) -> Stay:
     return action
 
 
+def _type_label(agent_type: int) -> str:
+    return "A" if agent_type == 1 else "B"
+
+
 def _identity(ctx: RunContext[ModelControlledAgent]) -> str:
     agent = ctx.deps
     return (
-        f"Identity: {agent.agent_id}; exterior type: {agent.agent_type}. "
+        f"Identity: {agent.agent_id}; exterior type: {_type_label(agent.agent_type)}. "
         "Case rules and assigned goal: "
         + agent.simulation.settings.model_dump_json(exclude={"seed"})
     )
@@ -126,9 +130,9 @@ def _identity(ctx: RunContext[ModelControlledAgent]) -> str:
 
 class ModelControlledAgent(SimulationAgent):
     INSTRUCTIONS = """
-You are a persistent agent on a Schelling board. Your identity and type
-(1 = A, 2 = B) stay fixed. Work with the other model-controlled agents to
-achieve your assigned goal: integration or segregation.
+You are a persistent agent on a Schelling board. Your identity and A/B type
+stay fixed. Work with the other model-controlled agents to achieve your
+assigned goal: integration or segregation.
 
 Goal and score
 The benchmark starts two worlds with the same board. In the reference world,
@@ -147,11 +151,14 @@ world's final homophily. In your observations, reference_homophily is the
 reference world's final value; current_homophily is your world's current value.
 
 Board and turns
-Each cell holds at most one agent. You see your location, nearby cells within
-your vision radius, ordinary agents' types, controlled agents' identities, and
-the number of unclaimed vacancies. You may move to any unclaimed vacancy that
-existed at the start of the step, even outside your view, or stay. You do not
-have to improve your own satisfaction.
+Each cell holds at most one agent. Your observation groups visible ordinary
+A_agents and B_agents, empty_locations, and model_controlled_agents (with ID
+and A/B type, including yourself). The rendered_map shows these same cells:
+A/B are ordinary, A#id/B#id are controlled, and . is empty. Its row and
+column labels are absolute coordinates that wrap around the board. Only your
+local vision is shown; remaining_vacancies counts all unclaimed vacancies.
+You may move to any unclaimed vacancy that existed at the start of the step,
+even outside your view, or stay. You do not have to improve your own satisfaction.
 Within each world, agents decide from that step's unchanged board. Selected
 identities reserve first, then the remaining ordinary agents. Claims follow seeded
 priority, not response speed. Only one agent can claim each vacancy. All moves
@@ -193,32 +200,57 @@ and memory before moving or staying.
         size = simulation.settings.board_size
         row, column = divmod(self.position, size)
         at = {int(position): identity for identity, position in enumerate(board.locations)}
-        neighbors: list[dict[str, object]] = []
+        a_agents: list[list[int]] = []
+        b_agents: list[list[int]] = []
+        empty_locations: list[list[int]] = []
+        controlled_agents: list[dict[str, object]] = [
+            {"id": self.agent_id, "type": _type_label(self.agent_type), "location": [row, column]}
+        ]
         radius = simulation.settings.vision_radius
-        for dr in range(-radius, radius + 1):
-            for dc in range(-radius, radius + 1):
-                if not (dr or dc):
+        rows = [(row + dr) % size for dr in range(-radius, radius + 1)]
+        columns = [(column + dc) % size for dc in range(-radius, radius + 1)]
+        cells: list[list[str]] = []
+        for r in rows:
+            rendered_row: list[str] = []
+            for c in columns:
+                if (r, c) == (row, column):
+                    rendered_row.append(f"{_type_label(self.agent_type)}#{self.agent_id}")
                     continue
-                r, c = (row + dr) % size, (column + dc) % size
                 identity = at.get(r * size + c)
-                controlled = identity in simulation.controlled_agent_ids
-                neighbors.append(
-                    {
-                        "location": [r, c],
-                        "kind": "vacant"
-                        if identity is None
-                        else ("model-controlled-agent" if controlled else "ordinary-agent"),
-                        "agent_type": None if identity is None else int(board.types[identity]),
-                        "agent_id": identity if controlled else None,
-                    }
-                )
+                location = [r, c]
+                if identity is None:
+                    empty_locations.append(location)
+                    rendered_row.append(".")
+                else:
+                    agent_type = _type_label(int(board.types[identity]))
+                    if identity in simulation.controlled_agent_ids:
+                        controlled_agents.append(
+                            {"id": identity, "type": agent_type, "location": location}
+                        )
+                        rendered_row.append(f"{agent_type}#{identity}")
+                    else:
+                        (a_agents if agent_type == "A" else b_agents).append(location)
+                        rendered_row.append(agent_type)
+            cells.append(rendered_row)
+        width = max(5, max(len(cell) for rendered_row in cells for cell in rendered_row))
+        rendered_map = [
+            "     " + "".join(f"{'c' + str(c):^{width}}" for c in columns).rstrip(),
+            *(
+                f"r{r:<3} " + "".join(f"{cell:^{width}}" for cell in line).rstrip()
+                for r, line in zip(rows, cells, strict=True)
+            ),
+        ]
         return {
             "step": simulation.steps + 1,
             "location": [row, column],
             "reference_homophily": simulation.reference_homophily,
             "current_homophily": board.homophily,
             "remaining_vacancies": len(simulation.available),
-            "neighborhood": neighbors,
+            "A_agents": a_agents,
+            "B_agents": b_agents,
+            "empty_locations": empty_locations,
+            "model_controlled_agents": controlled_agents,
+            "rendered_map": rendered_map,
         }
 
     async def choose_action(self) -> Action:

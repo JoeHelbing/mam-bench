@@ -1,268 +1,137 @@
+<p align="center">
+  <img src="docs/assets/mam-bench-logo.webp" alt="MAM-Bench logo: orange and blue cells linked across a dark grid" width="200">
+</p>
+
 # MAM-Bench
 
-> [!WARNING]
-> **Work in progress:** MAM-Bench is an early research benchmark. Its
-interfaces,
-> evaluation profiles, datasets, and scoring may change before the first stable
-> release. Do not treat current results as a mature or standardized benchmark.
+**Compare language models by how well their agent groups steer multi-agent simulations.**
 
-MAM-Bench measures how model-controlled agents change a simulation relative to
-ordinary agents initialized with the same seed and parameters. One invocation
-evaluates one explicit language model against an ordered suite of test cases.
-Every completed case contributes a signed score; the final score is their sum.
+Each simulation creates 16 separate model controlled agents challenged to understand the simulation's rules,
+cooperatively plan toward a goal, coordinate through a shared message board, and execute
+their strategy. MAM-Bench measures the resulting change in ordinary-agent outcomes
+against a paired, rule-based world. Run the same suite with different models to
+compare their ability to steer a complex system toward a predefined goal.
 
-The [project overview](https://joehelbing.net/post/mam-bench) illustrates the
-pilot.
+[![CI](https://github.com/JoeHelbing/mam-bench/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/JoeHelbing/mam-bench/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/JoeHelbing/mam-bench?label=release)](https://github.com/JoeHelbing/mam-bench/releases/latest)
+[![Apache-2.0 license](https://img.shields.io/github/license/JoeHelbing/mam-bench)](LICENSE)
 
-## Run the default or a custom suite
+[How it works](#how-it-works) | [Quickstart](#quickstart) |
+[Custom suites](docs/custom-test-suite.md) | [Reference](#reference)
 
-Python 3.14 and the dependencies declared in `pyproject.toml` are required.
-With the project environment already prepared, run the shipped six-case suite:
+> [!IMPORTANT]
+> **Research-stage benchmark.** The shipped conditions were selected from
+> exploratory scripted interventions, not independent held-out qualification or
+> language-model evaluations. The suite, interfaces, and scoring may change;
+> this is not a standardized model ranking.
 
-```bash
-uv run --no-sync main.py --model path/to/model.yaml \
-  --output results/default
-```
+The [project overview](https://joehelbing.net/post/mam-bench) introduces the idea.
 
-To replace all six cases with your own suite:
+## How it works
 
-```bash
-uv run --no-sync main.py --model path/to/model.yaml \
-  --suite path/to/suite.yaml --output results/development
-```
-
-These commands make real provider requests and can incur charges. Automated
-tests use scripted responses instead. An OpenRouter model file supplies
-`runtime: openrouter`, `model`, and `provider`; OpenRouter reads `OPENROUTER_API_KEY`
-and optional `OPENROUTER_BASE_URL` from the environment or `.env`.
-An OpenAI-compatible model file instead supplies `runtime: openai-compatible`,
-`model`, `base_url`, and `api_key_env`; the last field names the environment
-variable holding its credential. YAML must not contain credentials.
-
-The required `--model` file selects exactly one model. Model files also accept
-`settings` for sampling, request/turn timeouts, concurrency, and compaction;
-[config.py](src/mam_bench/config.py) defines those validated settings.
-Choose `settings.tool_choice: auto` or `required` per model file. Independently,
-`settings.strict_parameterless_tools: true` marks the no-argument `defer` and
-`read_messages` tools as strict. It defaults to `false`, preserving existing
-model files; provider support for strict tools varies. Provide your own model
-YAML rather than using a shipped example.
-
-`--suite` selects a YAML mapping containing `cases`. Every simulation parameter
-must be explicit, including objective and seed. The entire case list replaces
-the shipped list; cases run sequentially in listed order, including repetitions.
-Missing fields identify the case and field in a Pydantic validation error before
-any provider is constructed or output is created. There is no matrix expansion,
-parameter inheritance, or default model.
-
-Omitting `--suite` loads the shipped
-[default-suite.yaml](src/mam_bench/default-suite.yaml): six ordered cases in three
-matched-seed pairs. Schelling uses integration and segregation at the same seed;
-Civil Violence uses increase and decrease for citizen control, then police
-control, with each role's pair sharing a seed. These conditions and seeds were
-selected from exploratory scripted interventions, not independent held-out
-qualification or language-model evaluations. See the
-[custom test suite YAML guide](docs/custom-test-suite.md) for allowed fields,
-values, and a complete development case example.
-
-The CLI prints each completed case's effective parameters and signed score, then
-the Combined Benchmark Score. On failure it identifies the failed case, retains
-completed rows, exits nonzero, and withholds the total. `--output` is relative to
-the working directory and defaults to `results`; each invocation creates a fresh
-timestamp/UUID child and never overwrites a previous attempt.
-
-## Rules and scores
-
-Both worlds start from the same seed and use the same staged turn mechanism:
-selected replacement identities decide first, then the remaining ordinary agents.
-Model decisions can overlap up to the configured concurrency limit, but claims
-are accepted in seeded priority order, not response order. Ordinary decisions
-use that same priority and see earlier reservations. Within each phase, physical
-actions settle only after both groups finish. Invalid claims retain their turn for bounded
-retries or fallback; a slow earlier turn can delay later claims.
-
-Turn priorities and action randomness have separate, stable addresses: case seed,
-step, role phase, identity, and purpose. Replacing an ordinary decision leaves its
-random slot unused instead of consuming a proposal in a different world state.
-Jail, release, or early termination in one world cannot shift another agent's
-random stream. Different available actions can still map the same randomness to
-different choices. Model outputs and message timing are not made deterministic.
-
-This changes the ordinary reference dynamics. Historical calibration archives
-remain historical evidence, not interchangeable baselines for this scheduler.
-The shipped cases use the current-rules matched-schedule scripted calibration.
-
-Schelling preserves strict local improvement for ordinary agents: satisfaction
-uses occupied radius-one neighbors and a floating-point tolerance; unhappy
-agents choose the nearest predicted improvement within their vision, with random
-ties. Destination predictions use only cells visible from the current origin,
-excluding the origin itself. Unknown cells are excluded; zero known occupied
-neighbors predicts quality one. Model agents may request any starting vacancy.
-Selected identities reserve first in both worlds, followed by the remaining
-ordinary identities; both groups use seeded priorities and all moves settle
-together. Ordinary execution stops at equilibrium, blockage, or the horizon;
-controlled execution runs to the configured horizon.
-
-Each model-controlled Schelling agent receives a JSON observation with its step,
-location, reference-final and current homophily, and remaining vacancy count.
-Visible ordinary locations are grouped under `A_agents` and `B_agents`;
-`empty_locations` lists visible empty cells; `model_controlled_agents` lists
-visible controlled identities, including the observer, with A/B type and ID.
-`rendered_map` gives the same local cells with absolute row/column labels that
-wrap around the board (`A`/`B` ordinary, `A#id`/`B#id` controlled, `.` empty).
-Distant locations remain hidden. Model-facing types are A/B; saved trajectories
-retain their numeric internal types.
-
-Set `tolerance` and `vacancy_fraction` as numbers between zero and one (for example,
-`0.75` and `0.25`). Vacancy counts round `board_size ** 2 * vacancy_fraction` to the
-nearest integer, with ties to even; population validation still requires equal
-type counts. Satisfaction compares the same-type neighbor share directly with
-the tolerance, without an epsilon.
-
-Schelling scores final ordinary-to-ordinary edge homophily, excluding the selected
-controlled identities in both worlds:
-
-- Integration: `400 * (reference_homophily - controlled_homophily)`.
-- Segregation: `400 * (controlled_homophily - reference_homophily)`.
-
-Fractions are from zero to one. Scores are signed and unclamped: an improvement
-from 100% to 40% homophily earns 240 integration points.
-
-Civil Violence retains binary, epsilon-free Cascade activation, one-cell
-movement for ordinary agents, citizen settlement before police observation,
-atomic movement/arrest reservations, and off-grid custody on a
-single-occupancy torus. Released citizens start the round inactive and choose
-activity and movement on their citizen turn. Model-controlled citizens and
-police may move to any unclaimed phase-start vacancy, even outside their local
-view. Police still arrest only adjacent active citizens from their current
-position.
-Every case replaces exactly 16 existing citizens or police. Either role can seek
-increased or decreased participation.
-
-Participation is the active-or-jailed fraction of scored ordinary citizens.
-Selected controlled identities are excluded from both worlds. Each world stops
-independently at its first completed step with at least 95% participation, or
-after step 30; revolution is checked on step 30 before the horizon.
+Each case runs one selected model in a group of agents with a specific goal.
+The two worlds start with the same seed and settings:
 
 ```text
-direction = +1 for increase, -1 for decrease
-score = direction * (100 * (controlled_participation - reference_participation)
-                   + 100 * (controlled_revolution - reference_revolution))
+                    one case + one seed
+                   /                   \
+    ordinary world                     controlled world
+    all agents follow rules             selected agents use the model
+                   \                   /
+           compare ordinary-agent outcomes
+                         v
+                signed case score
 ```
 
-Revolution indicators are zero or one. Time to revolution is saved without a
-timing reward. Arrest alone does not reduce participation. A jailed model citizen
-retains its identity, session, memory, and shared-board access, receives an
-explicit jailed observation, and ends its communication-only turn with `defer`.
-Physical actions retry; ordinary jailed citizens defer automatically.
+The model-controlled agents can coordinate, but the score comes from their
+*effect on the ordinary agents*, not from judging their conversations. The
+shipped suite contains six cases in three matched-seed goal pairs:
 
-The Combined Benchmark Score sums every case score, including negative values,
-without averaging or additional weights. Compare totals only for the same suite
-and scoring version.
+| Simulation | Goal pair | Measured outcome |
+| --- | --- | --- |
+| Schelling (2 cases) | Integration / segregation | Final ordinary-agent neighbor homophily |
+| Civil Violence, citizen control (2 cases) | Increase / decrease participation | Ordinary-citizen participation and revolution |
+| Civil Violence, police control (2 cases) | Increase / decrease participation | The same ordinary-citizen outcomes |
 
-## Artifacts and failures
+Each case produces a signed score. The **Combined Benchmark Score** sums all
+case scores (six in the shipped suite), including negative ones. One invocation
+evaluates **one model**; compare totals only when the suite and scoring version
+are identical.
+Model responses and resulting trajectories can still vary between runs. See
+[rules and scoring](docs/rules-and-scoring.md) for the exact formulas and world
+mechanics.
 
-```text
-<output>/<timestamp>-<uuid>/
-  config.json
-  completed-cases.jsonl
-  benchmark.json                 # complete runs only; calculated total_score
-  failure.json                   # failed runs, when storage permits
-  cases/001/
-    config.json
-    ordinary.jsonl
-    controlled.jsonl
-    ordinary-outcome.json         # retained even if the controlled world fails
-    controlled-outcome.json
-    result.json                  # one simulation-owned result, including score
-    agent-messages/              # native Pydantic AI Harness archives
-    message-board.jsonl
-    turns.jsonl                  # exhausted-turn reason and fallback, when needed
-    failure.json                 # failed case, when storage permits
+## Quickstart
+
+You need [uv](https://docs.astral.sh/uv/) and an OpenAI-compatible endpoint
+that supports tool calls. Bring your own model and endpoint: the repo does not
+ship either, and compatibility varies by server. Python 3.14 is required.
+
+```bash
+git clone https://github.com/JoeHelbing/mam-bench.git
+cd mam-bench
+uv python install 3.14.7
+uv sync --frozen
 ```
 
-Each trajectory starts with initialization, then appends every completed step
-immediately after settlement. Civil Violence writes one state per full cycle,
-not separate phase snapshots. States contain stable identities, locations,
-simulation-specific state, and intermediate measurements. Case results contain
-the exact settings, scored/controlled identities, both outcomes and termination,
-and calculated scores. Those same result objects feed saved and displayed totals.
-
-Native Harness `StepPersistence` retains messages, model reasoning when returned,
-tool calls/results, and interrupted runs. Shared-board posts persist as accepted.
-Native snapshots overlap; inspect them rather than concatenating histories.
-Compaction does not erase earlier archived messages. Private notebook operations
-are in tool histories; standalone notebook files and summarizer conversations
-are not separate artifacts.
-
-Invalid actions receive bounded retry feedback. Exhausted request, tool, output,
-or retry budgets select a simulation fallback and retain a diagnostic reason.
-They do not cause an infrastructure failure or an extra scoring penalty.
-Provider/network/timeouts, persistence failures, and simulation defects stop
-the invocation and cancel outstanding turns. Completed records remain available.
-Failure records are best effort; failure to write one is logged without masking
-the original error. There is no resume or selective rerun support.
-
-INFO logging reports case progress; DEBUG adds session/request/tool timing and
-usage. Set `MAM_BENCH_LOG_LEVEL` to override the YAML `log_level`. Logs and
-native failure events omit sensitive exception bodies. Conversation artifacts
-intentionally retain model content.
-
-## Source walkthrough
-
-For either simulation, start at [main.py](main.py): parse an explicit model file
-and suite, then [config.py](src/mam_bench/config.py) validates the complete nested
-configuration. [BenchmarkRunner](src/mam_bench/runner.py) creates one provider,
-one fresh `CaseRuntime` and writer per case, constructs the selected simulation,
-and awaits `evaluate(runtime)`. It never steps a world.
-
-For Schelling, [simulation.py](src/mam_bench/simulations/schelling/simulation.py)
-constructs two distinct worlds through the same constructor, executes its single
-step loop for each, and writes initial/completed states. Its
-[board](src/mam_bench/simulations/schelling/board.py) owns spatial state and
-measurements. Persistent [agents](src/mam_bench/simulations/schelling/agents.py)
-choose actions; the simulation validates/reserves and settles them. Its
-[result](src/mam_bench/simulations/schelling/results.py) calculates signed lift.
-
-For Civil Violence,
-[simulation.py](src/mam_bench/simulations/civil_violence/simulation.py) follows the
-same evaluate/run/step path. One citizen-then-police sequence serves both worlds.
-Persistent [agents](src/mam_bench/simulations/civil_violence/agents.py) use
-citizen and police role bases with ordinary and model-controlled variants.
-Ordinary proposals remain combined;
-model-controlled agents choose activity or an arrest target and move or stay in
-either order, then `submit` the combined action. Jailed citizens `defer`.
-The simulation applies custody and atomic phase settlement before measuring
-participation and checking revolution.
-Its [result](src/mam_bench/simulations/civil_violence/results.py) calculates the
-participation and revolution components through the same `score` property.
-
-Both use [sessions.py](src/mam_bench/sessions.py) for individual model turns,
-private history/memory, and communication. Instructions carry identity, goal,
-and standing rules; user inputs contain changing JSON observations. Each
-simulation owns legality and settlement. [scheduling.py](src/mam_bench/scheduling.py)
-shares cohort ordering, concurrent admission, claim gates, failure cleanup, and
-addressed random streams. [artifacts.py](src/mam_bench/artifacts.py) writes supplied
-records and preserves native archives. The runner retains case
-results, and `BenchmarkResult.total_score` sums their calculated scores.
-
-There are no reset/reinitialization paths, alternate constructors, old YAML
-adapters, simulation-model matrices, base-simulation framework, or reference
-replay dependency. The obsolete 60-step/two-agent calibration selector and tests for
-retired interfaces are removed. Historical result files are untouched.
-
-## Verify without model calls
+To verify the checkout **without model calls or provider charges**:
 
 ```bash
 uv run --no-sync python -m unittest discover -s tests -v
-ruff check src tests main.py
-ruff format --check src tests main.py
-uv run --no-sync pyright --pythonpath .venv/bin/python
 ```
 
-Checks cover upfront validation, paired worlds, an independent Schelling movement
-oracle, score replay, signed formulas, reservations and settlement, persistent
-sessions and jailed communication, matched ordinary-policy replacements, isolated
-random slots, stopping, incremental artifacts, fallback diagnostics, cancellation,
-and failure redaction. They verify implementation behavior, not scientific
-calibration or real-model effectiveness.
+For an evaluation, create `.scratch/model.yaml` (run `mkdir -p .scratch` first).
+The directory is Git-ignored. Replace the placeholders with a real model ID and
+endpoint; do not put credentials in YAML:
+
+```yaml
+runtime: openai-compatible
+model: YOUR_MODEL_ID
+base_url: https://YOUR-ENDPOINT.example/v1
+api_key_env: MAM_MODEL_API_KEY
+```
+
+Export `MAM_MODEL_API_KEY` in the environment, including for a local server
+that ignores its value: this adapter still requires the variable. Keep secrets
+out of the repo. Then run the shipped suite:
+
+```bash
+uv run --no-sync main.py --model .scratch/model.yaml --output results/default
+```
+
+**This makes real model requests and can incur substantial charges.** Check
+endpoint support and pricing before running all six cases. Each invocation
+creates a new output directory and does not overwrite a previous run. Results
+include model conversations; handle them as sensitive data. See
+[artifacts and failures](docs/artifacts-and-failures.md) for the saved records
+and failure behavior.
+
+You can replace the six cases with a YAML suite of your own:
+
+```bash
+uv run --no-sync main.py --model .scratch/model.yaml \
+  --suite path/to/suite.yaml --output results/custom
+```
+
+The [custom suite guide](docs/custom-test-suite.md) lists every allowed field.
+The shipped cases select `max_steps: 30`; custom cases can choose another
+positive integer in either simulation. For OpenRouter instead, select
+`runtime: openrouter` with `model` and `provider` in the model YAML, and set
+`OPENROUTER_API_KEY` in the environment or `.env`. Model sampling, tool choice,
+request budgets, and compaction settings are validated in
+[config.py](src/mam_bench/config.py). If you use mise, `mise install` and
+`mise run setup` prepare the pinned project tools and dependencies.
+
+## Reference
+
+- [Rules and scoring](docs/rules-and-scoring.md) - world mechanics, goals, formulas,
+  and comparability limits.
+- [Artifacts and failures](docs/artifacts-and-failures.md) - trajectories,
+  messages, partial results, retries, and sensitive output.
+- [Architecture and source walkthrough](docs/architecture.md) - where the
+  runner, simulations, sessions, and persistence live.
+- [Custom test suite YAML](docs/custom-test-suite.md) - fields and validation
+  for explicit test cases.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for changes and bug reports,
+[CHANGELOG.md](CHANGELOG.md) for releases, and [LICENSE](LICENSE) for Apache-2.0.

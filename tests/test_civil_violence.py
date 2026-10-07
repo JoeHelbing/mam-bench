@@ -410,22 +410,31 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertAlmostEqual(result.score, direction * expected)
 
-    async def test_threshold_and_step_thirty_precede_horizon(self) -> None:
+    async def test_revolution_precedes_configured_horizon(self) -> None:
         # 100 citizens minus 16 replacements leaves 84 scored identities: 80 are needed.
-        for participating, expected in ((79, "horizon"), (80, "revolution")):
-            sim = CivilViolenceSim(civil(board_size=10, citizen_density=1.0, threshold=0.0))
-            active = set(sim.scored_agent_ids[:participating])
-            for identity, citizen in sim.citizens.items():
-                citizen.private_preference = -10_000 if identity in active else 10_000
-            sim.steps = 29
-            await sim.step()
-            self.assertEqual(sim.termination, expected)
-            self.assertEqual(sim.steps, 30)
-            self.assertEqual(sim.participating_count, participating)
-            # Arrest does not remove a participating citizen from the numerator.
-            citizen = sim.citizens[sim.scored_agent_ids[0]]
-            citizen.location, citizen.active = None, False
-            self.assertEqual(sim.participating_count, participating)
+        for max_steps in (1, 30, 31):
+            for participating, expected in ((79, "horizon"), (80, "revolution")):
+                with self.subTest(max_steps=max_steps, participating=participating):
+                    sim = CivilViolenceSim(
+                        civil(
+                            board_size=10,
+                            citizen_density=1.0,
+                            threshold=0.0,
+                            max_steps=max_steps,
+                        )
+                    )
+                    active = set(sim.scored_agent_ids[:participating])
+                    for identity, citizen in sim.citizens.items():
+                        citizen.private_preference = -10_000 if identity in active else 10_000
+                    sim.steps = max_steps - 1
+                    await sim.step()
+                    self.assertEqual(sim.termination, expected)
+                    self.assertEqual(sim.steps, max_steps)
+                    self.assertEqual(sim.participating_count, participating)
+                    # Arrest does not remove a participating citizen from the numerator.
+                    citizen = sim.citizens[sim.scored_agent_ids[0]]
+                    citizen.location, citizen.active = None, False
+                    self.assertEqual(sim.participating_count, participating)
 
     async def test_jailed_agent_communicates_keeps_memory_and_defers_until_release(self) -> None:
         calls: dict[tuple[int, int], int] = {}

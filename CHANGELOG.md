@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.1.0](https://github.com/JoeHelbing/mam-bench/compare/v0.0.1...v0.1.0) (2026-10-07)
+
+
+### Features
+
+* **agents:** clarify model choices and align agent structure ([#17](https://github.com/JoeHelbing/mam-bench/issues/17)) ([2313158](https://github.com/JoeHelbing/mam-bench/commit/2313158b7078967ba32d5f66d4b3cc412e0fbfd5))
+* **civil:** reserve one-call actions by target square ([#21](https://github.com/JoeHelbing/mam-bench/issues/21)) ([224359a](https://github.com/JoeHelbing/mam-bench/commit/224359aca8eab598b8bd935a1245e30d069a5c02))
+* **config:** configure strict parameterless tools per model ([#22](https://github.com/JoeHelbing/mam-bench/issues/22)) ([2c23e52](https://github.com/JoeHelbing/mam-bench/commit/2c23e5273bdbdc9b2d678d5e2f1e3abd7380ffb7))
+* **config:** ship six matched-seed default cases ([#26](https://github.com/JoeHelbing/mam-bench/issues/26)) ([605f35d](https://github.com/JoeHelbing/mam-bench/commit/605f35d4246414bdad1a5fdae883aebd23c49ad2))
+* **schelling:** land one-call movement on dev ([#24](https://github.com/JoeHelbing/mam-bench/issues/24)) ([abbab38](https://github.com/JoeHelbing/mam-bench/commit/abbab38afd8b410c7c7ffcc5b6599a0865205d29))
+* **schelling:** render dual-view agent observations ([#19](https://github.com/JoeHelbing/mam-bench/issues/19)) ([5172518](https://github.com/JoeHelbing/mam-bench/commit/5172518e77977f4cd94b456962846f2b895d14f1))
+* **sessions:** return explicit turn outcomes ([03b4630](https://github.com/JoeHelbing/mam-bench/commit/03b4630ecd252533f784fb5dd45c17e2c8398168))
+* **sessions:** return explicit turn outcomes ([b476872](https://github.com/JoeHelbing/mam-bench/commit/b476872ab168c8f38a95bc2183b8442ef24a0d64))
+
+
+### Bug Fixes
+
+* **runtime:** normalize SGLang weight-version telemetry ([#23](https://github.com/JoeHelbing/mam-bench/issues/23)) ([62355ae](https://github.com/JoeHelbing/mam-bench/commit/62355ae9775b68330c0562fad6a31d134eaf9490))
+* **simulations:** match paired scheduling and random slots ([56971cb](https://github.com/JoeHelbing/mam-bench/commit/56971cbd372a91d69381ac2191f7d2d9b6c3b10a))
+* **simulations:** match paired scheduling and random slots ([30e491f](https://github.com/JoeHelbing/mam-bench/commit/30e491f9bd28765016ee0a59d42ebe7766e16897))
+
 ## 0.0.1 (2026-09-29)
 
 

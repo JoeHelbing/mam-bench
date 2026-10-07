@@ -37,6 +37,9 @@ class ConfigurationTests(unittest.TestCase):
             {"citizen_density": 0.8, "police_density": 0.3},
             {"max_steps": 60},
             {"private_preference_std": -1},
+            {"vision_radius": 0},
+            {"vision_radius": True},
+            {"citizen_vision": 1, "police_vision": 1},
             {"threshold": float("nan")},
         ):
             with self.subTest(updates=updates), self.assertRaises(ValidationError):
@@ -65,9 +68,78 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(config.output_directory, Path("results/custom").resolve())
             with self.assertRaises(ValidationError):
                 BenchmarkConfig.model_validate({"cases": cases, "output_directory": "unused"})
-            # The official default intentionally rejects execution until its cases are selected.
-            with self.assertRaises(ValidationError):
-                load_benchmark_config(model, output_directory=root)
+            self.assertEqual(len(load_benchmark_config(model, output_directory=root).cases), 6)
+
+    def test_shipped_default_is_six_ordered_mirrored_cases(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "model.yaml"
+            model.write_text(yaml.safe_dump(selection().model_dump()))
+            config = load_benchmark_config(model, output_directory=root)
+
+        shared = {"board_size": 20, "max_steps": 30, "controlled_agent_count": 16}
+        schelling_settings = {
+            **shared,
+            "simulation": "schelling",
+            "tolerance": 0.7,
+            "vacancy_fraction": 0.15,
+            "vision_radius": 1,
+            "seed": 10002,
+        }
+        citizen_settings = {
+            **shared,
+            "simulation": "civil-violence",
+            "controlled_role": "citizen",
+            "citizen_density": 0.54,
+            "police_density": 0.055,
+            "vision_radius": 2,
+            "threshold": 0.0,
+            "private_preference_mean": 0.0,
+            "private_preference_std": 0.7,
+            "max_jail_term": 12,
+            "seed": 1000,
+        }
+        police_settings = {
+            **citizen_settings,
+            "controlled_role": "police",
+            "police_density": 0.05,
+            "threshold": 1.0,
+            "max_jail_term": 6,
+            "seed": 53000,
+        }
+        expected = [
+            {**settings, "objective": objective}
+            for settings, objectives in (
+                (schelling_settings, ("integration", "segregation")),
+                (citizen_settings, ("increase", "decrease")),
+                (police_settings, ("increase", "decrease")),
+            )
+            for objective in objectives
+        ]
+        self.assertEqual([case.model_dump() for case in config.cases], expected)
+
+    def test_model_yaml_selects_strict_parameterless_tools_per_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_path, suite_path = root / "model.yaml", root / "suite.yaml"
+            suite_path.write_text(yaml.safe_dump({"cases": [schelling().model_dump()]}))
+            model = selection().model_dump()
+            model["settings"] = {"tool_choice": "auto", "strict_parameterless_tools": True}
+            model_path.write_text(yaml.safe_dump(model))
+            loaded = load_benchmark_config(model_path, suite_path, output_directory=root)
+            self.assertEqual(loaded.model.settings.tool_choice, "auto")
+            self.assertTrue(loaded.model.settings.strict_parameterless_tools)
+
+            model["settings"] = {"tool_choice": "required"}
+            model_path.write_text(yaml.safe_dump(model))
+            loaded = load_benchmark_config(model_path, suite_path, output_directory=root)
+            self.assertFalse(loaded.model.settings.strict_parameterless_tools)
+
+            for invalid in ("true", 1):
+                with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
+                    model["settings"] = {"strict_parameterless_tools": invalid}
+                    model_path.write_text(yaml.safe_dump(model))
+                    load_benchmark_config(model_path, suite_path, output_directory=root)
 
     def test_float_proportions_and_vacancy_rounding(self) -> None:
         for field in ("tolerance", "vacancy_fraction"):

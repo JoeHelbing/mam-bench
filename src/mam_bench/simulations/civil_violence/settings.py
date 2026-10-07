@@ -16,8 +16,7 @@ class CivilViolenceSettings(BaseModel):
     board_size: int = Field(strict=True, ge=3, le=255)
     citizen_density: float = Field(ge=0, le=1)
     police_density: float = Field(ge=0, le=1)
-    citizen_vision: int = Field(strict=True, ge=1)
-    police_vision: int = Field(strict=True, ge=1)
+    vision_radius: int = Field(strict=True, ge=1)
     threshold: float
     private_preference_mean: float
     private_preference_std: float = Field(ge=0)

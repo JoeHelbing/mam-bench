@@ -47,8 +47,7 @@ def civil(**updates: object) -> CivilViolenceSettings:
             "board_size": 8,
             "citizen_density": 0.75,
             "police_density": 0.0,
-            "citizen_vision": 1,
-            "police_vision": 1,
+            "vision_radius": 1,
             "threshold": -100.0,
             "private_preference_mean": 0.0,
             "private_preference_std": 0.0,
@@ -93,17 +92,41 @@ def observation(messages: list[ModelMessage]) -> dict[str, object]:
     raise AssertionError("missing JSON observation")
 
 
+def turn_calls(messages: list[ModelMessage]) -> list[str]:
+    """Function-tool calls since the latest observation (not previous turns)."""
+    start = max(
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, ModelRequest)
+        and any(
+            isinstance(part, UserPromptPart)
+            and isinstance(part.content, str)
+            and part.content.startswith("{")
+            for part in message.parts
+        )
+    )
+    return [
+        part.tool_name
+        for message in messages[start + 1 :]
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+        if isinstance(part, ToolCallPart)
+    ]
+
+
 async def stay(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     names = {tool.name for tool in info.output_tools}
-    if "stay" in names:
-        action, args = "stay", {}
-    elif "intervene" in names:
-        action, args = "intervene", {}
-    else:
+    if "act" in names:
         view = observation(messages)
-        jailed = cast(dict[str, object], view["self"])["jailed"]
-        action, args = ("defer", {}) if jailed else ("participate", {"active": False})
-    return ModelResponse(parts=[ToolCallPart(action, args)])
+        if cast(dict[str, object], view["self"])["jailed"]:
+            part = ToolCallPart("defer", {})
+        elif "eligible_target_locations_if_staying" in view:
+            part = ToolCallPart("act", {"destination": None, "target_location": None})
+        else:
+            part = ToolCallPart("act", {"active": False, "destination": None})
+    else:
+        part = ToolCallPart("move", {"destination": None})
+    return ModelResponse(parts=[part])
 
 
 def runtime(path: Path, model: FunctionModel | None = None, **settings: object) -> CaseRuntime:

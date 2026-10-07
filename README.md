@@ -14,18 +14,26 @@ Every completed case contributes a signed score; the final score is their sum.
 The [project overview](https://joehelbing.net/post/mam-bench) illustrates the
 pilot.
 
-## Run a custom suite
+## Run the default or a custom suite
 
 Python 3.14 and the dependencies declared in `pyproject.toml` are required.
-With the project environment already prepared:
+With the project environment already prepared, run the shipped six-case suite:
 
-```fish
-uv run --no-sync main.py --model examples/model-muse-spark.yaml \
-  --suite examples/development-suite.yaml --output results/development
+```bash
+uv run --no-sync main.py --model path/to/model.yaml \
+  --output results/default
 ```
 
-This command makes real provider requests and can incur charges. Automated
-tests use scripted responses instead. OpenRouter reads `OPENROUTER_API_KEY`
+To replace all six cases with your own suite:
+
+```bash
+uv run --no-sync main.py --model path/to/model.yaml \
+  --suite path/to/suite.yaml --output results/development
+```
+
+These commands make real provider requests and can incur charges. Automated
+tests use scripted responses instead. An OpenRouter model file supplies
+`runtime: openrouter`, `model`, and `provider`; OpenRouter reads `OPENROUTER_API_KEY`
 and optional `OPENROUTER_BASE_URL` from the environment or `.env`.
 An OpenAI-compatible model file instead supplies `runtime: openai-compatible`,
 `model`, `base_url`, and `api_key_env`; the last field names the environment
@@ -34,8 +42,11 @@ variable holding its credential. YAML must not contain credentials.
 The required `--model` file selects exactly one model. Model files also accept
 `settings` for sampling, request/turn timeouts, concurrency, and compaction;
 [config.py](src/mam_bench/config.py) defines those validated settings.
-The Muse and Qwen files preserve the existing provider examples; they are not
-recommendations or completed evaluations.
+Choose `settings.tool_choice: auto` or `required` per model file. Independently,
+`settings.strict_parameterless_tools: true` marks the no-argument `defer` and
+`read_messages` tools as strict. It defaults to `false`, preserving existing
+model files; provider support for strict tools varies. Provide your own model
+YAML rather than using a shipped example.
 
 `--suite` selects a YAML mapping containing `cases`. Every simulation parameter
 must be explicit, including objective and seed. The entire case list replaces
@@ -44,12 +55,15 @@ Missing fields identify the case and field in a Pydantic validation error before
 any provider is constructed or output is created. There is no matrix expansion,
 parameter inheritance, or default model.
 
-The package's [default-suite.yaml](src/mam_bench/default-suite.yaml) deliberately
-has no cases until suite selection is completed. Omitting `--suite` therefore
-reports a validation error and the deferral. See
-[development-suite.yaml](examples/development-suite.yaml) for complete, explicitly
-labelled examples of both Schelling goals and all four Civil Violence role/goal
-combinations.
+Omitting `--suite` loads the shipped
+[default-suite.yaml](src/mam_bench/default-suite.yaml): six ordered cases in three
+matched-seed pairs. Schelling uses integration and segregation at the same seed;
+Civil Violence uses increase and decrease for citizen control, then police
+control, with each role's pair sharing a seed. These conditions and seeds were
+selected from exploratory scripted interventions, not independent held-out
+qualification or language-model evaluations. See the
+[custom test suite YAML guide](docs/custom-test-suite.md) for allowed fields,
+values, and a complete development case example.
 
 The CLI prints each completed case's effective parameters and signed score, then
 the Combined Benchmark Score. On failure it identifies the failed case, retains
@@ -59,11 +73,24 @@ timestamp/UUID child and never overwrites a previous attempt.
 
 ## Rules and scores
 
-Both worlds have separate RNG instances initialized with the same case seed.
-Model agents consume and discard an ordinary-policy proposal before choosing
-their actual action. Proposals consume randomness without reserving or changing
-the world. Subsequent draws may diverge as states and conditional policies diverge;
-this does not claim permanently matched randomness.
+Both worlds start from the same seed and use the same staged turn mechanism:
+selected replacement identities decide first, then the remaining ordinary agents.
+Model decisions can overlap up to the configured concurrency limit, but claims
+are accepted in seeded priority order, not response order. Ordinary decisions
+use that same priority and see earlier reservations. Within each phase, physical
+actions settle only after both groups finish. Invalid claims retain their turn for bounded
+retries or fallback; a slow earlier turn can delay later claims.
+
+Turn priorities and action randomness have separate, stable addresses: case seed,
+step, role phase, identity, and purpose. Replacing an ordinary decision leaves its
+random slot unused instead of consuming a proposal in a different world state.
+Jail, release, or early termination in one world cannot shift another agent's
+random stream. Different available actions can still map the same randomness to
+different choices. Model outputs and message timing are not made deterministic.
+
+This changes the ordinary reference dynamics. Historical calibration archives
+remain historical evidence, not interchangeable baselines for this scheduler.
+The shipped cases use the current-rules matched-schedule scripted calibration.
 
 Schelling preserves strict local improvement for ordinary agents: satisfaction
 uses occupied radius-one neighbors and a floating-point tolerance; unhappy
@@ -71,9 +98,20 @@ agents choose the nearest predicted improvement within their vision, with random
 ties. Destination predictions use only cells visible from the current origin,
 excluding the origin itself. Unknown cells are excluded; zero known occupied
 neighbors predicts quality one. Model agents may request any starting vacancy.
-Model reservations precede shuffled ordinary reservations; all moves settle
+Selected identities reserve first in both worlds, followed by the remaining
+ordinary identities; both groups use seeded priorities and all moves settle
 together. Ordinary execution stops at equilibrium, blockage, or the horizon;
 controlled execution runs to the configured horizon.
+
+Each model-controlled Schelling agent receives a JSON observation with its step,
+location, reference-final and current homophily, and remaining vacancy count.
+Visible ordinary locations are grouped under `A_agents` and `B_agents`;
+`empty_locations` lists visible empty cells; `model_controlled_agents` lists
+visible controlled identities, including the observer, with A/B type and ID.
+`rendered_map` gives the same local cells with absolute row/column labels that
+wrap around the board (`A`/`B` ordinary, `A#id`/`B#id` controlled, `.` empty).
+Distant locations remain hidden. Model-facing types are A/B; saved trajectories
+retain their numeric internal types.
 
 Set `tolerance` and `vacancy_fraction` as numbers between zero and one (for example,
 `0.75` and `0.25`). Vacancy counts round `board_size ** 2 * vacancy_fraction` to the
@@ -90,9 +128,14 @@ controlled identities in both worlds:
 Fractions are from zero to one. Scores are signed and unclamped: an improvement
 from 100% to 40% homophily earns 240 integration points.
 
-Civil Violence retains binary, epsilon-free Cascade activation, one-cell movement
-on a single-occupancy torus, citizen settlement before police observation, atomic
-movement/arrest reservations, off-grid custody, and cached-activity release.
+Civil Violence retains binary, epsilon-free Cascade activation, one-cell
+movement for ordinary agents, citizen settlement before police observation,
+atomic movement/arrest reservations, and off-grid custody on a
+single-occupancy torus. Released citizens start the round inactive and choose
+activity and movement on their citizen turn. Model-controlled citizens and
+police may move to any unclaimed phase-start vacancy, even outside their local
+view. Police still arrest only adjacent active citizens from their current
+position.
 Every case replaces exactly 16 existing citizens or police. Either role can seek
 increased or decreased participation.
 
@@ -184,27 +227,33 @@ choose actions; the simulation validates/reserves and settles them. Its
 For Civil Violence,
 [simulation.py](src/mam_bench/simulations/civil_violence/simulation.py) follows the
 same evaluate/run/step path. One citizen-then-police sequence serves both worlds.
-Persistent [agents](src/mam_bench/simulations/civil_violence/agents.py) select
-role-specific proposals or model actions; the simulation applies custody and
-atomic phase settlement before measuring participation and checking revolution.
+Persistent [agents](src/mam_bench/simulations/civil_violence/agents.py) use
+citizen and police role bases with ordinary and model-controlled variants.
+Ordinary proposals remain combined;
+model-controlled agents choose activity or an arrest target and move or stay in
+either order, then `submit` the combined action. Jailed citizens `defer`.
+The simulation applies custody and atomic phase settlement before measuring
+participation and checking revolution.
 Its [result](src/mam_bench/simulations/civil_violence/results.py) calculates the
 participation and revolution components through the same `score` property.
 
 Both use [sessions.py](src/mam_bench/sessions.py) for individual model turns,
 private history/memory, and communication. Instructions carry identity, goal,
 and standing rules; user inputs contain changing JSON observations. Each
-simulation owns rolling admission and cancellation. [artifacts.py](src/mam_bench/artifacts.py)
-writes supplied records and preserves native archives. The runner retains case
+simulation owns legality and settlement. [scheduling.py](src/mam_bench/scheduling.py)
+shares cohort ordering, concurrent admission, claim gates, failure cleanup, and
+addressed random streams. [artifacts.py](src/mam_bench/artifacts.py) writes supplied
+records and preserves native archives. The runner retains case
 results, and `BenchmarkResult.total_score` sums their calculated scores.
 
 There are no reset/reinitialization paths, alternate constructors, old YAML
-adapters, simulation-model matrices, shared scheduler, or reference-stream
-framework. The obsolete 60-step/two-agent calibration selector and tests for
+adapters, simulation-model matrices, base-simulation framework, or reference
+replay dependency. The obsolete 60-step/two-agent calibration selector and tests for
 retired interfaces are removed. Historical result files are untouched.
 
 ## Verify without model calls
 
-```fish
+```bash
 uv run --no-sync python -m unittest discover -s tests -v
 ruff check src tests main.py
 ruff format --check src tests main.py
@@ -213,6 +262,7 @@ uv run --no-sync pyright --pythonpath .venv/bin/python
 
 Checks cover upfront validation, paired worlds, an independent Schelling movement
 oracle, score replay, signed formulas, reservations and settlement, persistent
-sessions and jailed communication, RNG proposal purity, stopping, incremental
-artifacts, fallback diagnostics, cancellation, and failure redaction. They verify
-implementation behavior, not scientific calibration or real-model effectiveness.
+sessions and jailed communication, matched ordinary-policy replacements, isolated
+random slots, stopping, incremental artifacts, fallback diagnostics, cancellation,
+and failure redaction. They verify implementation behavior, not scientific
+calibration or real-model effectiveness.

@@ -1,6 +1,5 @@
 """Binary Cascade phase rules, simulation-owned scheduling and paired evaluation."""
 
-import asyncio
 from dataclasses import asdict
 from typing import Literal
 
@@ -10,14 +9,17 @@ from pydantic_ai import ModelRetry
 
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.runtime import CaseRuntime
+from mam_bench.scheduling import TurnScheduler
 from mam_bench.sessions import AgentSessions
 
 from .agents import (
     Action,
     CitizenAction,
     Defer,
-    ModelControlledAgent,
-    OrdinaryAgent,
+    ModelCitizenAgent,
+    ModelPoliceAgent,
+    OrdinaryCitizenAgent,
+    OrdinaryPoliceAgent,
     SimulationAgent,
 )
 from .results import Citizen, Coordinate, EvaluationResult, Outcome, Police
@@ -30,6 +32,9 @@ class CivilViolenceSim:
     ) -> None:
         self.settings, self.runtime = settings, runtime
         self.rng = np.random.default_rng(settings.seed)
+        self.scheduler = TurnScheduler(
+            settings.seed, concurrency=runtime.settings.concurrency if runtime else 1
+        )
         positions = self.rng.permutation(settings.board_size**2)
         self.citizens = {
             i: Citizen(
@@ -57,15 +62,21 @@ class CivilViolenceSim:
         )
         self.scored_agent_ids = tuple(i for i in self.citizens if i not in self.replacement_ids)
         self.controlled_agent_ids: tuple[int, ...] = self.replacement_ids if runtime else ()
-        self.agents: dict[int, SimulationAgent] = {
-            i: ModelControlledAgent(self, i)
-            if i in self.controlled_agent_ids
-            else OrdinaryAgent(self, i)
-            for i in (*self.citizens, *self.police)
-        }
+        self.agents: dict[int, SimulationAgent] = {}
+        for i in self.citizens:
+            agent_type = (
+                ModelCitizenAgent if i in self.controlled_agent_ids else OrdinaryCitizenAgent
+            )
+            self.agents[i] = agent_type(self, i)
+        for i in self.police:
+            agent_type = ModelPoliceAgent if i in self.controlled_agent_ids else OrdinaryPoliceAgent
+            self.agents[i] = agent_type(self, i)
+        model_agent = (
+            ModelCitizenAgent if settings.controlled_role == "citizen" else ModelPoliceAgent
+        )
         self.sessions = (
             AgentSessions(
-                ModelControlledAgent.model_interface(runtime, settings.controlled_role),
+                model_agent.model_interface(runtime),
                 settings=runtime.settings,
                 artifact_directory=runtime.writer.directory,
             )
@@ -138,6 +149,18 @@ class CivilViolenceSim:
 
     def _begin_citizen_phase(self) -> tuple[int, ...]:
         self._begin_phase("citizen")
+        for citizen in self.citizens.values():
+            if citizen.location is not None:
+                continue
+            if citizen.jail_remaining > 0:
+                citizen.jail_remaining -= 1
+            elif self._vacancies:
+                choices = sorted(self._vacancies)
+                release = self.scheduler.rng(self.steps, "citizen", citizen.agent_id, "release")
+                citizen.location = choices[int(release.integers(len(choices)))]
+                citizen.active = False
+                self._phase_locations[citizen.agent_id] = citizen.location
+                self._vacancies.remove(citizen.location)
         self._custody = tuple(c.agent_id for c in self.citizens.values() if c.location is None)
         return tuple(self.citizens)
 
@@ -149,7 +172,12 @@ class CivilViolenceSim:
     def _validate_move(self, agent_id: int, destination: Coordinate | None) -> None:
         if agent_id in self._submitted:
             raise ValueError("agent already submitted an action")
-        if destination is not None and destination not in self.legal_destinations(agent_id):
+        if destination is None:
+            return
+        if agent_id in self.controlled_agent_ids:
+            if destination not in self._vacancies or destination in self._moves.values():
+                raise ValueError("destination must be an unclaimed phase-start vacancy")
+        elif destination not in self.legal_destinations(agent_id):
             raise ValueError("destination must be an unclaimed adjacent phase-start vacancy")
 
     def _reserve_citizen_action(
@@ -169,33 +197,16 @@ class CivilViolenceSim:
         for agent_id, destination in self._moves.items():
             self.citizens[agent_id].location = destination
 
-        # Release after movement settlement so neither placement can consume
-        # the other's reserved cell. Released citizens keep cached activity.
-        occupied = {c.location for c in self.citizens.values() if c.location is not None}
-        occupied.update(p.location for p in self.police.values())
-        empty = {
-            (r, c) for r in range(self.settings.board_size) for c in range(self.settings.board_size)
-        } - occupied
-        for agent_id in self._custody:
-            citizen = self.citizens[agent_id]
-            if citizen.jail_remaining > 0:
-                citizen.jail_remaining -= 1
-            elif empty:
-                choices = sorted(empty)
-                citizen.location = choices[int(self.rng.integers(len(choices)))]
-                # Cascade releases into a random vacancy, then makes the usual
-                # one-cell random move; neither choice consumes a reserved cell.
-                hops = [p for p in self.neighborhood(citizen.location, 1) if p in empty]
-                if hops:
-                    citizen.location = hops[int(self.rng.integers(len(hops)))]
-                empty.remove(citizen.location)
-
     def _begin_police_phase(self) -> tuple[int, ...]:
         self._begin_phase("police")
         return tuple(self.police)
 
-    def eligible_targets(self, agent_id: int) -> tuple[int, ...]:
-        adjacent = self.neighborhood(self._phase_locations[agent_id], 1)
+    def eligible_targets(
+        self, agent_id: int, location: Coordinate | None = None
+    ) -> tuple[int, ...]:
+        adjacent = self.neighborhood(
+            location if location is not None else self._phase_locations[agent_id], 1
+        )
         claimed = set(self._targets.values())
         return tuple(
             c.agent_id
@@ -204,13 +215,25 @@ class CivilViolenceSim:
         )
 
     def _reserve_police_action(
-        self, agent_id: int, target_id: int | None = None, destination: Coordinate | None = None
+        self,
+        agent_id: int,
+        target_location: Coordinate | None = None,
+        destination: Coordinate | None = None,
     ) -> None:
         if self._phase != "police" or agent_id not in self.police:
             raise ValueError("police officer is not eligible in this phase")
         self._validate_move(agent_id, destination)
-        if target_id is not None and target_id not in self.eligible_targets(agent_id):
-            raise ValueError("target must be an unclaimed adjacent active citizen")
+        location = destination if destination is not None else self._phase_locations[agent_id]
+        target_id = next(
+            (
+                target
+                for target in self.eligible_targets(agent_id, location=location)
+                if self.citizens[target].location == target_location
+            ),
+            None,
+        )
+        if target_location is not None and target_id is None:
+            raise ValueError("target square must hold an unclaimed adjacent active citizen")
         self._submitted.add(agent_id)
         if target_id is not None:
             self._targets[agent_id] = target_id
@@ -221,7 +244,8 @@ class CivilViolenceSim:
         for target_id in self._targets.values():
             citizen = self.citizens[target_id]
             citizen.location = None
-            citizen.jail_remaining = int(self.rng.integers(self.settings.max_jail_term + 1))
+            jail = self.scheduler.rng(self.steps, "police", target_id, "jail")
+            citizen.jail_remaining = int(jail.integers(self.settings.max_jail_term + 1))
         for agent_id, destination in self._moves.items():
             self.police[agent_id].location = destination
         self.steps += 1
@@ -229,6 +253,9 @@ class CivilViolenceSim:
 
     async def reserve_action(self, agent_id: int, action: Action) -> None:
         """Validate a whole action before claiming any resource, for either policy."""
+        if agent_id not in self._admitted or agent_id in self._submitted:
+            raise ModelRetry("identity has no available turn in this phase")
+        await self.scheduler.wait_turn(agent_id)
         async with self._lock:
             if agent_id not in self._admitted or agent_id in self._submitted:
                 raise ModelRetry("identity has no available turn in this phase")
@@ -239,7 +266,9 @@ class CivilViolenceSim:
                 elif isinstance(action, CitizenAction):
                     self._reserve_citizen_action(agent_id, action.active, action.destination)
                 else:
-                    self._reserve_police_action(agent_id, action.target_id, action.destination)
+                    self._reserve_police_action(
+                        agent_id, action.target_location, action.destination
+                    )
             except ValueError as error:
                 raise ModelRetry(str(error)) from None
             self._submitted.add(agent_id)
@@ -257,33 +286,15 @@ class CivilViolenceSim:
         if agent_id not in self._submitted:
             await self.reserve_action(agent_id, action)
 
-    async def _phase_turns(self, eligible: tuple[int, ...]) -> None:
-        # Model claims precede ordinary claims; ordinary actions remain sequential.
-        controlled = [i for i in eligible if i in self.controlled_agent_ids]
-        queue = iter(int(i) for i in self.rng.permutation(controlled))
-        active: set[asyncio.Task[None]] = set()
-        try:
-            if self.runtime is not None:
-                while True:
-                    while len(active) < self.runtime.settings.concurrency:
-                        identity = next(queue, None)
-                        if identity is None:
-                            break
-                        active.add(asyncio.create_task(self._act(identity)))
-                    if not active:
-                        break
-                    done, pending = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
-                    for task in done:
-                        task.result()
-                    active = pending
-            for agent_id in eligible:
-                if agent_id not in self.controlled_agent_ids:
-                    await self._act(agent_id)
-        finally:
-            for task in active:
-                task.cancel()
-            if active:
-                await asyncio.gather(*active, return_exceptions=True)
+    async def _phase_turns(self, eligible: tuple[int, ...], phase: str) -> None:
+        selected = set(self.replacement_ids)
+        await self.scheduler.run(
+            step=self.steps,
+            phase=phase,
+            selected=(i for i in eligible if i in selected),
+            ordinary=(i for i in eligible if i not in selected),
+            act=self._act,
+        )
 
     async def step(self) -> None:
         if self._failed or self._stepping:
@@ -292,9 +303,9 @@ class CivilViolenceSim:
             return
         self._stepping = True
         try:
-            await self._phase_turns(self._begin_citizen_phase())
+            await self._phase_turns(self._begin_citizen_phase(), "citizen")
             self._settle_citizens()
-            await self._phase_turns(self._begin_police_phase())
+            await self._phase_turns(self._begin_police_phase(), "police")
             self._settle_police()
             # Check the completed step, including step 30, before classifying the horizon.
             if self.participating_count * 100 >= len(self.scored_agent_ids) * 95:

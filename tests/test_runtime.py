@@ -1,11 +1,14 @@
 import os
+import tempfile
 import unittest
-from typing import cast
+from pathlib import Path
+from typing import Literal, cast
 from unittest.mock import AsyncMock, patch
 
 from openai import omit
 from openai.types.chat import ChatCompletion
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import (
     ModelRequest,
     SystemPromptPart,
@@ -18,13 +21,19 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.tools import ToolDefinition
 
+from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, OpenAICompatibleModel
 from mam_bench.config import OpenRouterModel as OpenRouterSelection
-from mam_bench.runtime import create_model
+from mam_bench.runtime import CaseRuntime, create_model
 from mam_bench.sessions import AgentSessions
+from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
+from mam_bench.simulations.schelling.simulation import SchellingSim
+from support import civil, schelling
 
 
-def completion(*, tool_call: bool = False) -> ChatCompletion:
+def completion(
+    *, tool_call: bool = False, tool_name: str = "stay", tool_args: str = "{}"
+) -> ChatCompletion:
     return ChatCompletion.model_validate(
         {
             "id": "offline-response",
@@ -43,7 +52,7 @@ def completion(*, tool_call: bool = False) -> ChatCompletion:
                             {
                                 "id": "stay-1",
                                 "type": "function",
-                                "function": {"name": "stay", "arguments": "{}"},
+                                "function": {"name": tool_name, "arguments": tool_args},
                             }
                         ]
                         if tool_call
@@ -178,6 +187,168 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent["timeout"], 45)
         self.assertIs(sent["max_tokens"], omit)
         self.assertIsInstance(response.parts[0], TextPart)
+
+    async def test_strict_parameterless_tools_reach_the_model_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            for tool_choice, strict in (
+                ("required", False),
+                ("required", True),
+                ("auto", False),
+                ("auto", True),
+            ):
+                with self.subTest(tool_choice=tool_choice, strict=strict):
+                    settings = AgentSettings(
+                        tool_choice=cast(Literal["required", "auto"], tool_choice),
+                        strict_parameterless_tools=strict,
+                    )
+                    model = create_model(
+                        OpenAICompatibleModel(
+                            runtime="openai-compatible",
+                            model="test-model",
+                            base_url="https://compatible.example.test/v1",
+                            api_key_env="COMPAT_TEST_API_KEY",
+                            settings=settings,
+                        )
+                    )
+                    assert isinstance(model, OpenAIChatModel)
+                    self.addAsyncCleanup(model.client.close)
+                    writer = ArtifactWriter(Path(directory) / f"{tool_choice}-{strict}")
+                    sim = SchellingSim(
+                        schelling(),
+                        runtime=CaseRuntime(model=model, settings=settings, writer=writer),
+                    )
+                    request = AsyncMock(
+                        return_value=completion(
+                            tool_call=True,
+                            tool_name="move",
+                            tool_args='{"destination": null}',
+                        )
+                    )
+                    with patch.object(model.client.chat.completions, "create", request):
+                        await sim.step()
+
+                    self.assertEqual(request.await_count, len(sim.controlled_agent_ids))
+                    self.assertFalse((writer.directory / "turns.jsonl").exists())
+                    for call in request.await_args_list:
+                        sent = cast(dict[str, object], call.kwargs)
+                        self.assertEqual(sent["tool_choice"], tool_choice)
+                        tools = cast(list[dict[str, object]], sent["tools"])
+                        functions = [cast(dict[str, object], tool["function"]) for tool in tools]
+                        by_name = {cast(str, function["name"]): function for function in functions}
+                        self.assertNotIn("stay", by_name)
+                        self.assertEqual(
+                            cast(dict[str, object], by_name["read_messages"]["parameters"])[
+                                "properties"
+                            ],
+                            {},
+                        )
+                        self.assertEqual(
+                            by_name["read_messages"].get("strict"), True if strict else None
+                        )
+                        for name in ("move", "post_message"):
+                            self.assertIs(by_name[name].get("strict"), True)
+
+    async def test_civil_citizen_defer_uses_per_model_strict_schema(self) -> None:
+        for strict in (False, True):
+            with self.subTest(strict=strict), tempfile.TemporaryDirectory() as directory:
+                settings = AgentSettings(strict_parameterless_tools=strict)
+                model = create_model(
+                    OpenAICompatibleModel(
+                        runtime="openai-compatible",
+                        model="test-model",
+                        base_url="https://compatible.example.test/v1",
+                        api_key_env="COMPAT_TEST_API_KEY",
+                        settings=settings,
+                    )
+                )
+                assert isinstance(model, OpenAIChatModel)
+                self.addAsyncCleanup(model.client.close)
+                writer = ArtifactWriter(Path(directory) / "case")
+                sim = CivilViolenceSim(
+                    civil(), runtime=CaseRuntime(model=model, settings=settings, writer=writer)
+                )
+                for identity in sim.controlled_agent_ids:
+                    sim.citizens[identity].location = None
+                    sim.citizens[identity].jail_remaining = 1
+                request = AsyncMock(return_value=completion(tool_call=True, tool_name="defer"))
+                with patch.object(model.client.chat.completions, "create", request):
+                    await sim.step()
+
+                self.assertEqual(request.await_count, len(sim.controlled_agent_ids))
+                for call in request.await_args_list:
+                    sent = cast(dict[str, object], call.kwargs)
+                    tools = cast(list[dict[str, object]], sent["tools"])
+                    functions = [cast(dict[str, object], tool["function"]) for tool in tools]
+                    by_name = {cast(str, function["name"]): function for function in functions}
+                    self.assertEqual(sent["tool_choice"], "required")
+                    for name in ("defer", "read_messages"):
+                        self.assertEqual(
+                            cast(dict[str, object], by_name[name]["parameters"])["properties"],
+                            {},
+                        )
+                        self.assertEqual(by_name[name].get("strict"), True if strict else None)
+                    self.assertIs(by_name["act"].get("strict"), True)
+                    self.assertIs(by_name["post_message"].get("strict"), True)
+                self.assertFalse((writer.directory / "turns.jsonl").exists())
+
+    async def test_compatible_endpoint_accepts_sglang_weight_version_spans(self) -> None:
+        model = create_model(
+            OpenAICompatibleModel(
+                runtime="openai-compatible",
+                model="test-model",
+                base_url="https://compatible.example.test/v1",
+                api_key_env="COMPAT_TEST_API_KEY",
+            )
+        )
+        assert isinstance(model, OpenAIChatModel)
+        self.addAsyncCleanup(model.client.close)
+        spans = [{"version": "default", "start": 0, "end": 2}]
+        for tool_call in (False, True):
+            with self.subTest(tool_call=tool_call):
+                # The OpenAI SDK constructs responses without validating this metadata.
+                raw = completion(tool_call=tool_call).model_copy(
+                    update={"metadata": {"weight_version": "default", "weight_versions": spans}}
+                )
+                with patch.object(
+                    model.client.chat.completions, "create", AsyncMock(return_value=raw)
+                ):
+                    response = await model.request(
+                        [ModelRequest(parts=[UserPromptPart("Respond.")])],
+                        None,
+                        ModelRequestParameters(),
+                    )
+                self.assertEqual(
+                    response.parts[0],
+                    ToolCallPart("stay", "{}", "stay-1")
+                    if tool_call
+                    else TextPart("Summary or response."),
+                )
+                self.assertEqual(response.usage.total_tokens, 12)
+                self.assertEqual(
+                    raw.metadata, {"weight_version": "default", "weight_versions": spans}
+                )
+
+    async def test_compatible_endpoint_still_rejects_other_invalid_metadata(self) -> None:
+        model = create_model(
+            OpenAICompatibleModel(
+                runtime="openai-compatible",
+                model="test-model",
+                base_url="https://compatible.example.test/v1",
+                api_key_env="COMPAT_TEST_API_KEY",
+            )
+        )
+        assert isinstance(model, OpenAIChatModel)
+        self.addAsyncCleanup(model.client.close)
+        raw = completion().model_copy(update={"metadata": {"unrelated": [1]}})
+        with (
+            patch.object(model.client.chat.completions, "create", AsyncMock(return_value=raw)),
+            self.assertRaisesRegex(UnexpectedModelBehavior, "metadata.unrelated"),
+        ):
+            await model.request(
+                [ModelRequest(parts=[UserPromptPart("Respond.")])],
+                None,
+                ModelRequestParameters(),
+            )
 
     async def test_summary_inherits_provider_defaults_without_agent_seed(self) -> None:
         settings = AgentSettings(

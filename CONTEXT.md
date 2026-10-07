@@ -114,8 +114,8 @@ _Avoid_: absolute goal achievement, percentage improvement over baseline
 
 **Benchmark Suite**:
 The versioned collection of Test Cases executed by a Benchmark Run for one
-explicitly selected Model. Simulation defaults are selected as a suite; their
-final selection is deferred.
+explicitly selected Model. The shipped default selects six Test Cases from
+exploratory matched-seed scripted calibration; a custom suite replaces them.
 Model selection is always explicit.
 _Avoid_: model preset, single simulation run
 
@@ -145,9 +145,10 @@ _Avoid_: canonical Schelling model, original Schelling model
 
 **Staged Round**:
 One Reference Profile transition in which agents evaluate satisfaction from one
-frozen state, unhappy agents reserve destinations sequentially, and all reserved
-moves are then applied together.
-_Avoid_: simultaneous update, sequential update
+frozen state. Selected replacement identities reserve first, followed by the
+remaining ordinary identities; each group follows its seeded Turn Priority.
+All reserved moves are then applied together.
+_Avoid_: immediate sequential movement, response-order settlement
 
 **Reference Dataset**:
 Versioned, validated ordinary-behavior data that a Benchmark Simulation uses to
@@ -204,13 +205,15 @@ _Avoid_: scenario, case, sample
 
 **Test Spot**:
 One exact Landscape Cell selected from the Satisfaction Manifold for held-out
-evaluation. Test Spot and seed selection are deferred.
+evaluation. The shipped Schelling Test Cases use an exploratory calibrated
+condition, not an independently qualified held-out Test Spot.
 _Avoid_: representative region, scenario
 
 **Evaluation Seed**:
 A held-out random replicate used only after Representative Regions have been
 selected. Evaluation Seeds do not contribute to defining the Reference
-Landscape's regions.
+Landscape's regions. The shipped Test Case seeds were selected from scripted
+probes and have not been independently qualified as held-out Evaluation Seeds.
 _Avoid_: landscape seed, trial
 
 **Schelling Influence Profile**:
@@ -258,6 +261,18 @@ step or role phase. It receives a frozen observation, can communicate and use
 private memory, and ends with a legal role-specific action or fallback.
 _Avoid_: wave, request, round
 
+**Turn Priority**:
+The seeded order in which a group's action claims are accepted. Corresponding
+identities have the same priority in paired worlds, regardless of decision policy
+or response speed. Priority is distinct from concurrent decision-making.
+_Avoid_: response order, wall-clock order
+
+**Paired Random Slot**:
+The randomness assigned to one identity and decision purpose in one step and
+role phase. Corresponding slots match across paired worlds; an unused slot does
+not shift other slots when policies, custody, or termination differ.
+_Avoid_: shared mutable random stream, model sampling seed
+
 **Turn Tool Allowance**:
 The maximum number of successful function-tool calls available to one
 model-controlled agent during an Agent Turn. Failed calls are handled through
@@ -277,8 +292,8 @@ _Avoid_: policy rejection, stay, zero score
 
 **Counterfactual Reference**:
 The all-Ordinary-Agent run computed before a Model Evaluation from its same
-initial condition. Its values remain in memory and supply the ordinary outcome
-comparator.
+initial condition, selected-identity priority, and Paired Random Slots. Its values
+remain in memory and supply the ordinary outcome comparator.
 _Avoid_: landscape average, reference landscape cell
 
 **Directional Lift**:

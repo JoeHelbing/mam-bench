@@ -38,11 +38,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
             else f"Configuration error ({type(error).__name__}).",
             file=sys.stderr,
         )
-        if args.suite == DEFAULT_SUITE:
-            print(
-                "Official suite selection is deferred; supply --suite with explicit cases.",
-                file=sys.stderr,
-            )
         return 2
     configure_logging(config.log_level)
     runner = BenchmarkRunner(config)

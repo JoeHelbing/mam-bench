@@ -19,14 +19,14 @@ pilot.
 Python 3.14 and the dependencies declared in `pyproject.toml` are required.
 With the project environment already prepared, run the shipped six-case suite:
 
-```fish
+```bash
 uv run --no-sync main.py --model path/to/model.yaml \
   --output results/default
 ```
 
 To replace all six cases with your own suite:
 
-```fish
+```bash
 uv run --no-sync main.py --model path/to/model.yaml \
   --suite path/to/suite.yaml --output results/development
 ```
@@ -253,7 +253,7 @@ retired interfaces are removed. Historical result files are untouched.
 
 ## Verify without model calls
 
-```fish
+```bash
 uv run --no-sync python -m unittest discover -s tests -v
 ruff check src tests main.py
 ruff format --check src tests main.py

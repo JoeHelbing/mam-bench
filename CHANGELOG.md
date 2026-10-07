@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.0](https://github.com/JoeHelbing/mam-bench/compare/v0.1.0...v0.2.0) (2026-10-07)
+
+
+### Features
+
+* **civil:** allow configurable step limits ([ff99d8f](https://github.com/JoeHelbing/mam-bench/commit/ff99d8f63fabd83c38f5f22d534026955fe18d9f))
+* **civil:** allow configurable step limits ([9ddce5f](https://github.com/JoeHelbing/mam-bench/commit/9ddce5f5b93eb35956a1cfd244a0c57f7edbf787))
+
+
+### Documentation
+
+* refresh public GitHub landing page ([d29f845](https://github.com/JoeHelbing/mam-bench/commit/d29f845521927a7e620dabf4ee1d3242f4ac51b4))
+* refresh public GitHub landing page ([e4a5698](https://github.com/JoeHelbing/mam-bench/commit/e4a56983e659311876945419e8ee23b6d1248071))
+
 ## [0.1.0](https://github.com/JoeHelbing/mam-bench/compare/v0.0.1...v0.1.0) (2026-10-07)
 
 

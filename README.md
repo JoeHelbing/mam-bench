@@ -100,8 +100,9 @@ excluding the origin itself. Unknown cells are excluded; zero known occupied
 neighbors predicts quality one. Model agents may request any starting vacancy.
 Selected identities reserve first in both worlds, followed by the remaining
 ordinary identities; both groups use seeded priorities and all moves settle
-together. Ordinary execution stops at equilibrium, blockage, or the horizon;
-controlled execution runs to the configured horizon.
+together. Both simulations require `max_steps: 30` to bound model context.
+Ordinary Schelling execution can stop at equilibrium or blockage before the
+horizon; controlled execution runs to step 30.
 
 Each model-controlled Schelling agent receives a JSON observation with its step,
 location, reference-final and current homophily, and remaining vacancy count.

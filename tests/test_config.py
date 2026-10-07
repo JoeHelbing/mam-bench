@@ -50,6 +50,8 @@ class ConfigurationTests(unittest.TestCase):
             {"vision_radius": 4},
             {"vacancy_fraction": 1.0},
             {"max_steps": 0},
+            {"max_steps": 1},
+            {"max_steps": 31},
             {"seed": -1},
         ):
             with self.subTest(updates=updates), self.assertRaises(ValidationError):

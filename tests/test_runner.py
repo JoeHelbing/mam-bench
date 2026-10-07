@@ -82,7 +82,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 model=selection().model_copy(
                     update={"settings": AgentSettings(concurrency=2, timeout_seconds=4)}
                 ),
-                cases=(schelling(max_steps=1), failed_case, schelling()),
+                cases=(schelling(), failed_case, schelling()),
                 output_directory=Path(directory),
             )
             runner = BenchmarkRunner(config, model_factory=lambda _: FunctionModel(script))

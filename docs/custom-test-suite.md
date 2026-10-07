@@ -32,7 +32,7 @@ inheritance or matrix expansion. The optional top-level `log_level` accepts
 | `tolerance` | Number from 0 to 1 | Minimum share of occupied neighbors of the same type for satisfaction. |
 | `vacancy_fraction` | Number from 0 to 1 | Fraction of board cells left vacant. |
 | `seed` | Nonnegative integer | Random seed for the paired worlds. |
-| `max_steps` | Integer at least 1 | Step limit. |
+| `max_steps` | `30` | Fixed step limit. |
 | `vision_radius` | Integer at least 1 | Radius within which an agent can inspect destinations. |
 | `controlled_agent_count` | Even integer at least 2 | Number of agents replaced with model-controlled agents, split equally between the two types. |
 | `objective` | `integration` or `segregation` | Desired direction of change in ordinary-agent homophily. |

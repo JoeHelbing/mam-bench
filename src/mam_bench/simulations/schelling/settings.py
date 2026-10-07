@@ -13,7 +13,7 @@ class SchellingSettings(BaseModel):
     tolerance: float = Field(strict=True, ge=0, le=1)
     vacancy_fraction: float = Field(strict=True, ge=0, le=1)
     seed: int = Field(strict=True, ge=0)
-    max_steps: int = Field(strict=True, ge=1)
+    max_steps: Literal[30]
     vision_radius: int = Field(strict=True, ge=1)
     controlled_agent_count: int = Field(strict=True, ge=2)
     objective: Literal["integration", "segregation"]

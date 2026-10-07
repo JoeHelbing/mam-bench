@@ -63,7 +63,7 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ordinary_trajectory_matches_independent_fraction_oracle(self) -> None:
         for radius in (1, 2, 3):
-            settings = schelling(vision_radius=radius, max_steps=5)
+            settings = schelling(vision_radius=radius)
             sim = SchellingSim(settings)
             while sim.termination is None:
                 before = sim.snapshot()
@@ -112,7 +112,7 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
     async def test_ordinary_replacements_match_reference_at_any_concurrency(self) -> None:
         for concurrency in (1, 4):
             with self.subTest(concurrency=concurrency), tempfile.TemporaryDirectory() as directory:
-                settings = schelling(max_steps=5)
+                settings = schelling()
                 resources = runtime(Path(directory) / "case", concurrency=concurrency)
                 ordinary = SchellingSim(settings)
                 controlled = SchellingSim(settings, runtime=resources)
@@ -186,7 +186,7 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             ordinary = records(resources.writer.directory / "ordinary.jsonl")
             controlled = records(resources.writer.directory / "controlled.jsonl")
             self.assertEqual(ordinary[0], controlled[0])
-            self.assertEqual(len(controlled), 4)
+            self.assertEqual(len(controlled), 31)  # Initial state plus the fixed 30 rounds.
             self.assertEqual(result.config, schelling())
             homophily: list[float] = []
             for states in (ordinary, controlled):

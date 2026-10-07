@@ -29,7 +29,7 @@ def schelling(**updates: object) -> SchellingSettings:
             "tolerance": 0.75,
             "vacancy_fraction": 0.25,
             "seed": 7,
-            "max_steps": 3,
+            "max_steps": 30,
             "vision_radius": 2,
             "controlled_agent_count": 4,
             "objective": "integration",

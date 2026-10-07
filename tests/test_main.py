@@ -25,7 +25,7 @@ class MainTests(unittest.TestCase):
             yaml.safe_dump(
                 {
                     "cases": [
-                        schelling(max_steps=1).model_dump(),
+                        schelling().model_dump(),
                         civil().model_dump(),
                     ]
                 }

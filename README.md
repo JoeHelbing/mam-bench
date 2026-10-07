@@ -63,7 +63,9 @@ control, with each role's pair sharing a seed. These conditions and seeds were
 selected from exploratory scripted interventions, not independent held-out
 qualification or language-model evaluations. See the
 [custom test suite YAML guide](docs/custom-test-suite.md) for allowed fields,
-values, and a complete development case example.
+values, and a complete development case example. The shipped cases use
+`max_steps: 30`; custom cases can choose another positive integer in either
+simulation.
 
 The CLI prints each completed case's effective parameters and signed score, then
 the Combined Benchmark Score. On failure it identifies the failed case, retains
@@ -142,7 +144,8 @@ increased or decreased participation.
 Participation is the active-or-jailed fraction of scored ordinary citizens.
 Selected controlled identities are excluded from both worlds. Each world stops
 independently at its first completed step with at least 95% participation, or
-after step 30; revolution is checked on step 30 before the horizon.
+at the configured `max_steps`; revolution is checked on that last step before
+classifying the horizon.
 
 ```text
 direction = +1 for increase, -1 for decrease

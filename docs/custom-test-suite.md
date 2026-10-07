@@ -59,7 +59,7 @@ more than one quarter of the board. The vision diameter
 | `private_preference_std` | Nonnegative finite number | Standard deviation of those preferences. |
 | `max_jail_term` | Nonnegative integer | Inclusive upper bound on a sampled jail term. |
 | `seed` | Nonnegative integer | Random seed for the paired worlds. |
-| `max_steps` | `30` | Fixed step limit. |
+| `max_steps` | Integer at least 1 | Step limit; custom cases can differ from the shipped suite. |
 | `controlled_agent_count` | `16` | Number of citizens or police replaced with model-controlled agents. |
 
 Each population is `round(board_size ** 2 * density)` (ties to even).

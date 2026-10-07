@@ -307,7 +307,7 @@ class CivilViolenceSim:
             self._settle_citizens()
             await self._phase_turns(self._begin_police_phase(), "police")
             self._settle_police()
-            # Check the completed step, including step 30, before classifying the horizon.
+            # Check the completed step, including the horizon, for revolution first.
             if self.participating_count * 100 >= len(self.scored_agent_ids) * 95:
                 self.termination = "revolution"
             elif self.steps == self.settings.max_steps:

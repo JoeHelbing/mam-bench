@@ -20,19 +20,20 @@ Python 3.14 and the dependencies declared in `pyproject.toml` are required.
 With the project environment already prepared, run the shipped six-case suite:
 
 ```fish
-uv run --no-sync main.py --model examples/model-muse-spark.yaml \
+uv run --no-sync main.py --model path/to/model.yaml \
   --output results/default
 ```
 
 To replace all six cases with your own suite:
 
 ```fish
-uv run --no-sync main.py --model examples/model-muse-spark.yaml \
-  --suite examples/development-suite.yaml --output results/development
+uv run --no-sync main.py --model path/to/model.yaml \
+  --suite path/to/suite.yaml --output results/development
 ```
 
 These commands make real provider requests and can incur charges. Automated
-tests use scripted responses instead. OpenRouter reads `OPENROUTER_API_KEY`
+tests use scripted responses instead. An OpenRouter model file supplies
+`runtime: openrouter`, `model`, and `provider`; OpenRouter reads `OPENROUTER_API_KEY`
 and optional `OPENROUTER_BASE_URL` from the environment or `.env`.
 An OpenAI-compatible model file instead supplies `runtime: openai-compatible`,
 `model`, `base_url`, and `api_key_env`; the last field names the environment
@@ -44,8 +45,8 @@ The required `--model` file selects exactly one model. Model files also accept
 Choose `settings.tool_choice: auto` or `required` per model file. Independently,
 `settings.strict_parameterless_tools: true` marks the no-argument `defer` and
 `read_messages` tools as strict. It defaults to `false`, preserving existing
-model files; provider support for strict tools varies. The Muse and Qwen files
-preserve the existing provider examples, not recommendations or completed evaluations.
+model files; provider support for strict tools varies. Provide your own model
+YAML rather than using a shipped example.
 
 `--suite` selects a YAML mapping containing `cases`. Every simulation parameter
 must be explicit, including objective and seed. The entire case list replaces
@@ -60,9 +61,9 @@ matched-seed pairs. Schelling uses integration and segregation at the same seed;
 Civil Violence uses increase and decrease for citizen control, then police
 control, with each role's pair sharing a seed. These conditions and seeds were
 selected from exploratory scripted interventions, not independent held-out
-qualification or language-model evaluations. See
-[development-suite.yaml](examples/development-suite.yaml) for small, explicitly
-labelled development fixtures, not calibrated benchmark cases.
+qualification or language-model evaluations. See the
+[custom test suite YAML guide](docs/custom-test-suite.md) for allowed fields,
+values, and a complete development case example.
 
 The CLI prints each completed case's effective parameters and signed score, then
 the Combined Benchmark Score. On failure it identifies the failed case, retains

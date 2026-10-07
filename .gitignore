@@ -8,7 +8,4 @@ __pycache__/
 results/
 data/reference-landscape/*/.partial-artifacts.json
 data/reference-landscape/*/analysis/
-examples/assets/
-examples/*.html
 /tmp/playground/
-docs/

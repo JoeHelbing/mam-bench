@@ -14,18 +14,26 @@ Every completed case contributes a signed score; the final score is their sum.
 The [project overview](https://joehelbing.net/post/mam-bench) illustrates the
 pilot.
 
-## Run a custom suite
+## Run the default or a custom suite
 
 Python 3.14 and the dependencies declared in `pyproject.toml` are required.
-With the project environment already prepared:
+With the project environment already prepared, run the shipped six-case suite:
 
-```fish
-uv run --no-sync main.py --model examples/model-muse-spark.yaml \
-  --suite examples/development-suite.yaml --output results/development
+```bash
+uv run --no-sync main.py --model path/to/model.yaml \
+  --output results/default
 ```
 
-This command makes real provider requests and can incur charges. Automated
-tests use scripted responses instead. OpenRouter reads `OPENROUTER_API_KEY`
+To replace all six cases with your own suite:
+
+```bash
+uv run --no-sync main.py --model path/to/model.yaml \
+  --suite path/to/suite.yaml --output results/development
+```
+
+These commands make real provider requests and can incur charges. Automated
+tests use scripted responses instead. An OpenRouter model file supplies
+`runtime: openrouter`, `model`, and `provider`; OpenRouter reads `OPENROUTER_API_KEY`
 and optional `OPENROUTER_BASE_URL` from the environment or `.env`.
 An OpenAI-compatible model file instead supplies `runtime: openai-compatible`,
 `model`, `base_url`, and `api_key_env`; the last field names the environment
@@ -37,8 +45,8 @@ The required `--model` file selects exactly one model. Model files also accept
 Choose `settings.tool_choice: auto` or `required` per model file. Independently,
 `settings.strict_parameterless_tools: true` marks the no-argument `defer` and
 `read_messages` tools as strict. It defaults to `false`, preserving existing
-model files; provider support for strict tools varies. The Muse and Qwen files
-preserve the existing provider examples, not recommendations or completed evaluations.
+model files; provider support for strict tools varies. Provide your own model
+YAML rather than using a shipped example.
 
 `--suite` selects a YAML mapping containing `cases`. Every simulation parameter
 must be explicit, including objective and seed. The entire case list replaces
@@ -47,12 +55,15 @@ Missing fields identify the case and field in a Pydantic validation error before
 any provider is constructed or output is created. There is no matrix expansion,
 parameter inheritance, or default model.
 
-The package's [default-suite.yaml](src/mam_bench/default-suite.yaml) deliberately
-has no cases until suite selection is completed. Omitting `--suite` therefore
-reports a validation error and the deferral. See
-[development-suite.yaml](examples/development-suite.yaml) for complete, explicitly
-labelled examples of both Schelling goals and all four Civil Violence role/goal
-combinations.
+Omitting `--suite` loads the shipped
+[default-suite.yaml](src/mam_bench/default-suite.yaml): six ordered cases in three
+matched-seed pairs. Schelling uses integration and segregation at the same seed;
+Civil Violence uses increase and decrease for citizen control, then police
+control, with each role's pair sharing a seed. These conditions and seeds were
+selected from exploratory scripted interventions, not independent held-out
+qualification or language-model evaluations. See the
+[custom test suite YAML guide](docs/custom-test-suite.md) for allowed fields,
+values, and a complete development case example.
 
 The CLI prints each completed case's effective parameters and signed score, then
 the Combined Benchmark Score. On failure it identifies the failed case, retains
@@ -78,8 +89,8 @@ random stream. Different available actions can still map the same randomness to
 different choices. Model outputs and message timing are not made deterministic.
 
 This changes the ordinary reference dynamics. Historical calibration archives
-remain historical evidence, not interchangeable baselines for this scheduler;
-recompute calibration before selecting defaults or evaluation seeds.
+remain historical evidence, not interchangeable baselines for this scheduler.
+The shipped cases use the current-rules matched-schedule scripted calibration.
 
 Schelling preserves strict local improvement for ordinary agents: satisfaction
 uses occupied radius-one neighbors and a floating-point tolerance; unhappy
@@ -242,7 +253,7 @@ retired interfaces are removed. Historical result files are untouched.
 
 ## Verify without model calls
 
-```fish
+```bash
 uv run --no-sync python -m unittest discover -s tests -v
 ruff check src tests main.py
 ruff format --check src tests main.py

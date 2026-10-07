@@ -90,6 +90,18 @@ class MainTests(unittest.TestCase):
             self.assertIn("Failed case:", errors.getvalue())
             self.assertNotIn("SECRET-PROVIDER", errors.getvalue())
 
+    def test_invalid_model_with_default_suite_does_not_claim_suite_is_deferred(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "model.yaml"
+            model.write_text("runtime: invalid\nmodel: nonexistent\n")
+            errors = io.StringIO()
+            with patch("main.BenchmarkRunner") as runner, contextlib.redirect_stderr(errors):
+                self.assertEqual(main.main(["--model", str(model)]), 2)
+                runner.assert_not_called()
+            self.assertIn("model", errors.getvalue())
+            self.assertNotIn("deferred", errors.getvalue())
+
     def test_last_case_validation_prevents_runner_construction(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

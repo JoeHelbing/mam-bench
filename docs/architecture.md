@@ -35,8 +35,3 @@ shares cohort ordering, concurrent admission, claim gates, failure cleanup, and
 addressed random streams. [artifacts.py](../src/mam_bench/artifacts.py) writes supplied
 records and preserves native archives. The runner retains case
 results, and `BenchmarkResult.total_score` sums their calculated scores.
-
-There are no reset/reinitialization paths, alternate constructors, old YAML
-adapters, simulation-model matrices, base-simulation framework, or reference
-replay dependency. The obsolete 60-step/two-agent calibration selector and tests for
-retired interfaces are removed. Historical result files are untouched.

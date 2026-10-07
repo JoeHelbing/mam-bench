@@ -2,7 +2,7 @@
 
 A suite is a YAML mapping with a `cases` list. Each entry is one test case; cases
 run in the listed order. Save the file and pass it with `--suite` as shown in the
-[README](../README.md#run-the-default-or-a-custom-suite). All fields below are required for each
+[README](../README.md#quickstart). All fields below are required for each
 case. Do not put a model or credentials in the suite: `--model` selects the model
 separately. The case below is a development example, not a calibrated benchmark case.
 
@@ -70,4 +70,4 @@ remain after excluding controlled citizens from scoring.
 Unknown fields and missing required fields fail validation. The suite must have
 at least one case. Omitting `--suite` uses the shipped six-case
 [default suite](../src/mam_bench/default-suite.yaml). For details on the
-simulation rules and scores, see the [README](../README.md#rules-and-scores).
+simulation rules and scores, see the [rules and scoring](rules-and-scoring.md).

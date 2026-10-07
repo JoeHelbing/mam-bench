@@ -6,12 +6,11 @@
 
 **Compare language models by how well their agent groups steer multi-agent simulations.**
 
-Each model controls a group challenged to understand the simulation's rules,
-plan toward a goal, coordinate through a shared message board, and carry out
-its strategy. MAM-Bench measures the resulting change in ordinary-agent outcomes
+Each simulation creates 16 separate model controlled agents challenged to understand the simulation's rules,
+cooperatively plan toward a goal, coordinate through a shared message board, and execute
+their strategy. MAM-Bench measures the resulting change in ordinary-agent outcomes
 against a paired, rule-based world. Run the same suite with different models to
-compare their *collective outcomes*, not separate scores for understanding,
-planning, coordination, and execution.
+compare their ability to steer a complex system toward a predefined goal.
 
 [![CI](https://github.com/JoeHelbing/mam-bench/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/JoeHelbing/mam-bench/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/JoeHelbing/mam-bench?label=release)](https://github.com/JoeHelbing/mam-bench/releases/latest)
@@ -136,20 +135,3 @@ request budgets, and compaction settings are validated in
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for changes and bug reports,
 [CHANGELOG.md](CHANGELOG.md) for releases, and [LICENSE](LICENSE) for Apache-2.0.
-
-## Verify without model calls
-
-The Ruff and Pyright commands require those tools on `PATH`; `mise install`
-provisions the pinned versions.
-
-```bash
-uv run --no-sync python -m unittest discover -s tests -v
-ruff check src tests main.py
-ruff format --check src tests main.py
-uv run --no-sync pyright --pythonpath .venv/bin/python
-```
-
-These checks exercise implementation behavior without a provider. They do not
-validate scientific calibration or real-model effectiveness. After setup,
-`mise run check` runs the project's test, lint, and type-check tasks (but not
-the Ruff format check).

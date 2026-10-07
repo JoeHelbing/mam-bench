@@ -114,8 +114,8 @@ _Avoid_: absolute goal achievement, percentage improvement over baseline
 
 **Benchmark Suite**:
 The versioned collection of Test Cases executed by a Benchmark Run for one
-explicitly selected Model. Simulation defaults are selected as a suite; their
-final selection is deferred.
+explicitly selected Model. The shipped default selects six Test Cases from
+exploratory matched-seed scripted calibration; a custom suite replaces them.
 Model selection is always explicit.
 _Avoid_: model preset, single simulation run
 
@@ -205,13 +205,15 @@ _Avoid_: scenario, case, sample
 
 **Test Spot**:
 One exact Landscape Cell selected from the Satisfaction Manifold for held-out
-evaluation. Test Spot and seed selection are deferred.
+evaluation. The shipped Schelling Test Cases use an exploratory calibrated
+condition, not an independently qualified held-out Test Spot.
 _Avoid_: representative region, scenario
 
 **Evaluation Seed**:
 A held-out random replicate used only after Representative Regions have been
 selected. Evaluation Seeds do not contribute to defining the Reference
-Landscape's regions.
+Landscape's regions. The shipped Test Case seeds were selected from scripted
+probes and have not been independently qualified as held-out Evaluation Seeds.
 _Avoid_: landscape seed, trial
 
 **Schelling Influence Profile**:

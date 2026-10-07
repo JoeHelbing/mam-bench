@@ -1,3 +1,78 @@
-# Official cases, parameters and seeds are deliberately unselected.
-# Until calibration is complete, pass an explicit --suite YAML file.
-cases: []
+# Six matched-seed cases selected from the current-rules scripted calibration.
+# Each adjacent pair shares all settings except its mirrored objective.
+# Scripted probes are exploratory, not language-model evaluations.
+cases:
+- simulation: schelling
+  objective: integration
+  board_size: 20
+  vision_radius: 1
+  tolerance: 0.7
+  vacancy_fraction: 0.15
+  seed: 10002
+  max_steps: 30
+  controlled_agent_count: 16
+- simulation: schelling
+  objective: segregation
+  board_size: 20
+  vision_radius: 1
+  tolerance: 0.7
+  vacancy_fraction: 0.15
+  seed: 10002
+  max_steps: 30
+  controlled_agent_count: 16
+- simulation: civil-violence
+  controlled_role: citizen
+  objective: increase
+  board_size: 20
+  citizen_density: 0.54
+  police_density: 0.055
+  vision_radius: 2
+  threshold: 0.0
+  private_preference_mean: 0.0
+  private_preference_std: 0.7
+  max_jail_term: 12
+  seed: 1000
+  max_steps: 30
+  controlled_agent_count: 16
+- simulation: civil-violence
+  controlled_role: citizen
+  objective: decrease
+  board_size: 20
+  citizen_density: 0.54
+  police_density: 0.055
+  vision_radius: 2
+  threshold: 0.0
+  private_preference_mean: 0.0
+  private_preference_std: 0.7
+  max_jail_term: 12
+  seed: 1000
+  max_steps: 30
+  controlled_agent_count: 16
+- simulation: civil-violence
+  controlled_role: police
+  objective: increase
+  board_size: 20
+  citizen_density: 0.54
+  police_density: 0.05
+  vision_radius: 2
+  threshold: 1.0
+  private_preference_mean: 0.0
+  private_preference_std: 0.7
+  max_jail_term: 6
+  seed: 53000
+  max_steps: 30
+  controlled_agent_count: 16
+- simulation: civil-violence
+  controlled_role: police
+  objective: decrease
+  board_size: 20
+  citizen_density: 0.54
+  police_density: 0.05
+  vision_radius: 2
+  threshold: 1.0
+  private_preference_mean: 0.0
+  private_preference_std: 0.7
+  max_jail_term: 6
+  seed: 53000
+  max_steps: 30
+  controlled_agent_count: 16

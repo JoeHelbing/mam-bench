@@ -1,6 +1,7 @@
 # Six matched-seed cases selected from the current-rules scripted calibration.
 # Each adjacent pair shares all settings except its mirrored objective.
 # Scripted probes are exploratory, not language-model evaluations.
+# These cases select max_steps: 30; custom suites may choose any positive integer.
 cases:
 - simulation: schelling
   objective: integration

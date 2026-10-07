@@ -35,7 +35,6 @@ class ConfigurationTests(unittest.TestCase):
             {"controlled_agent_count": 2},
             {"citizen_density": 0.25},
             {"citizen_density": 0.8, "police_density": 0.3},
-            {"max_steps": 60},
             {"private_preference_std": -1},
             {"vision_radius": 0},
             {"vision_radius": True},
@@ -44,6 +43,12 @@ class ConfigurationTests(unittest.TestCase):
         ):
             with self.subTest(updates=updates), self.assertRaises(ValidationError):
                 civil(**updates)
+        for max_steps in (1, 7, 30, 60):
+            with self.subTest(max_steps=max_steps):
+                self.assertEqual(civil(max_steps=max_steps).max_steps, max_steps)
+        for max_steps in (0, -1, True, "30", 1.5):
+            with self.subTest(max_steps=max_steps), self.assertRaises(ValidationError):
+                civil(max_steps=max_steps)
         for updates in (
             {"controlled_agent_count": 3},
             {"controlled_agent_count": 40},
@@ -61,7 +66,11 @@ class ConfigurationTests(unittest.TestCase):
             model = root / "model.yaml"
             suite = root / "suite.yaml"
             model.write_text(yaml.safe_dump(selection().model_dump()))
-            cases = [civil().model_dump(), schelling(seed=19).model_dump(), civil().model_dump()]
+            cases = [
+                civil(max_steps=7).model_dump(),
+                schelling(seed=19).model_dump(),
+                civil().model_dump(),
+            ]
             suite.write_text(yaml.safe_dump({"cases": cases}))
             config = load_benchmark_config(model, suite, output_directory=Path("results/custom"))
             self.assertEqual([c.model_dump() for c in config.cases], cases)

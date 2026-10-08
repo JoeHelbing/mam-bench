@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -5,7 +6,8 @@ from pathlib import Path
 from typing import Literal, cast
 from unittest.mock import AsyncMock, patch
 
-from openai import omit
+import httpx2 as httpx
+from openai import AsyncOpenAI, omit
 from openai.types.chat import ChatCompletion
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UnexpectedModelBehavior
@@ -136,6 +138,146 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(function["strict"], True)
         self.assertIsInstance(response.parts[0], ToolCallPart)
         self.assertEqual(response.usage.total_tokens, 12)
+
+    async def test_completion_parameter_reaches_sdk_http_body(self) -> None:
+        from mam_bench.model_setup import EndpointResponse, resolve_model_setup
+
+        for parameter in ("max_tokens", "max_completion_tokens"):
+            with self.subTest(parameter=parameter):
+                payload = EndpointResponse.model_validate(
+                    {
+                        "data": {
+                            "endpoints": [
+                                {
+                                    "tag": "azure",
+                                    "provider_name": "Azure",
+                                    "status": 0,
+                                    "context_length": 1047576,
+                                    "max_completion_tokens": 32768,
+                                    "supported_parameters": ["tools", "tool_choice", parameter],
+                                    "supports_tool_choice": {"required": True, "auto": True},
+                                }
+                            ]
+                        }
+                    }
+                )
+                with patch(
+                    "mam_bench.model_setup._fetch_endpoints", AsyncMock(return_value=payload)
+                ):
+                    setup = await resolve_model_setup(
+                        OpenRouterSelection(
+                            runtime="openrouter", model="openai/gpt-4.1", provider="azure"
+                        )
+                    )
+                requests: list[dict[str, object]] = []
+
+                def respond(
+                    request: httpx.Request, captured: list[dict[str, object]] = requests
+                ) -> httpx.Response:
+                    captured.append(cast(dict[str, object], json.loads(request.content)))
+                    return httpx.Response(200, json=completion().model_dump(mode="json"))
+
+                async with AsyncOpenAI(
+                    api_key="unused-offline-test-value",
+                    base_url="https://router.example.test/v1",
+                    http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+                ) as client:
+                    with patch("mam_bench.runtime.AsyncOpenAI", return_value=client):
+                        model = create_model(setup.selection)
+                    await model.request(
+                        [ModelRequest(parts=[UserPromptPart("Choose an action.")])],
+                        None,
+                        ModelRequestParameters(
+                            output_mode="tool",
+                            allow_text_output=False,
+                            output_tools=[
+                                ToolDefinition(
+                                    name="stay",
+                                    parameters_json_schema={"type": "object", "properties": {}},
+                                )
+                            ],
+                        ),
+                    )
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(requests[0][parameter], 32768)
+                other = (
+                    "max_tokens"
+                    if parameter == "max_completion_tokens"
+                    else "max_completion_tokens"
+                )
+                self.assertNotIn(other, requests[0])
+                self.assertEqual(requests[0]["tool_choice"], "required")
+                self.assertEqual(
+                    requests[0]["provider"],
+                    {"only": ["azure"], "allow_fallbacks": False, "require_parameters": True},
+                )
+
+    async def test_resolved_request_omits_defaults_and_reports_cache_presence(self) -> None:
+        selected = OpenRouterSelection(
+            runtime="openrouter", model="vendor/test-model", provider="selected-provider"
+        ).with_setup(
+            AgentSettings(),
+            frozenset({"temperature", "top_p", "top_k", "reasoning"}),
+            "unverified",
+        )
+        model = create_model(selected)
+        assert isinstance(model, OpenRouterModel)
+        self.addAsyncCleanup(model.client.close)
+        for raw_details, expected in (
+            (None, False),
+            ({"cached_tokens": 0}, True),
+            ({"cached_tokens": 4, "cache_write_tokens": 2}, True),
+        ):
+            raw = completion().model_dump()
+            usage = cast(dict[str, object], raw["usage"])
+            if raw_details is not None:
+                usage["prompt_tokens_details"] = raw_details
+            request = AsyncMock(return_value=ChatCompletion.model_validate(raw))
+            with patch.object(model.client.chat.completions, "create", request):
+                response = await model.request(
+                    [ModelRequest(parts=[UserPromptPart("Respond.")])],
+                    None,
+                    ModelRequestParameters(),
+                )
+            sent = cast(dict[str, object], request.call_args.kwargs)
+            self.assertIs(sent["temperature"], omit)
+            self.assertIs(sent["top_p"], omit)
+            self.assertEqual(
+                sent["extra_body"],
+                {
+                    "provider": {
+                        "only": ["selected-provider"],
+                        "allow_fallbacks": False,
+                        "require_parameters": True,
+                    }
+                },
+            )
+            self.assertEqual(
+                (response.provider_details or {}).get("cache_usage_reported"), expected
+            )
+
+    async def test_explicit_cache_adds_native_breakpoints_to_claude_requests(self) -> None:
+        selected = OpenRouterSelection(
+            runtime="openrouter", model="anthropic/claude-sonnet-4", provider="anthropic"
+        ).with_setup(AgentSettings(tool_choice="auto"), frozenset(), "explicit")
+        model = create_model(selected)
+        assert isinstance(model, OpenRouterModel)
+        self.addAsyncCleanup(model.client.close)
+        request = AsyncMock(return_value=completion())
+        with patch.object(model.client.chat.completions, "create", request):
+            await model.request(
+                [
+                    ModelRequest(
+                        parts=[SystemPromptPart("Stable instructions."), UserPromptPart("Respond.")]
+                    )
+                ],
+                None,
+                ModelRequestParameters(),
+            )
+        sent = cast(dict[str, object], request.call_args.kwargs)
+        messages = cast(list[dict[str, object]], sent["messages"])
+        content = cast(list[dict[str, object]], messages[-1]["content"])
+        self.assertEqual(content[-1]["cache_control"], {"type": "ephemeral", "ttl": "5m"})
 
     async def test_compatible_endpoint_keeps_openai_request_format(self) -> None:
         model = create_model(

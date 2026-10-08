@@ -4,11 +4,12 @@ import asyncio
 import hashlib
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
+from typing import cast
 
 from anyio import Lock
 from openai import APIConnectionError, APIError, APITimeoutError
@@ -30,6 +31,8 @@ from pydantic_ai.capabilities.abstract import (
 from pydantic_ai.exceptions import (
     IncompleteToolCall,
     ModelAPIError,
+    ModelHTTPError,
+    ModelRetry,
     UnexpectedModelBehavior,
     UsageLimitExceeded,
 )
@@ -41,6 +44,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 from pydantic_ai.models import ModelRequestContext
+from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
@@ -67,8 +71,9 @@ logger = logging.getLogger(__name__)
 
 
 class _RequestLogging[DepsT](AbstractCapability[DepsT]):
-    def __init__(self, session_id: str) -> None:
+    def __init__(self, session_id: str, on_response: Callable[[ModelResponse], None]) -> None:
         self.session_id = session_id
+        self.on_response = on_response
 
     async def wrap_model_request(
         self,
@@ -94,6 +99,7 @@ class _RequestLogging[DepsT](AbstractCapability[DepsT]):
                 failure_trace(error),
             )
             raise
+        self.on_response(response)
         logger.debug(
             "request.end session=%s elapsed_s=%.3f input_tokens=%d output_tokens=%d "
             "finish=%s tools=%s",
@@ -156,6 +162,70 @@ class _Compaction[DepsT](FallbackCompaction[DepsT]):
         return result
 
 
+class _ContextOverflowRecovery[DepsT](AbstractCapability[DepsT]):
+    """Retry one rejected OpenRouter request in the native agent loop, never a whole turn."""
+
+    def __init__(self, compaction: _Compaction[DepsT]) -> None:
+        self.compaction = compaction
+        self.pending_error: ModelHTTPError | None = None
+        self.failed_parts: tuple[object, ...] = ()
+        self.retried = False
+
+    async def on_model_request_error(
+        self,
+        ctx: RunContext[DepsT],
+        *,
+        request_context: ModelRequestContext,
+        error: Exception,
+    ) -> ModelResponse:
+        if (
+            self.retried
+            or request_context.streaming
+            or not isinstance(request_context.model, OpenRouterModel)
+            or not isinstance(error, ModelHTTPError)
+            or error.status_code != 400
+            or not isinstance(error.body, dict)
+        ):
+            raise error
+        body: dict[str, object] = cast(dict[str, object], error.body)  # pyright: ignore[reportUnknownMemberType]
+        metadata = body.get("metadata")
+        if (
+            not isinstance(metadata, dict)
+            or cast(dict[str, object], metadata).get("error_type") != "context_length_exceeded"
+            or not request_context.messages
+            or not isinstance(request_context.messages[-1], ModelRequest)
+        ):
+            raise error
+        self.retried = True
+        self.pending_error = error
+        self.failed_parts = tuple(request_context.messages[-1].parts)
+        raise ModelRetry("Context length exceeded; retry with compacted history.") from error
+
+    async def before_model_request(
+        self, ctx: RunContext[DepsT], request_context: ModelRequestContext
+    ) -> ModelRequestContext:
+        error = self.pending_error
+        if error is None:
+            return request_context
+        self.pending_error = None
+        original = request_context.messages
+        compacted = await self.compaction.compact(list(original), ctx)
+        # The latest observation or tool returns must survive compaction alongside the retry.
+        retained_parts = [
+            part
+            for message in compacted
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        ]
+        if compacted == original or not all(part in retained_parts for part in self.failed_parts):
+            raise error
+        request_context.messages = compacted
+        logger.info(
+            "request.context_overflow_recovered messages=%d->%d", len(original), len(compacted)
+        )
+        return request_context
+
+
 @dataclass(frozen=True)
 class Completed[T]:
     value: T
@@ -189,6 +259,10 @@ class AgentSessions[AgentDepsT, OutputDataT]:
         self._states: dict[str, _SessionState] = {}
         self._failure: BaseException | None = None
         self._usage = RunUsage()
+        self._cache_reported = 0
+        self._cache_unknown = 0
+        self._cache_read_reported = 0
+        self._cache_write_reported = 0
         self._archive = None
         if artifact_directory is not None:
             artifact_directory.mkdir(parents=True, exist_ok=True)
@@ -207,6 +281,26 @@ class AgentSessions[AgentDepsT, OutputDataT]:
     def usage(self) -> RunUsage:
         """Return a snapshot of native usage across all sessions."""
         return deepcopy(self._usage)
+
+    @property
+    def cache_observation(self) -> dict[str, int | None]:
+        """Observed action-request cache usage; summaries are in native usage totals."""
+        complete = self._cache_unknown == 0 and self._cache_reported > 0
+        return {
+            "reported_responses": self._cache_reported,
+            "unknown_responses": self._cache_unknown,
+            "read_tokens": self._cache_read_reported if complete else None,
+            "write_tokens": self._cache_write_reported if complete else None,
+        }
+
+    def _observe_cache(self, response: ModelResponse) -> None:
+        details = response.provider_details or {}
+        if details.get("cache_usage_reported") is True:
+            self._cache_reported += 1
+            self._cache_read_reported += response.usage.cache_read_tokens
+            self._cache_write_reported += response.usage.cache_write_tokens
+        else:
+            self._cache_unknown += 1
 
     def history(self, session_id: str) -> tuple[ModelMessage, ...]:
         return tuple(self._state(session_id).history)
@@ -262,8 +356,11 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                 len(state.history),
             )
             with capture_run_messages() as messages:
+                recovery: _ContextOverflowRecovery[AgentDepsT] | None = None
                 try:
                     async with deadline:
+                        compaction, fallback = self._compaction()
+                        recovery = _ContextOverflowRecovery(fallback)
                         result = await self._agent.run(
                             user_prompt,
                             conversation_id=session_id,
@@ -278,9 +375,10 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                                     if self._archive is not None
                                     else ()
                                 ),
-                                _RequestLogging[AgentDepsT](session_id),
-                                self._compaction(),
+                                _RequestLogging[AgentDepsT](session_id, self._observe_cache),
+                                compaction,
                                 self._memory(session_id),
+                                recovery,
                                 *capabilities,
                             ),
                             toolsets=[self._board_tools(session_id)],
@@ -294,6 +392,9 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                     outcome = "output_token_limit"
                     turn = Stopped(outcome)
                 except UnexpectedModelBehavior as error:
+                    if recovery is not None and recovery.pending_error is not None:
+                        self._failure = ExecutionFailure("provider", "model request failed")
+                        raise self._failure from error
                     # These native PydanticAI errors have no dedicated subtype.
                     # Only exhausted turn budgets are recoverable; other failures abort.
                     if re.fullmatch(
@@ -367,11 +468,11 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                         usage.input_tokens,
                         usage.output_tokens,
                     )
+                    state.usage.incr(usage)
+                    self._usage.incr(usage)
                 if isinstance(turn, Stopped):
                     self._close_stopped_turn(messages)
                 state.history = list(messages)
-                state.usage.incr(usage)
-                self._usage.incr(usage)
                 return turn
 
     @staticmethod
@@ -420,7 +521,9 @@ class AgentSessions[AgentDepsT, OutputDataT]:
             injection_errors="raise",
         )
 
-    def _compaction(self) -> TieredCompaction[AgentDepsT]:
+    def _compaction(
+        self,
+    ) -> tuple[TieredCompaction[AgentDepsT], _Compaction[AgentDepsT]]:
         settings = self._settings
         model = self._agent.model
         if model is None:
@@ -441,8 +544,11 @@ class AgentSessions[AgentDepsT, OutputDataT]:
             receipts=True,
         )
         fallback = _Compaction[AgentDepsT]([summarizer, sliding])
-        return TieredCompaction(
-            tiers=[fallback],
-            target_fraction=settings.compaction_trigger_fraction,
-            context_window=settings.context_window_tokens,
+        return (
+            TieredCompaction(
+                tiers=[fallback],
+                target_fraction=settings.compaction_trigger_fraction,
+                context_window=settings.context_window_tokens,
+            ),
+            fallback,
         )

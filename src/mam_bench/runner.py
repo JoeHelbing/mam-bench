@@ -13,6 +13,7 @@ from pydantic_ai.models import Model
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import BenchmarkConfig, ModelSelection
 from mam_bench.diagnostics import ExecutionFailure, failure_trace
+from mam_bench.model_setup import resolve_model_setup
 from mam_bench.runtime import CaseRuntime, create_model
 from mam_bench.simulations.civil_violence.results import EvaluationResult as CivilViolenceResult
 from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
@@ -76,12 +77,17 @@ class BenchmarkRunner:
             if on_output_directory is not None:
                 on_output_directory(self.output_directory)
             writer.write("config.json", self.config)
-            model = self.model_factory(self.config.model)
+            setup = await resolve_model_setup(self.config.model)
+            writer.write(
+                "effective-model.json",
+                {"model": setup.selection.model_dump(mode="json"), "metadata": setup.metadata},
+            )
+            model = self.model_factory(setup.selection)
             for case_index, settings in enumerate(self.config.cases):
                 case_writer = ArtifactWriter(
                     self.output_directory / "cases" / f"{case_index + 1:03d}"
                 )
-                runtime = CaseRuntime(model, self.config.model.settings, case_writer)
+                runtime = CaseRuntime(model, setup.selection.settings, case_writer)
                 simulation = (
                     SchellingSim(settings)
                     if isinstance(settings, SchellingSettings)
@@ -100,7 +106,7 @@ class BenchmarkRunner:
                 if on_case is not None:
                     on_case(case_index, result)
             case_index, case_writer = None, None
-            result = BenchmarkResult(model=self.config.model, cases=tuple(self.results))
+            result = BenchmarkResult(model=setup.selection, cases=tuple(self.results))
             writer.write("benchmark.json", result)
             return result
         except BaseException as error:

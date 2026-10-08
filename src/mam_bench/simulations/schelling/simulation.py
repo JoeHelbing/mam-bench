@@ -1,10 +1,12 @@
 """Schelling owns paired evaluation, scheduling, settlement, and persistence."""
 
+import logging
 from typing import Literal
 
 import numpy as np
 from anyio import Lock
 from pydantic_ai import ModelRetry
+from pydantic_core import to_jsonable_python
 
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.runtime import CaseRuntime
@@ -188,7 +190,26 @@ class SchellingSim:
         )
         reference_outcome = await self.run(writer, "ordinary")
         controlled.reference_homophily = reference_outcome.homophily[-1]
-        controlled_outcome = await controlled.run(writer, "controlled")
+
+        def record_usage() -> None:
+            assert controlled.sessions is not None
+            writer.write(
+                "usage.json",
+                {
+                    "usage": to_jsonable_python(controlled.sessions.usage),
+                    "cache_observation": controlled.sessions.cache_observation,
+                },
+            )
+
+        try:
+            controlled_outcome = await controlled.run(writer, "controlled")
+        except BaseException:
+            try:
+                record_usage()
+            except OSError:
+                logging.getLogger(__name__).error("case.usage_record.failed")
+            raise
+        record_usage()
         result = EvaluationResult(
             config=self.settings,
             controlled_agent_ids=ids,

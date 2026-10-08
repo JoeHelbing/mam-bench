@@ -25,6 +25,25 @@ from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, ModelSelection, OpenAICompatibleModel
 
 
+class _RouterModel(OpenRouterModel):
+    """Preserve whether cache telemetry was actually reported by the provider."""
+
+    def _process_response(self, response: ChatCompletion | str) -> ModelResponse:
+        result = super()._process_response(response)
+        reported = False
+        if isinstance(response, ChatCompletion) and response.usage is not None:
+            details = response.usage.prompt_tokens_details
+            reported = details is not None and (
+                details.cached_tokens is not None
+                or getattr(details, "cache_write_tokens", None) is not None
+            )
+        result.provider_details = {
+            **(result.provider_details or {}),
+            "cache_usage_reported": reported,
+        }
+        return result
+
+
 @dataclass(frozen=True)
 class CaseRuntime:
     """Model access, agent settings, and artifacts for exactly one test case."""
@@ -104,9 +123,31 @@ def create_model(selection: ModelSelection) -> Model:
         )
     else:
         settings = OpenRouterSettings()  # pyright: ignore[reportCallIssue]
-        model = OpenRouterModel(
+        for parameter in selection.omitted_parameters:
+            if parameter in ("temperature", "top_p"):
+                request_settings.pop(parameter, None)
+            elif parameter == "top_k":
+                request_settings.pop("extra_body", None)
+        router_settings = OpenRouterModelSettings(
+            **request_settings,
+            openrouter_provider={
+                "only": [selection.provider],
+                "allow_fallbacks": False,
+                "require_parameters": True,
+            },
+        )
+        if "reasoning" not in selection.omitted_parameters:
+            router_settings["openrouter_reasoning"] = {"effort": agent_settings.reasoning_effort}
+        if selection.cache_strategy == "explicit":
+            router_settings["openrouter_cache_instructions"] = True
+            router_settings["openrouter_cache_messages"] = True
+            router_settings["openrouter_cache_tool_definitions"] = True
+        model = _RouterModel(
             selection.model,
             profile=OpenRouterModelProfile(
+                openai_chat_supports_max_completion_tokens=(
+                    selection.completion_token_parameter == "max_completion_tokens"
+                ),
                 openai_supports_tool_choice_required=force_tools,
                 openai_supports_forced_tool_choice_with_thinking=force_tools,
                 openrouter_supports_forced_tool_choice_with_thinking=force_tools,
@@ -118,15 +159,7 @@ def create_model(selection: ModelSelection) -> Model:
                     default_headers={"X-Title": "MAM-Bench"},
                 )
             ),
-            settings=OpenRouterModelSettings(
-                **request_settings,
-                openrouter_provider={
-                    "only": [selection.provider],
-                    "allow_fallbacks": False,
-                    "require_parameters": True,
-                },
-                openrouter_reasoning={"effort": agent_settings.reasoning_effort},
-            ),
+            settings=router_settings,
         )
 
     return model

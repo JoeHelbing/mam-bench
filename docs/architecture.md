@@ -2,9 +2,12 @@
 
 For either simulation, start at [main.py](../main.py): parse an explicit model file
 and suite, then [config.py](../src/mam_bench/config.py) validates the complete nested
-configuration. [BenchmarkRunner](../src/mam_bench/runner.py) creates one provider,
-one fresh `CaseRuntime` and writer per case, constructs the selected simulation,
-and awaits `evaluate(runtime)`. It never steps a world.
+configuration. For OpenRouter, [model_setup.py](../src/mam_bench/model_setup.py)
+resolves the selected provider's endpoint metadata, YAML choices, token budgets,
+and prompt-cache policy once before any case. The runner records both the input
+config and effective setup, then creates one provider, one fresh `CaseRuntime`
+and writer per case, constructs the selected simulation, and awaits
+`evaluate(runtime)`. It never steps a world.
 
 For Schelling, [simulation.py](../src/mam_bench/simulations/schelling/simulation.py)
 constructs two distinct worlds through the same constructor, executes its single

@@ -4,6 +4,8 @@ from decimal import Decimal
 from typing import cast
 from unittest.mock import patch
 
+import httpx2 as httpx
+from openai import AsyncOpenAI
 from pydantic_ai import Agent, ModelMessage, ToolOutput, UsageLimits
 from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior
 from pydantic_ai.messages import (
@@ -19,6 +21,8 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.openrouter import OpenRouterModel
+from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.usage import RequestUsage
 from pydantic_ai_harness.memory import InMemoryStore, MemoryFile
 
@@ -169,7 +173,274 @@ class CompactionModel:
         return _response(TextPart(f"normal-{self.normal_requests}"), cost=self.normal_cost)
 
 
+def _openrouter_response(content: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "id": "gen-test",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "test/model",
+            "provider": "test",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+        },
+    )
+
+
+def _openrouter_agent(handler: httpx.MockTransport) -> Agent[None, str]:
+    client = AsyncOpenAI(
+        api_key="test-key",
+        base_url="https://openrouter.ai/api/v1",
+        http_client=httpx.AsyncClient(transport=handler),
+    )
+    model = OpenRouterModel("test/model", provider=OpenRouterProvider(openai_client=client))
+    return Agent(model)
+
+
 class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_verified_openrouter_overflow_compacts_and_retries_one_request(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def route(request: httpx.Request) -> httpx.Response:
+            import json
+
+            payload = cast(dict[str, object], json.loads(request.content))
+            calls.append(payload)
+            if len(calls) == 2:
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "code": 400,
+                            "message": "This endpoint's maximum context length was exceeded",
+                            "metadata": {"error_type": "context_length_exceeded"},
+                        }
+                    },
+                )
+            if len(calls) == 3:
+                return _openrouter_response("## Current state\nThe prior conversation is retained.")
+            return _openrouter_response("ok")
+
+        runtime = AgentSessions(
+            _openrouter_agent(httpx.MockTransport(route)),
+            settings=AgentSettings(
+                context_window_tokens=10_000,
+                compaction_tail_tokens=300,
+                summary_completion_tokens=32,
+            ),
+        )
+        self.assertEqual(await runtime.run("a", "A" * 600, deps=None), Completed("ok"))
+        self.assertEqual(await runtime.run("a", "new observation", deps=None), Completed("ok"))
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(runtime.usage.requests, 3)  # rejected calls have no provider usage
+        history = runtime.history("a")
+        self.assertTrue(
+            any(
+                isinstance(part, SystemPromptPart)
+                and "Summary of previous conversation" in part.content
+                for message in history
+                if isinstance(message, ModelRequest)
+                for part in message.parts
+            )
+        )
+        self.assertTrue(
+            any(
+                "new observation" in _request_text(message)
+                for message in history
+                if isinstance(message, ModelRequest)
+            )
+        )
+        _assert_complete_tool_history(list(history))
+
+    async def test_ambiguous_openrouter_400_does_not_retry(self) -> None:
+        calls = 0
+
+        def route(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            del request
+            calls += 1
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": 400,
+                        "message": "context length exceeded?",
+                        "metadata": {"error_type": "invalid_request"},
+                    }
+                },
+            )
+
+        runtime = AgentSessions(_openrouter_agent(httpx.MockTransport(route)))
+        with self.assertRaisesRegex(ExecutionFailure, "model request failed"):
+            await runtime.run("a", "go", deps=None)
+        self.assertEqual(calls, 1)
+
+    async def test_overflow_without_compactable_history_fails_before_retry(self) -> None:
+        import json
+
+        requests: list[dict[str, object]] = []
+
+        def route(request: httpx.Request) -> httpx.Response:
+            requests.append(cast(dict[str, object], json.loads(request.content)))
+            if len(requests) == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "gen-tool",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "test/model",
+                        "provider": "test",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": [
+                                        {
+                                            "id": "post-once",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "post_message",
+                                                "arguments": '{"text":"once"}',
+                                            },
+                                        }
+                                    ],
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+                    },
+                )
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": 400,
+                        "message": "overflow",
+                        "metadata": {"error_type": "context_length_exceeded"},
+                    }
+                },
+            )
+
+        runtime = AgentSessions(_openrouter_agent(httpx.MockTransport(route)))
+        with self.assertRaisesRegex(ExecutionFailure, "model request failed"):
+            await runtime.run("a", "new observation", deps=None)
+        self.assertEqual(len(requests), 2)  # neither a summarization nor a retry request was sent
+        self.assertIn("new observation", str(requests[0]["messages"]))
+        self.assertIn("post-once", str(requests[1]["messages"]))  # tool return sent unchanged
+        self.assertEqual((await runtime.board.read("b")).content.count("once"), 1)
+
+    async def test_second_overflow_fails_without_another_retry(self) -> None:
+        calls = 0
+
+        def route(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            del request
+            calls += 1
+            if calls == 1:
+                return _openrouter_response("old")
+            if calls == 3:
+                return _openrouter_response("## Current state\nOld history summarized.")
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": 400,
+                        "message": "overflow",
+                        "metadata": {"error_type": "context_length_exceeded"},
+                    }
+                },
+            )
+
+        runtime = AgentSessions(
+            _openrouter_agent(httpx.MockTransport(route)),
+            settings=AgentSettings(context_window_tokens=10_000, compaction_tail_tokens=300),
+        )
+        self.assertEqual(await runtime.run("a", "A" * 600, deps=None), Completed("old"))
+        with self.assertRaisesRegex(ExecutionFailure, "model request failed"):
+            await runtime.run("a", "new observation", deps=None)
+        self.assertEqual(calls, 4)
+
+    async def test_overflow_after_tool_effect_does_not_replay_tool_or_turn(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def route(request: httpx.Request) -> httpx.Response:
+            import json
+
+            payload = cast(dict[str, object], json.loads(request.content))
+            calls.append(payload)
+            if len(calls) == 2:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "gen-tool",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "test/model",
+                        "provider": "test",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": [
+                                        {
+                                            "id": "post-once",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "post_message",
+                                                "arguments": '{"text":"once"}',
+                                            },
+                                        }
+                                    ],
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+                    },
+                )
+            if len(calls) == 3:
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "code": 400,
+                            "message": "overflow",
+                            "metadata": {"error_type": "context_length_exceeded"},
+                        }
+                    },
+                )
+            if len(calls) == 4:
+                return _openrouter_response("## Current state\nPost already sent.")
+            return _openrouter_response("done")
+
+        runtime = AgentSessions(
+            _openrouter_agent(httpx.MockTransport(route)),
+            settings=AgentSettings(context_window_tokens=10_000, compaction_tail_tokens=500),
+        )
+        self.assertEqual(await runtime.run("a", "A" * 1200, deps=None), Completed("done"))
+        self.assertEqual(await runtime.run("a", "post now", deps=None), Completed("done"))
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(
+            runtime.usage.requests, 4
+        )  # two turns and the summary; rejected request unbilled
+        self.assertEqual(runtime.usage.tool_calls, 1)
+        _assert_complete_tool_history(list(runtime.history("a")))
+        page = await runtime.board.read("b")
+        self.assertEqual(page.content.count("once"), 1)
+
     async def test_truncated_tool_call_ends_turn_and_preserves_valid_history(self) -> None:
         calls = 0
         truncate = True
@@ -227,6 +498,40 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(await runtime.run("a", "again", deps=None), Completed("recovered"))
+
+    async def test_cache_observation_distinguishes_reported_zero_from_unknown(self) -> None:
+        calls = 0
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal calls
+            del messages, info
+            calls += 1
+            if calls == 1:
+                return ModelResponse(
+                    parts=[TextPart("first")],
+                    usage=RequestUsage(
+                        input_tokens=5, output_tokens=2, cache_read_tokens=2, cache_write_tokens=0
+                    ),
+                    provider_details={"cache_usage_reported": True},
+                )
+            return _response(TextPart("second"))
+
+        runtime = AgentSessions(Agent(FunctionModel(model)))
+        self.assertEqual(await runtime.run("a", "first", deps=None), Completed("first"))
+        self.assertEqual(
+            runtime.cache_observation,
+            {"reported_responses": 1, "unknown_responses": 0, "read_tokens": 2, "write_tokens": 0},
+        )
+        self.assertEqual(await runtime.run("a", "second", deps=None), Completed("second"))
+        self.assertEqual(
+            runtime.cache_observation,
+            {
+                "reported_responses": 1,
+                "unknown_responses": 1,
+                "read_tokens": None,
+                "write_tokens": None,
+            },
+        )
 
     async def test_private_memory_and_history(self) -> None:
         model = MemoryModel()

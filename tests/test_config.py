@@ -159,6 +159,29 @@ class ConfigurationTests(unittest.TestCase):
             with self.subTest(fraction=fraction):
                 self.assertEqual(schelling(vacancy_fraction=fraction).vacancy_count, 16)
 
+    def test_openrouter_prompt_cache_and_required_provider(self) -> None:
+        from mam_bench.config import OpenRouterModel
+
+        base = {"runtime": "openrouter", "model": "vendor/model", "provider": "provider"}
+        self.assertEqual(OpenRouterModel.model_validate(base).prompt_cache, "auto")
+        for value in ("auto", "required", "off"):
+            self.assertEqual(
+                OpenRouterModel.model_validate({**base, "prompt_cache": value}).prompt_cache, value
+            )
+        for updates in (
+            {"provider": ""},
+            {"provider": " "},
+            {"prompt_cache": True},
+            {"prompt_cache": "yes"},
+            {"model": "no-vendor"},
+        ):
+            with self.subTest(updates=updates), self.assertRaises(ValidationError):
+                OpenRouterModel.model_validate({**base, **updates})
+        with self.assertRaises(ValidationError):
+            OpenRouterModel.model_validate({"runtime": "openrouter", "model": "vendor/model"})
+        selected = OpenRouterModel.model_validate({**base, "settings": {"temperature": 1.0}})
+        self.assertEqual(selected.settings.model_fields_set, {"temperature"})
+
     def test_agent_budget_and_sampling_settings_validate(self) -> None:
         for settings in (
             {"concurrency": 0},

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Annotated, Literal, Self, cast
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from mam_bench.simulations.civil_violence.settings import CivilViolenceSettings
 from mam_bench.simulations.schelling.settings import SchellingSettings
@@ -35,7 +35,10 @@ class AgentSettings(BaseModel):
     def validate_compaction_tail(self) -> Self:
         """Keep the verbatim tail below the threshold that triggers compaction."""
         trigger_tokens = self.context_window_tokens * self.compaction_trigger_fraction
-        if self.compaction_tail_tokens >= trigger_tokens:
+        if (
+            self.compaction_tail_tokens >= trigger_tokens
+            and "compaction_tail_tokens" in self.model_fields_set
+        ):
             raise ValueError("compaction_tail_tokens must be below the compaction trigger")
         return self
 
@@ -46,9 +49,46 @@ class OpenRouterModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     runtime: Literal["openrouter"]
-    model: str
-    provider: str
+    model: str = Field(min_length=1, pattern=r"^\S+/\S+$")
+    provider: str = Field(min_length=1, pattern=r"^\S(?:.*\S)?$")
+    prompt_cache: Literal["auto", "required", "off"] = "auto"
     settings: AgentSettings = AgentSettings()
+
+    # Derived by preflight, never accepted as user configuration.
+    _omitted_parameters: frozenset[str] = PrivateAttr(default_factory=frozenset)
+    _cache_strategy: Literal["explicit", "implicit", "unverified", "off"] = PrivateAttr(
+        default="unverified"
+    )
+
+    _completion_token_parameter: Literal["max_tokens", "max_completion_tokens"] = PrivateAttr(
+        default="max_tokens"
+    )
+
+    @property
+    def completion_token_parameter(self) -> Literal["max_tokens", "max_completion_tokens"]:
+        return self._completion_token_parameter
+
+    @property
+    def omitted_parameters(self) -> frozenset[str]:
+        return self._omitted_parameters
+
+    @property
+    def cache_strategy(self) -> Literal["explicit", "implicit", "unverified", "off"]:
+        return self._cache_strategy
+
+    def with_setup(
+        self,
+        settings: AgentSettings,
+        omitted_parameters: frozenset[str],
+        cache_strategy: Literal["explicit", "implicit", "unverified", "off"],
+        completion_token_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens",
+    ) -> Self:
+        """Attach verified runtime decisions without adding YAML configuration fields."""
+        resolved = self.model_copy(update={"settings": settings})
+        resolved._omitted_parameters = omitted_parameters
+        resolved._cache_strategy = cache_strategy
+        resolved._completion_token_parameter = completion_token_parameter
+        return resolved
 
 
 class OpenAICompatibleModel(BaseModel):
@@ -61,6 +101,15 @@ class OpenAICompatibleModel(BaseModel):
     base_url: str
     api_key_env: str
     settings: AgentSettings = AgentSettings()
+
+    @model_validator(mode="after")
+    def validate_compaction_tail(self) -> Self:
+        settings = self.settings
+        if settings.compaction_tail_tokens >= (
+            settings.context_window_tokens * settings.compaction_trigger_fraction
+        ):
+            raise ValueError("compaction_tail_tokens must be below the compaction trigger")
+        return self
 
 
 ModelSelection = Annotated[

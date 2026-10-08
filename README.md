@@ -100,8 +100,9 @@ uv run --no-sync main.py --model .scratch/model.yaml --output results/default
 ```
 
 **This makes real model requests and can incur substantial charges.** Check
-endpoint support and pricing before running all six cases. Each invocation
-creates a new output directory and does not overwrite a previous run. Results
+endpoint support, data-use terms, and pricing before running all six cases.
+Each invocation creates a new output directory and does not overwrite a
+previous run. Results
 include model conversations; handle them as sensitive data. See
 [artifacts and failures](docs/artifacts-and-failures.md) for the saved records
 and failure behavior.
@@ -115,12 +116,35 @@ uv run --no-sync main.py --model .scratch/model.yaml \
 
 The [custom suite guide](docs/custom-test-suite.md) lists every allowed field.
 The shipped cases select `max_steps: 30`; custom cases can choose another
-positive integer in either simulation. For OpenRouter instead, select
+positive integer in either simulation. For OpenRouter, select
 `runtime: openrouter` with `model` and `provider` in the model YAML, and set
-`OPENROUTER_API_KEY` in the environment or `.env`. Model sampling, tool choice,
-request budgets, and compaction settings are validated in
-[config.py](src/mam_bench/config.py). If you use mise, `mise install` and
-`mise run setup` prepare the pinned project tools and dependencies.
+`OPENROUTER_API_KEY` in the environment or `.env`:
+
+```yaml
+runtime: openrouter
+model: meta/muse-spark-1.3-contributor
+provider: meta
+prompt_cache: auto
+settings:
+  reasoning_effort: medium
+  tool_choice: auto
+```
+
+Meta's live Muse endpoint rejected `required` even though its metadata
+advertised support, so this example selects `auto` explicitly. OpenRouter
+setup checks the selected provider's endpoint descriptions before the
+first case. It derives safe token and compaction budgets and omits unsupported
+*default* request fields; an explicitly requested unsupported setting fails
+instead of being silently changed. `prompt_cache` can be `auto` (default),
+`required`, or `off`. `required` needs published cache support, but metadata
+can miss real cache reads; `auto` records observed usage even then. A cache hint
+never guarantees a hit, and `off` cannot stop an upstream provider from caching
+implicitly. The original
+YAML and effective model setup are both saved with the run. Model sampling,
+tool choice, and request budgets are validated in [config.py](src/mam_bench/config.py)
+and resolved in [model_setup.py](src/mam_bench/model_setup.py). If you use mise,
+`mise install` and `mise run setup` prepare the pinned project tools and
+dependencies.
 
 ## Reference
 

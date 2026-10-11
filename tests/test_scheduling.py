@@ -14,21 +14,19 @@ class TurnSchedulerTests(unittest.IsolatedAsyncioTestCase):
         accepted: list[int] = []
 
         async def act(identity: int) -> None:
-            await scheduler.wait_turn(identity)
             accepted.append(identity)
 
         await scheduler.run(step=0, phase="citizen", selected=(2, 1), ordinary=(4, 3), act=act)
         self.assertEqual(set(accepted[:2]), {1, 2})
         self.assertEqual(set(accepted[2:]), {3, 4})
 
-    async def test_priority_ignores_caller_order_and_rejects_overlap(self) -> None:
+    async def test_admission_ignores_caller_order_and_rejects_overlap(self) -> None:
         scheduler = TurnScheduler(seed=77, concurrency=3)
 
         async def order(selected: Iterable[int], ordinary: Iterable[int]) -> list[int]:
             accepted: list[int] = []
 
             async def act(identity: int) -> None:
-                await scheduler.wait_turn(identity)
                 accepted.append(identity)
 
             await scheduler.run(
@@ -42,7 +40,7 @@ class TurnSchedulerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await order((1,), (1,))
 
-    async def test_priority_is_fixed_when_later_decisions_finish_first(self) -> None:
+    async def test_ready_turns_finish_without_waiting_for_earlier_turns(self) -> None:
         scheduler = TurnScheduler(seed=71, concurrency=4)
         identities = [4, 3, 2, 1]
         expected = sorted(identities)
@@ -51,64 +49,68 @@ class TurnSchedulerTests(unittest.IsolatedAsyncioTestCase):
         all_started = asyncio.Event()
         started: set[int] = set()
         accepted: list[int] = []
+        accepted_later = asyncio.Event()
 
         async def act(identity: int) -> None:
             started.add(identity)
             if len(started) == len(identities):
                 all_started.set()
             await completed[identity].wait()
-            await scheduler.wait_turn(identity)
             accepted.append(identity)
+            if len(accepted) == len(identities) - 1:
+                accepted_later.set()
 
         run = asyncio.create_task(
             scheduler.run(step=0, phase="police", selected=identities, ordinary=(), act=act)
         )
-        await asyncio.wait_for(all_started.wait(), 1)
-        for identity in reversed(expected[1:]):
-            completed[identity].set()
-        await asyncio.sleep(0)
-        self.assertEqual(accepted, [])
-        completed[expected[0]].set()
-        await asyncio.wait_for(run, 1)
-        self.assertEqual(accepted, expected)
+        try:
+            await asyncio.wait_for(all_started.wait(), 1)
+            for identity in reversed(expected[1:]):
+                completed[identity].set()
+            await asyncio.wait_for(accepted_later.wait(), 1)
+            self.assertEqual(accepted, list(reversed(expected[1:])))
+            self.assertFalse(run.done())
+        finally:
+            completed[expected[0]].set()
+            await asyncio.wait_for(run, 1)
+        self.assertEqual(accepted[-1], expected[0])
 
-    async def test_retry_keeps_turn_until_callback_finishes(self) -> None:
+    async def test_retry_does_not_block_other_turns(self) -> None:
         scheduler = TurnScheduler(seed=1, concurrency=2)
         order = [1, 2]
         scheduler.rng(0, "police", 0, "_order_selected").shuffle(order)
         first_attempted = asyncio.Event()
         release_first = asyncio.Event()
         accepted: list[int] = []
+        second_finished = asyncio.Event()
 
         async def act(identity: int) -> None:
             if identity == order[0]:
-                await scheduler.wait_turn(identity)
                 first_attempted.set()  # A rejected model claim returns to its caller.
                 await release_first.wait()
-                await scheduler.wait_turn(identity)  # Retry/fallback keeps priority.
-            else:
-                await scheduler.wait_turn(identity)
             accepted.append(identity)
+            if identity == order[1]:
+                second_finished.set()
 
         run = asyncio.create_task(
             scheduler.run(step=0, phase="police", selected=(1, 2), ordinary=(), act=act)
         )
-        await asyncio.wait_for(first_attempted.wait(), 1)
-        with self.assertRaises(ValueError):
-            await scheduler.wait_turn(999)
-        await asyncio.sleep(0)
-        self.assertEqual(accepted, [])
-        release_first.set()
-        await asyncio.wait_for(run, 1)
-        self.assertEqual(accepted, order)
+        try:
+            await asyncio.wait_for(first_attempted.wait(), 1)
+            await asyncio.wait_for(second_finished.wait(), 1)
+            self.assertEqual(accepted, [order[1]])
+        finally:
+            release_first.set()
+            await asyncio.wait_for(run, 1)
+        self.assertEqual(accepted, list(reversed(order)))
 
-    async def test_noop_callbacks_cannot_skip_blocked_priority_owner(self) -> None:
+    async def test_fast_turn_frees_slot_while_slow_turn_is_still_running(self) -> None:
         scheduler = TurnScheduler(seed=14, concurrency=2)
         order = list(range(3))
         scheduler.rng(0, "citizen", 0, "_order_selected").shuffle(order)
         unblock_first = asyncio.Event()
         first_two_started = asyncio.Event()
-        later_returned = asyncio.Event()
+        third_started = asyncio.Event()
         begun: list[int] = []
 
         async def act(identity: int) -> None:
@@ -117,20 +119,19 @@ class TurnSchedulerTests(unittest.IsolatedAsyncioTestCase):
                 first_two_started.set()
             if identity == order[0]:
                 await unblock_first.wait()
-            elif identity == order[1]:
-                later_returned.set()
-            # Intentionally no wait_turn: a callback may finish without a claim.
+            elif identity == order[2]:
+                third_started.set()
 
         run = asyncio.create_task(
             scheduler.run(step=0, phase="citizen", selected=range(3), ordinary=(), act=act)
         )
-        await asyncio.wait_for(first_two_started.wait(), 1)
-        await asyncio.wait_for(later_returned.wait(), 1)
-        for _ in range(3):
-            await asyncio.sleep(0)
-        self.assertEqual(begun, order[:2])
-        unblock_first.set()
-        await asyncio.wait_for(run, 1)
+        try:
+            await asyncio.wait_for(first_two_started.wait(), 1)
+            await asyncio.wait_for(third_started.wait(), 1)
+            self.assertFalse(run.done())
+        finally:
+            unblock_first.set()
+            await asyncio.wait_for(run, 1)
         self.assertEqual(begun, order)
 
     async def test_rolling_admission_never_exceeds_cap(self) -> None:
@@ -150,7 +151,6 @@ class TurnSchedulerTests(unittest.IsolatedAsyncioTestCase):
             begun.append(identity)
             if len(begun) == 2:
                 first_two_started.set()
-            await scheduler.wait_turn(identity)
             await unblock.wait()
             active -= 1
 
@@ -190,12 +190,9 @@ class TurnSchedulerTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(begun, order[:2])
         self.assertEqual(cancelled, [order[0]])
-        with self.assertRaises(ValueError):
-            await scheduler.wait_turn(order[0])
         accepted: list[int] = []
 
         async def again(identity: int) -> None:
-            await scheduler.wait_turn(identity)
             accepted.append(identity)
 
         await scheduler.run(step=1, phase="citizen", selected=(7,), ordinary=(), act=again)
@@ -226,8 +223,6 @@ class TurnSchedulerTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(run, 1)
         self.assertEqual(cancelled, begun)
         self.assertEqual(len(begun), 2)
-        with self.assertRaises(ValueError):
-            await scheduler.wait_turn(3)
 
     async def test_simultaneous_failures_leave_no_unretrieved_exception(self) -> None:
         scheduler = TurnScheduler(seed=4, concurrency=2)

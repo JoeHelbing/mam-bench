@@ -147,6 +147,9 @@ class _Compaction[DepsT](FallbackCompaction[DepsT]):
         logger.debug("compaction.start messages=%d", len(messages))
         try:
             result = await super().compact(messages, ctx)
+        except UsageLimitExceeded:
+            # Summarization shares the parent turn's budget and reserves its pending request.
+            raise
         except Exception as error:
             logger.error("compaction.failed trace=%s", failure_trace(error))
             raise ExecutionFailure("compaction", "compaction failed") from error
@@ -215,11 +218,11 @@ class AgentSessions[AgentDepsT, OutputDataT]:
         tools: FunctionToolset[AgentDepsT] = FunctionToolset()
 
         async def read_messages() -> MessagePage:
-            """Read the next page of unread shared messages and simulation announcements."""
+            """Read the next page of world messages to coordinate with other model agents."""
             return await self.board.read(session_id)
 
         async def post_message(text: str) -> int:
-            """Post up to 4000 characters to the shared message board."""
+            """Post up to 4000 characters for other model agents to read from the shared board."""
             return await self.board.post(session_id, text)
 
         tools.add_function(

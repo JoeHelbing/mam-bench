@@ -413,6 +413,28 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await runtime.run("a", "go", deps=None), Stopped("retry_exhaustion"))
         self.assertEqual(runtime.usage.requests, 3)
 
+    async def test_compaction_request_budget_stops_turn_and_preserves_session(self) -> None:
+        model = CompactionModel()
+        runtime = AgentSessions(
+            Agent(FunctionModel(model)),
+            settings=AgentSettings(
+                context_window_tokens=200,
+                compaction_trigger_fraction=0.5,
+                compaction_tail_tokens=20,
+                summary_completion_tokens=16,
+                memory_injection_tokens=100,
+            ),
+        )
+        self.assertEqual(await runtime.run("a", "A" * 600, deps=None), Completed("normal-1"))
+        self.assertEqual(
+            await runtime.run("a", "B" * 600, deps=None, usage_limits=UsageLimits(request_limit=1)),
+            Stopped("usage_limit"),
+        )
+        self.assertEqual(runtime.usage.requests, 1)
+        self.assertEqual(model.summary_requests, 0)
+        self.assertEqual(await runtime.run("a", "C" * 600, deps=None), Completed("normal-2"))
+        self.assertEqual(model.summary_requests, 1)
+
     async def test_compaction_fallback_and_unrecoverable_failure(self) -> None:
         settings = AgentSettings(
             context_window_tokens=200,

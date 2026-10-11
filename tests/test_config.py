@@ -92,7 +92,7 @@ class ConfigurationTests(unittest.TestCase):
             "simulation": "schelling",
             "tolerance": 0.7,
             "vacancy_fraction": 0.15,
-            "vision_radius": 1,
+            "vision_radius": 2,
             "seed": 10002,
         }
         citizen_settings = {

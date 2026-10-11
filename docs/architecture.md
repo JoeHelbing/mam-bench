@@ -31,7 +31,7 @@ Both use [sessions.py](../src/mam_bench/sessions.py) for individual model turns,
 private history/memory, and communication. Instructions carry identity, goal,
 and standing rules; user inputs contain changing JSON observations. Each
 simulation owns legality and settlement. [scheduling.py](../src/mam_bench/scheduling.py)
-shares cohort ordering, concurrent admission, claim gates, failure cleanup, and
+shares cohort ordering, concurrent admission, failure cleanup, and
 addressed random streams. [artifacts.py](../src/mam_bench/artifacts.py) writes supplied
 records and preserves native archives. The runner retains case
 results, and `BenchmarkResult.total_score` sums their calculated scores.

@@ -226,7 +226,7 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertAlmostEqual(result.score, direction * expected)
 
-    async def test_collisions_follow_priority_not_response_speed(self) -> None:
+    async def test_fast_agent_claims_before_slow_agent_and_collision_retries(self) -> None:
         release, faster_response = asyncio.Event(), asyncio.Event()
         slower_started = asyncio.Event()
         calls: dict[str, int] = {}
@@ -261,7 +261,7 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             sim = SchellingSim(
                 schelling(), runtime=runtime(Path(directory) / "case", FunctionModel(script))
             )
-            # Callback arrival is deliberately not the scheduler's claim priority.
+            # Delay the first admitted agent so the second claims the shared square.
             priority = list(sim.settings.controlled_agent_ids)
             sim.scheduler.rng(0, "schelling", 0, "_order_selected").shuffle(priority)
             order = [str(identity) for identity in priority]
@@ -271,15 +271,19 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(sim.step())
             try:
                 await asyncio.wait_for(faster_response.wait(), 3)
+                async with asyncio.timeout(3):
+                    while vacancies[0] in sim.available:
+                        await asyncio.sleep(0)
                 self.assertEqual(sim.snapshot(), initial)
                 self.assertFalse(task.done())
             finally:
                 release.set()
                 await asyncio.wait_for(task, 3)
             self.assertEqual(maximum, 2)
-            self.assertEqual(calls[order[1]], 2)
-            self.assertEqual(int(sim.board.locations[int(order[0])]), vacancies[0])
-            self.assertEqual(int(sim.board.locations[int(order[1])]), vacancies[1])
+            self.assertEqual(calls[order[1]], 1)
+            self.assertEqual(calls[order[0]], 2)
+            self.assertEqual(int(sim.board.locations[int(order[1])]), vacancies[0])
+            self.assertEqual(int(sim.board.locations[int(order[0])]), vacancies[1])
             self.assertTrue(all(a is b for a, b in zip(agents, sim.agents, strict=True)))
 
     async def test_model_turn_leaves_ordinary_random_slots_and_world_unchanged(self) -> None:

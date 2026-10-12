@@ -59,7 +59,7 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("APITimeoutError", log)
         self.assertNotIn("SECRET", log)
 
-    async def test_request_logs_metadata_without_content(self) -> None:
+    async def test_turn_summary_logs_usage_without_content(self) -> None:
         count = 0
 
         async def scripted(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -75,8 +75,8 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 await runtime.run("a", "PRIVATE INPUT", deps=None), Completed("PRIVATE OUTPUT")
             )
         log = "\n".join(captured.output)
-        self.assertIn("request.start", log)
-        self.assertIn("request.end", log)
-        self.assertIn("post_message", log)
+        self.assertIn("turn.start", log)
+        self.assertIn("turn.end", log)
+        self.assertIn("tools=1", log)
         self.assertIn("requests=2", log)
         self.assertNotIn("PRIVATE", log)

@@ -6,6 +6,9 @@ license = "Apache-2.0"
 requires-python = ">=3.14"
 dependencies = [
     "numpy>=2.5.2",
+    "opentelemetry-exporter-otlp-proto-http==1.44.0",
+    "opentelemetry-instrumentation-logging==0.65b0",
+    "opentelemetry-sdk==1.44.0",
     "pydantic>=2.13.5",
     "pydantic-ai-harness>=0.29,<0.30",
     "pydantic-ai-slim[openai]>=2.38.0",

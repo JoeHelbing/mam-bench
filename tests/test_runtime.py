@@ -248,6 +248,49 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                         for name in ("move", "post_message"):
                             self.assertIs(by_name[name].get("strict"), True)
 
+    async def test_vllm_repetition_stop_retains_cause_without_provider_failure(self) -> None:
+        model = create_model(
+            OpenAICompatibleModel.model_validate(
+                {
+                    "runtime": "openai-compatible",
+                    "model": "test-model",
+                    "base_url": "https://compatible.example.test/v1",
+                    "api_key_env": "COMPAT_TEST_API_KEY",
+                    "repetition_detection": {},
+                }
+            )
+        )
+        assert isinstance(model, OpenAIChatModel)
+        self.addAsyncCleanup(model.client.close)
+        answer = completion()
+        # The SDK constructs responses without validating vendor finish reasons.
+        answer.choices[0] = answer.choices[0].model_copy(
+            update={"finish_reason": "repetition", "stop_reason": "repetition_detected"}
+        )
+        request = AsyncMock(return_value=answer)
+        with patch.object(model.client.chat.completions, "create", request):
+            response = await model.request(
+                [ModelRequest(parts=[UserPromptPart("Choose an action.")])],
+                None,
+                ModelRequestParameters(),
+            )
+        sent = cast(dict[str, object], request.call_args.kwargs)
+        self.assertEqual(
+            sent["extra_body"],
+            {
+                "top_k": 20,
+                "repetition_detection": {
+                    "min_pattern_size": 16,
+                    "max_pattern_size": 128,
+                    "min_count": 8,
+                },
+            },
+        )
+        self.assertEqual(response.finish_reason, "length")
+        assert response.provider_details is not None
+        self.assertEqual(response.provider_details["finish_reason"], "repetition")
+        self.assertEqual(response.provider_details["stop_reason"], "repetition_detected")
+
     async def test_civil_citizen_defer_uses_per_model_strict_schema(self) -> None:
         for strict in (False, True):
             with self.subTest(strict=strict), tempfile.TemporaryDirectory() as directory:

@@ -2,6 +2,10 @@ version = 1
 revision = 3
 requires-python = ">=3.14"
 
+[options]
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer-span = "P7D"
+
 [[package]]
 name = "annotated-types"
 version = "0.8.0"
@@ -529,9 +533,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "numpy", specifier = ">=2.5.2" },
-    { name = "opentelemetry-exporter-otlp-proto-http", specifier = "==1.44.0" },
-    { name = "opentelemetry-instrumentation-logging", specifier = "==0.65b0" },
-    { name = "opentelemetry-sdk", specifier = "==1.44.0" },
+    { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.44.0" },
+    { name = "opentelemetry-instrumentation-logging", specifier = ">=0.65b0" },
+    { name = "opentelemetry-sdk", specifier = ">=1.44.0" },
     { name = "pydantic", specifier = ">=2.13.5" },
     { name = "pydantic-ai-harness", specifier = ">=0.29,<0.30" },
     { name = "pydantic-ai-slim", extras = ["openai"], specifier = ">=2.38.0" },

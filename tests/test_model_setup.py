@@ -5,7 +5,7 @@ import unittest
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
-from mam_bench.config import AgentSettings, OpenAICompatibleModel, OpenRouterModel
+from mam_bench.config import AgentSettings, OpenRouterModel, VLLMModel
 from mam_bench.model_setup import EndpointResponse, resolve_model_setup
 
 PARAMETERS = [
@@ -157,53 +157,22 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 await resolve_model_setup(router(**values))
 
-    async def test_anthropic_cache_and_reasoning_tool_conflict(self) -> None:
-        self.metadata(endpoint(tag="anthropic", provider_name="Anthropic"))
+    async def test_required_cache_uses_native_profiles_or_implicit_endpoint_support(self) -> None:
+        self.metadata()
         selected = OpenRouterModel(
             runtime="openrouter",
             model="anthropic/claude-sonnet-4",
-            provider="anthropic",
+            provider="provider",
             prompt_cache="required",
         )
         result = await resolve_model_setup(selected)
-        self.assertIsInstance(result.selection, OpenRouterModel)
-        assert isinstance(result.selection, OpenRouterModel)
-        self.assertEqual(result.selection.cache_strategy, "explicit")
-        self.assertEqual(result.selection.settings.tool_choice, "auto")
-        with self.assertRaisesRegex(ValueError, "Claude reasoning"):
-            await resolve_model_setup(
-                selected.model_copy(update={"settings": AgentSettings(tool_choice="required")})
-            )
-
-    async def test_implicit_required_off_and_unverified_cache(self) -> None:
+        self.assertEqual(result.selection.settings.tool_choice, "required")
         self.metadata(endpoint(supports_implicit_caching=True))
-        for policy, strategy in (("auto", "implicit"), ("required", "implicit"), ("off", "off")):
-            selected = OpenRouterModel.model_validate(
-                {
-                    "runtime": "openrouter",
-                    "model": "vendor/model",
-                    "provider": "provider",
-                    "prompt_cache": policy,
-                }
-            )
-            result = await resolve_model_setup(selected)
-            assert isinstance(result.selection, OpenRouterModel)
-            self.assertEqual(result.selection.cache_strategy, strategy)
-        self.metadata(endpoint(supports_implicit_caching=False))
-        unverified = await resolve_model_setup(router())
-        assert isinstance(unverified.selection, OpenRouterModel)
-        self.assertEqual(unverified.selection.cache_strategy, "unverified")
-        with (
-            patch(
-                "mam_bench.model_setup._fetch_endpoints",
-                AsyncMock(
-                    return_value=EndpointResponse.model_validate(
-                        {"data": {"endpoints": [endpoint()]}}
-                    )
-                ),
-            ),
-            self.assertRaisesRegex(ValueError, "prompt_cache required"),
-        ):
+        await resolve_model_setup(router().model_copy(update={"prompt_cache": "required"}))
+        self.metadata()
+        await resolve_model_setup(router())
+        await resolve_model_setup(router().model_copy(update={"prompt_cache": "off"}))
+        with self.assertRaisesRegex(ValueError, "prompt_cache required"):
             await resolve_model_setup(router().model_copy(update={"prompt_cache": "required"}))
 
     async def test_azure_completion_token_parameter(self) -> None:
@@ -279,8 +248,8 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_compatible_selection_is_unchanged_without_metadata(self) -> None:
         fetch = self.metadata()
-        selected = OpenAICompatibleModel(
-            runtime="openai-compatible",
+        selected = VLLMModel(
+            runtime="vllm",
             model="local",
             base_url="http://localhost:1234",
             api_key_env="KEY",

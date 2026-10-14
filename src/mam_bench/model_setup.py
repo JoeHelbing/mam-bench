@@ -7,8 +7,9 @@ from urllib.parse import quote
 
 from openai import APIError, AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic_ai.providers.openrouter import OpenRouterProvider
 
-from mam_bench.config import AgentSettings, ModelSelection, OpenAICompatibleModel, OpenRouterModel
+from mam_bench.config import AgentSettings, ModelSelection, OpenRouterModel, VLLMModel
 from mam_bench.runtime import OpenRouterSettings
 
 
@@ -152,35 +153,15 @@ def _budgets(
     }
 
 
-def _cache_strategy(
-    selection: OpenRouterModel, endpoints: list[EndpointMetadata]
-) -> Literal["explicit", "implicit", "unverified", "off"]:
-    if selection.prompt_cache == "off":
-        return "off"
-    if endpoints and all(endpoint.supports_implicit_caching for endpoint in endpoints):
-        return "implicit"
-    # PydanticAI's native OpenRouter breakpoints support Claude across its upstream
-    # providers and Gemini. Require endpoint evidence, not just a model-name guess.
-    family = selection.model.removeprefix("~").split("/", 1)[0]
-    explicit = bool(endpoints) and all(
-        (
-            family == "anthropic"
-            and endpoint.tag.split("/", 1)[0]
-            in {"anthropic", "amazon-bedrock", "google-vertex", "azure"}
-        )
-        or (
-            family == "google"
-            and endpoint.tag.split("/", 1)[0] in {"google-ai-studio", "google-vertex"}
-        )
-        for endpoint in endpoints
-    )
-    if explicit:
-        return "explicit"
-    if selection.prompt_cache == "required":
-        raise ValueError(
-            "prompt_cache required, but selected endpoints have no verified cache support"
-        )
-    return "unverified"
+def _validate_cache_policy(selection: OpenRouterModel, endpoints: list[EndpointMetadata]) -> None:
+    if selection.prompt_cache != "required":
+        return
+    profile = OpenRouterProvider.model_profile(selection.model) or {}
+    if profile.get("openrouter_supports_cache_control") or (
+        endpoints and all(endpoint.supports_implicit_caching for endpoint in endpoints)
+    ):
+        return
+    raise ValueError("prompt_cache required, but selected endpoints have no verified cache support")
 
 
 async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
@@ -189,7 +170,7 @@ async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
     Explicit YAML settings are constraints. Unsupported omitted sampling defaults
     are removed from requests, not silently presented as supported configuration.
     """
-    if isinstance(selection, OpenAICompatibleModel):
+    if isinstance(selection, VLLMModel):
         return ResolvedModelSetup(selection, {"source": "yaml", "runtime": selection.runtime})
 
     endpoints: list[EndpointMetadata] = []
@@ -267,20 +248,6 @@ async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
             )
         decisions.append("Parameter capabilities unknown; requests retain configured defaults")
 
-    # OpenRouter otherwise silently drops Claude reasoning when forcing a tool.
-    if (
-        selection.model.removeprefix("~").startswith("anthropic/")
-        and "reasoning" not in omitted
-        and settings.reasoning_effort != "none"
-        and values.get("tool_choice", settings.tool_choice) == "required"
-    ):
-        if "tool_choice" in explicit:
-            raise ValueError(
-                "Claude reasoning conflicts with explicit required tool_choice; use auto"
-            )
-        values["tool_choice"] = "auto"
-        decisions.append("Default tool_choice changed to auto to preserve Claude reasoning")
-
     if values.get("tool_choice", settings.tool_choice) == "auto" and any(
         endpoint.supports_tool_choice is not None
         and not endpoint.supports_tool_choice.get("auto", False)
@@ -304,10 +271,10 @@ async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
         if parameter in omitted:
             field_sources[field] = "omitted_unsupported"
     effective_settings = AgentSettings.model_validate({**settings.model_dump(), **values})
+    _validate_cache_policy(selection, endpoints)
     effective = selection.with_setup(
         effective_settings,
         frozenset(omitted),
-        _cache_strategy(selection, endpoints),
         completion_parameter,
     )
     if endpoints:
@@ -344,7 +311,6 @@ async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
             ),
             "prompt_cache": {
                 "requested": selection.prompt_cache,
-                "strategy": effective.cache_strategy,
                 "note": "off disables explicit hints, not provider-managed implicit caching; "
                 "metadata support neither guarantees nor rules out actual hits",
             },

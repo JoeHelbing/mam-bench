@@ -85,11 +85,18 @@ The directory is Git-ignored. Replace the placeholders with a real model ID and
 endpoint; do not put credentials in YAML:
 
 ```yaml
-runtime: openai-compatible
+runtime: vllm
 model: YOUR_MODEL_ID
 base_url: https://YOUR-ENDPOINT.example/v1
 api_key_env: MAM_MODEL_API_KEY
 ```
+
+Use the actual served model ID so PydanticAI's `VLLMProvider` can select its
+model-family profile. It handles reasoning, tool schemas, and system-message
+formatting. Generic OpenAI-compatible and SGLang runtimes are not supported.
+`settings.reasoning_effort` uses native unified thinking (`none` disables it).
+`tool_choice: required` retains native fallback when a profile cannot force
+tools; `tool_choice: auto` opts out of forcing while keeping terminal actions.
 
 For local vLLM builds supporting repeated-pattern detection, add this at the
 top level of the model YAML for future runs:
@@ -155,13 +162,14 @@ Meta's live Muse endpoint rejected `required` even though its metadata
 advertised support, so this example selects `auto` explicitly. OpenRouter
 setup checks the selected provider's endpoint descriptions before the
 first case. It derives safe token and compaction budgets and omits unsupported
-*default* request fields; an explicitly requested unsupported setting fails
-instead of being silently changed. `prompt_cache` can be `auto` (default),
-`required`, or `off`. `required` needs published cache support, but metadata
-can miss real cache reads; `auto` records observed usage even then. A cache hint
-never guarantees a hit, and `off` cannot stop an upstream provider from caching
-implicitly. The original
-YAML and effective model setup are both saved with the run. Model sampling,
+*default* request fields. It rejects explicit settings that endpoint metadata
+identifies as unsupported. Native PydanticAI profiles apply model-specific
+reasoning and tool-choice safeguards. `prompt_cache` can be `auto` (default),
+`required`, or `off`. `required` needs cache support in the native profile or
+endpoint metadata. Native telemetry records reported cache usage; hints and
+metadata never guarantee a hit. `off` disables explicit hints and cannot stop
+provider-managed implicit caching. The original YAML and preflight decisions are
+both saved with the run; native profiles can further adapt requests. Model sampling,
 tool choice, and request budgets are validated in [config.py](src/mam_bench/config.py)
 and resolved in [model_setup.py](src/mam_bench/model_setup.py). If you use mise,
 `mise install` and `mise run setup` prepare the pinned project tools and

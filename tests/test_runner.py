@@ -37,13 +37,6 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             saved = json.loads((runner.output_directory / "benchmark.json").read_text())
             self.assertEqual(saved["total_score"], sum(case["score"] for case in saved["cases"]))
             self.assertTrue((runner.output_directory / "effective-model.json").exists())
-            for index in range(1, 4):
-                usage = json.loads(
-                    (runner.output_directory / f"cases/{index:03d}/usage.json").read_text()
-                )["usage"]
-                self.assertGreater(usage["requests"], 0)
-                self.assertIn("cache_read_tokens", usage)
-                self.assertIn("cache_write_tokens", usage)
             before = {
                 p.relative_to(runner.output_directory): p.read_bytes()
                 for p in runner.output_directory.rglob("*")
@@ -183,9 +176,6 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 failed_case.controlled_agent_count,
             )
             self.assertTrue((root / "cases/002/agent-messages").is_dir())
-            partial_usage = json.loads((root / "cases/002/usage.json").read_text())
-            self.assertGreater(partial_usage["usage"]["requests"], 0)
-            self.assertIn("cache_observation", partial_usage)
             self.assertEqual(
                 json.loads((root / "failure.json").read_text())["status"], "incomplete"
             )

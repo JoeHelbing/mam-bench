@@ -27,7 +27,12 @@ class AgentSettings(BaseModel):
     timeout_seconds: float = Field(default=3_600.0, gt=0)
     context_window_tokens: int = Field(default=260_000, gt=0)
     compaction_trigger_fraction: float = Field(default=0.7, gt=0, lt=1)
-    compaction_tail_tokens: int = Field(default=40_000, ge=0)
+    compaction_tail_tokens: int = Field(
+        default_factory=lambda data: min(
+            40_000, int(data["context_window_tokens"] * data["compaction_trigger_fraction"]) // 4
+        ),
+        ge=0,
+    )
     summary_completion_tokens: int = Field(default=16_000, gt=0)
     memory_injection_tokens: int = Field(default=4_000, gt=0)
 
@@ -35,10 +40,7 @@ class AgentSettings(BaseModel):
     def validate_compaction_tail(self) -> Self:
         """Keep the verbatim tail below the threshold that triggers compaction."""
         trigger_tokens = self.context_window_tokens * self.compaction_trigger_fraction
-        if (
-            self.compaction_tail_tokens >= trigger_tokens
-            and "compaction_tail_tokens" in self.model_fields_set
-        ):
+        if self.compaction_tail_tokens >= trigger_tokens:
             raise ValueError("compaction_tail_tokens must be below the compaction trigger")
         return self
 
@@ -56,10 +58,6 @@ class OpenRouterModel(BaseModel):
 
     # Derived by preflight, never accepted as user configuration.
     _omitted_parameters: frozenset[str] = PrivateAttr(default_factory=frozenset)
-    _cache_strategy: Literal["explicit", "implicit", "unverified", "off"] = PrivateAttr(
-        default="unverified"
-    )
-
     _completion_token_parameter: Literal["max_tokens", "max_completion_tokens"] = PrivateAttr(
         default="max_tokens"
     )
@@ -72,21 +70,15 @@ class OpenRouterModel(BaseModel):
     def omitted_parameters(self) -> frozenset[str]:
         return self._omitted_parameters
 
-    @property
-    def cache_strategy(self) -> Literal["explicit", "implicit", "unverified", "off"]:
-        return self._cache_strategy
-
     def with_setup(
         self,
         settings: AgentSettings,
         omitted_parameters: frozenset[str],
-        cache_strategy: Literal["explicit", "implicit", "unverified", "off"],
         completion_token_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens",
     ) -> Self:
         """Attach verified runtime decisions without adding YAML configuration fields."""
         resolved = self.model_copy(update={"settings": settings})
         resolved._omitted_parameters = omitted_parameters
-        resolved._cache_strategy = cache_strategy
         resolved._completion_token_parameter = completion_token_parameter
         return resolved
 
@@ -107,30 +99,21 @@ class RepetitionDetection(BaseModel):
         return self
 
 
-class OpenAICompatibleModel(BaseModel):
-    """One selected model through the built-in OpenAI-compatible adapter."""
+class VLLMModel(BaseModel):
+    """One selected model through PydanticAI's native vLLM provider."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    runtime: Literal["openai-compatible"]
+    runtime: Literal["vllm"]
     model: str
     base_url: str
     api_key_env: str
     settings: AgentSettings = AgentSettings()
     repetition_detection: RepetitionDetection | None = None
 
-    @model_validator(mode="after")
-    def validate_compaction_tail(self) -> Self:
-        settings = self.settings
-        if settings.compaction_tail_tokens >= (
-            settings.context_window_tokens * settings.compaction_trigger_fraction
-        ):
-            raise ValueError("compaction_tail_tokens must be below the compaction trigger")
-        return self
-
 
 ModelSelection = Annotated[
-    OpenRouterModel | OpenAICompatibleModel,
+    OpenRouterModel | VLLMModel,
     Field(discriminator="runtime"),
 ]
 

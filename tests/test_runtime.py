@@ -10,7 +10,6 @@ import httpx2 as httpx
 from openai import AsyncOpenAI, omit
 from openai.types.chat import ChatCompletion
 from pydantic_ai import Agent
-from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import (
     ModelRequest,
     SystemPromptPart,
@@ -24,7 +23,7 @@ from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.tools import ToolDefinition
 
 from mam_bench.artifacts import ArtifactWriter
-from mam_bench.config import AgentSettings, OpenAICompatibleModel
+from mam_bench.config import AgentSettings, VLLMModel
 from mam_bench.config import OpenRouterModel as OpenRouterSelection
 from mam_bench.runtime import CaseRuntime, create_model
 from mam_bench.sessions import AgentSessions
@@ -121,7 +120,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                     "allow_fallbacks": False,
                     "require_parameters": True,
                 },
-                "reasoning": {"effort": "medium"},
+                "reasoning": {"effort": "medium", "enabled": True},
             },
         )
         self.assertEqual(sent["max_tokens"], 32_768)
@@ -212,54 +211,39 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                     {"only": ["azure"], "allow_fallbacks": False, "require_parameters": True},
                 )
 
-    async def test_resolved_request_omits_defaults_and_reports_cache_presence(self) -> None:
+    async def test_resolved_request_omits_unsupported_defaults(self) -> None:
         selected = OpenRouterSelection(
             runtime="openrouter", model="vendor/test-model", provider="selected-provider"
         ).with_setup(
             AgentSettings(),
             frozenset({"temperature", "top_p", "top_k", "reasoning"}),
-            "unverified",
         )
         model = create_model(selected)
         assert isinstance(model, OpenRouterModel)
         self.addAsyncCleanup(model.client.close)
-        for raw_details, expected in (
-            (None, False),
-            ({"cached_tokens": 0}, True),
-            ({"cached_tokens": 4, "cache_write_tokens": 2}, True),
-        ):
-            raw = completion().model_dump()
-            usage = cast(dict[str, object], raw["usage"])
-            if raw_details is not None:
-                usage["prompt_tokens_details"] = raw_details
-            request = AsyncMock(return_value=ChatCompletion.model_validate(raw))
-            with patch.object(model.client.chat.completions, "create", request):
-                response = await model.request(
-                    [ModelRequest(parts=[UserPromptPart("Respond.")])],
-                    None,
-                    ModelRequestParameters(),
-                )
-            sent = cast(dict[str, object], request.call_args.kwargs)
-            self.assertIs(sent["temperature"], omit)
-            self.assertIs(sent["top_p"], omit)
-            self.assertEqual(
-                sent["extra_body"],
-                {
-                    "provider": {
-                        "only": ["selected-provider"],
-                        "allow_fallbacks": False,
-                        "require_parameters": True,
-                    }
-                },
+        request = AsyncMock(return_value=completion())
+        with patch.object(model.client.chat.completions, "create", request):
+            await model.request(
+                [ModelRequest(parts=[UserPromptPart("Respond.")])], None, ModelRequestParameters()
             )
-            self.assertEqual(
-                (response.provider_details or {}).get("cache_usage_reported"), expected
-            )
+        sent = cast(dict[str, object], request.call_args.kwargs)
+        self.assertIs(sent["temperature"], omit)
+        self.assertIs(sent["top_p"], omit)
+        self.assertEqual(
+            sent["extra_body"],
+            {
+                "provider": {
+                    "only": ["selected-provider"],
+                    "allow_fallbacks": False,
+                    "require_parameters": True,
+                }
+            },
+        )
 
     async def test_explicit_cache_adds_native_breakpoints_to_claude_requests(self) -> None:
         selected = OpenRouterSelection(
             runtime="openrouter", model="anthropic/claude-sonnet-4", provider="anthropic"
-        ).with_setup(AgentSettings(tool_choice="auto"), frozenset(), "explicit")
+        ).with_setup(AgentSettings(tool_choice="auto"), frozenset())
         model = create_model(selected)
         assert isinstance(model, OpenRouterModel)
         self.addAsyncCleanup(model.client.close)
@@ -279,11 +263,11 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
         content = cast(list[dict[str, object]], messages[-1]["content"])
         self.assertEqual(content[-1]["cache_control"], {"type": "ephemeral", "ttl": "5m"})
 
-    async def test_compatible_endpoint_keeps_openai_request_format(self) -> None:
+    async def test_vllm_uses_native_profile_and_request_format(self) -> None:
         model = create_model(
-            OpenAICompatibleModel(
-                runtime="openai-compatible",
-                model="test-model",
+            VLLMModel(
+                runtime="vllm",
+                model="google/gemma-4-27b-it",
                 base_url="https://compatible.example.test/v1",
                 api_key_env="COMPAT_TEST_API_KEY",
                 settings=AgentSettings(
@@ -344,9 +328,9 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                         strict_parameterless_tools=strict,
                     )
                     model = create_model(
-                        OpenAICompatibleModel(
-                            runtime="openai-compatible",
-                            model="test-model",
+                        VLLMModel(
+                            runtime="vllm",
+                            model="google/gemma-4-27b-it",
                             base_url="https://compatible.example.test/v1",
                             api_key_env="COMPAT_TEST_API_KEY",
                             settings=settings,
@@ -384,17 +368,15 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                             ],
                             {},
                         )
-                        self.assertEqual(
-                            by_name["read_messages"].get("strict"), True if strict else None
-                        )
+                        self.assertIs(by_name["read_messages"].get("strict"), True)
                         for name in ("move", "post_message"):
                             self.assertIs(by_name[name].get("strict"), True)
 
     async def test_vllm_repetition_stop_retains_cause_without_provider_failure(self) -> None:
         model = create_model(
-            OpenAICompatibleModel.model_validate(
+            VLLMModel.model_validate(
                 {
-                    "runtime": "openai-compatible",
+                    "runtime": "vllm",
                     "model": "test-model",
                     "base_url": "https://compatible.example.test/v1",
                     "api_key_env": "COMPAT_TEST_API_KEY",
@@ -433,14 +415,80 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.provider_details["finish_reason"], "repetition")
         self.assertEqual(response.provider_details["stop_reason"], "repetition_detected")
 
+    async def test_native_profiles_keep_tool_forcing_exceptions(self) -> None:
+        for selected in (
+            VLLMModel(
+                runtime="vllm",
+                model="openai/gpt-oss-120b",
+                base_url="https://vllm.example.test/v1",
+                api_key_env="COMPAT_TEST_API_KEY",
+            ),
+            OpenRouterSelection(
+                runtime="openrouter", model="qwen/qwen-3-coder", provider="selected-provider"
+            ),
+            OpenRouterSelection(
+                runtime="openrouter", model="anthropic/claude-sonnet-4", provider="anthropic"
+            ),
+        ):
+            with self.subTest(model=selected.model):
+                model = create_model(selected)
+                assert isinstance(model, OpenAIChatModel)
+                self.addAsyncCleanup(model.client.close)
+                request = AsyncMock(return_value=completion(tool_call=True))
+                with patch.object(model.client.chat.completions, "create", request):
+                    await model.request(
+                        [ModelRequest(parts=[UserPromptPart("Choose an action.")])],
+                        None,
+                        ModelRequestParameters(
+                            output_mode="tool",
+                            output_tools=[
+                                ToolDefinition(
+                                    name="stay",
+                                    parameters_json_schema={"type": "object", "properties": {}},
+                                )
+                            ],
+                            allow_text_output=False,
+                        ),
+                    )
+                self.assertEqual(request.call_args.kwargs["tool_choice"], "auto")
+
+    async def test_unified_thinking_drives_native_openrouter_sampling_rules(self) -> None:
+        for name, effort, sampling in (
+            ("openai/gpt-5.4", "medium", False),
+            ("openai/gpt-5.5", "none", True),
+        ):
+            with self.subTest(model=name):
+                model = create_model(
+                    OpenRouterSelection(
+                        runtime="openrouter",
+                        model=name,
+                        provider="selected-provider",
+                        settings=AgentSettings(
+                            reasoning_effort=cast(Literal["medium", "none"], effort)
+                        ),
+                    )
+                )
+                assert isinstance(model, OpenRouterModel)
+                self.addAsyncCleanup(model.client.close)
+                request = AsyncMock(return_value=completion())
+                with patch.object(model.client.chat.completions, "create", request):
+                    await model.request(
+                        [ModelRequest(parts=[UserPromptPart("Respond.")])],
+                        None,
+                        ModelRequestParameters(),
+                    )
+                sent = request.call_args.kwargs
+                self.assertEqual(sent["temperature"], 1.0 if sampling else omit)
+                self.assertEqual(sent["top_p"], 0.95 if sampling else omit)
+
     async def test_civil_citizen_defer_uses_per_model_strict_schema(self) -> None:
         for strict in (False, True):
             with self.subTest(strict=strict), tempfile.TemporaryDirectory() as directory:
                 settings = AgentSettings(strict_parameterless_tools=strict)
                 model = create_model(
-                    OpenAICompatibleModel(
-                        runtime="openai-compatible",
-                        model="test-model",
+                    VLLMModel(
+                        runtime="vllm",
+                        model="google/gemma-4-27b-it",
                         base_url="https://compatible.example.test/v1",
                         api_key_env="COMPAT_TEST_API_KEY",
                         settings=settings,
@@ -471,69 +519,10 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                             cast(dict[str, object], by_name[name]["parameters"])["properties"],
                             {},
                         )
-                        self.assertEqual(by_name[name].get("strict"), True if strict else None)
+                        self.assertIs(by_name[name].get("strict"), True)
                     self.assertIs(by_name["act"].get("strict"), True)
                     self.assertIs(by_name["post_message"].get("strict"), True)
                 self.assertFalse((writer.directory / "turns.jsonl").exists())
-
-    async def test_compatible_endpoint_accepts_sglang_weight_version_spans(self) -> None:
-        model = create_model(
-            OpenAICompatibleModel(
-                runtime="openai-compatible",
-                model="test-model",
-                base_url="https://compatible.example.test/v1",
-                api_key_env="COMPAT_TEST_API_KEY",
-            )
-        )
-        assert isinstance(model, OpenAIChatModel)
-        self.addAsyncCleanup(model.client.close)
-        spans = [{"version": "default", "start": 0, "end": 2}]
-        for tool_call in (False, True):
-            with self.subTest(tool_call=tool_call):
-                # The OpenAI SDK constructs responses without validating this metadata.
-                raw = completion(tool_call=tool_call).model_copy(
-                    update={"metadata": {"weight_version": "default", "weight_versions": spans}}
-                )
-                with patch.object(
-                    model.client.chat.completions, "create", AsyncMock(return_value=raw)
-                ):
-                    response = await model.request(
-                        [ModelRequest(parts=[UserPromptPart("Respond.")])],
-                        None,
-                        ModelRequestParameters(),
-                    )
-                self.assertEqual(
-                    response.parts[0],
-                    ToolCallPart("stay", "{}", "stay-1")
-                    if tool_call
-                    else TextPart("Summary or response."),
-                )
-                self.assertEqual(response.usage.total_tokens, 12)
-                self.assertEqual(
-                    raw.metadata, {"weight_version": "default", "weight_versions": spans}
-                )
-
-    async def test_compatible_endpoint_still_rejects_other_invalid_metadata(self) -> None:
-        model = create_model(
-            OpenAICompatibleModel(
-                runtime="openai-compatible",
-                model="test-model",
-                base_url="https://compatible.example.test/v1",
-                api_key_env="COMPAT_TEST_API_KEY",
-            )
-        )
-        assert isinstance(model, OpenAIChatModel)
-        self.addAsyncCleanup(model.client.close)
-        raw = completion().model_copy(update={"metadata": {"unrelated": [1]}})
-        with (
-            patch.object(model.client.chat.completions, "create", AsyncMock(return_value=raw)),
-            self.assertRaisesRegex(UnexpectedModelBehavior, "metadata.unrelated"),
-        ):
-            await model.request(
-                [ModelRequest(parts=[UserPromptPart("Respond.")])],
-                None,
-                ModelRequestParameters(),
-            )
 
     async def test_summary_inherits_provider_defaults_without_agent_seed(self) -> None:
         settings = AgentSettings(

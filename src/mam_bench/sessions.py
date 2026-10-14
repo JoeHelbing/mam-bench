@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import logging
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,9 +34,6 @@ from pydantic_ai.exceptions import (
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
-    ToolCallPart,
-    ToolReturnPart,
 )
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.models.openrouter import OpenRouterModel
@@ -62,21 +59,6 @@ from mam_bench.config import AgentSettings
 from mam_bench.diagnostics import ExecutionFailure, failure_trace
 
 logger = logging.getLogger(__name__)
-
-
-class _CacheObservation[DepsT](AbstractCapability[DepsT]):
-    def __init__(self, on_response: Callable[[ModelResponse], None]) -> None:
-        self.on_response = on_response
-
-    async def after_model_request(
-        self,
-        ctx: RunContext[DepsT],
-        *,
-        request_context: ModelRequestContext,
-        response: ModelResponse,
-    ) -> ModelResponse:
-        self.on_response(response)
-        return response
 
 
 class _Compaction[DepsT](FallbackCompaction[DepsT]):
@@ -178,7 +160,6 @@ class Stopped:
 @dataclass
 class _SessionState:
     history: list[ModelMessage] = field(default_factory=lambda: list[ModelMessage]())
-    usage: RunUsage = field(default_factory=RunUsage)
     lock: Lock = field(default_factory=Lock)
 
 
@@ -198,10 +179,6 @@ class AgentSessions[AgentDepsT, OutputDataT]:
         self._states: dict[str, _SessionState] = {}
         self._failure: BaseException | None = None
         self._usage = RunUsage()
-        self._cache_reported = 0
-        self._cache_unknown = 0
-        self._cache_read_reported = 0
-        self._cache_write_reported = 0
         self._archive = None
         if artifact_directory is not None:
             artifact_directory.mkdir(parents=True, exist_ok=True)
@@ -220,26 +197,6 @@ class AgentSessions[AgentDepsT, OutputDataT]:
     def usage(self) -> RunUsage:
         """Return a snapshot of native usage across all sessions."""
         return deepcopy(self._usage)
-
-    @property
-    def cache_observation(self) -> dict[str, int | None]:
-        """Observed action-request cache usage; summaries are in native usage totals."""
-        complete = self._cache_unknown == 0 and self._cache_reported > 0
-        return {
-            "reported_responses": self._cache_reported,
-            "unknown_responses": self._cache_unknown,
-            "read_tokens": self._cache_read_reported if complete else None,
-            "write_tokens": self._cache_write_reported if complete else None,
-        }
-
-    def _observe_cache(self, response: ModelResponse) -> None:
-        details = response.provider_details or {}
-        if details.get("cache_usage_reported") is True:
-            self._cache_reported += 1
-            self._cache_read_reported += response.usage.cache_read_tokens
-            self._cache_write_reported += response.usage.cache_write_tokens
-        else:
-            self._cache_unknown += 1
 
     def history(self, session_id: str) -> tuple[ModelMessage, ...]:
         return tuple(self._state(session_id).history)
@@ -314,7 +271,6 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                                     if self._archive is not None
                                     else ()
                                 ),
-                                _CacheObservation[AgentDepsT](self._observe_cache),
                                 compaction,
                                 self._memory(session_id),
                                 recovery,
@@ -407,39 +363,9 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                         usage.input_tokens,
                         usage.output_tokens,
                     )
-                    state.usage.incr(usage)
                     self._usage.incr(usage)
-                if isinstance(turn, Stopped):
-                    self._close_stopped_turn(messages)
                 state.history = list(messages)
                 return turn
-
-    @staticmethod
-    def _close_stopped_turn(messages: list[ModelMessage]) -> None:
-        """Pair pending calls before submitting this history in the next round."""
-        answered: set[str] = set()
-        for message in reversed(messages):
-            if isinstance(message, ModelRequest):
-                answered.update(
-                    part.tool_call_id
-                    for part in message.parts
-                    if isinstance(part, (ToolReturnPart, RetryPromptPart))
-                )
-            else:
-                missing = [
-                    ToolReturnPart(
-                        tool_name=part.tool_name,
-                        tool_call_id=part.tool_call_id,
-                        content=(
-                            "Turn ended at its usage or retry limit; no tool result was returned."
-                        ),
-                    )
-                    for part in message.parts
-                    if isinstance(part, ToolCallPart) and part.tool_call_id not in answered
-                ]
-                if missing:
-                    messages.append(ModelRequest(parts=missing))
-                break
 
     def _state(self, session_id: str) -> _SessionState:
         if not session_id:

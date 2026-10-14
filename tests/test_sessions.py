@@ -499,40 +499,6 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(await runtime.run("a", "again", deps=None), Completed("recovered"))
 
-    async def test_cache_observation_distinguishes_reported_zero_from_unknown(self) -> None:
-        calls = 0
-
-        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            nonlocal calls
-            del messages, info
-            calls += 1
-            if calls == 1:
-                return ModelResponse(
-                    parts=[TextPart("first")],
-                    usage=RequestUsage(
-                        input_tokens=5, output_tokens=2, cache_read_tokens=2, cache_write_tokens=0
-                    ),
-                    provider_details={"cache_usage_reported": True},
-                )
-            return _response(TextPart("second"))
-
-        runtime = AgentSessions(Agent(FunctionModel(model)))
-        self.assertEqual(await runtime.run("a", "first", deps=None), Completed("first"))
-        self.assertEqual(
-            runtime.cache_observation,
-            {"reported_responses": 1, "unknown_responses": 0, "read_tokens": 2, "write_tokens": 0},
-        )
-        self.assertEqual(await runtime.run("a", "second", deps=None), Completed("second"))
-        self.assertEqual(
-            runtime.cache_observation,
-            {
-                "reported_responses": 1,
-                "unknown_responses": 1,
-                "read_tokens": None,
-                "write_tokens": None,
-            },
-        )
-
     async def test_private_memory_and_history(self) -> None:
         model = MemoryModel()
         runtime = AgentSessions(Agent(FunctionModel(model)))
@@ -572,7 +538,6 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
             Stopped("usage_limit"),
         )
         self.assertEqual(runtime.usage.tool_calls, 2)
-        _assert_complete_tool_history(list(runtime.history("a")))
         page = await runtime.board.read("b")
         self.assertIn("one", page.content)
         self.assertIn("two", page.content)
@@ -589,7 +554,6 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
         runtime = AgentSessions(Agent(FunctionModel(model), retries=2))
         self.assertEqual(await runtime.run("a", "go", deps=None), Stopped("retry_exhaustion"))
         self.assertEqual(runtime.usage.requests, 3)
-        _assert_complete_tool_history(list(runtime.history("a")))
         invalid = False
         self.assertEqual(await runtime.run("a", "again", deps=None), Completed("recovered"))
 

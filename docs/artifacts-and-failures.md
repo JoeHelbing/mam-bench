@@ -18,7 +18,6 @@
     ordinary-outcome.json         # retained even if the controlled world fails
     controlled-outcome.json
     result.json                  # one simulation-owned result, including score
-    usage.json                   # native request/token/cache totals for the case
     agent-messages/              # native Pydantic AI Harness archives
     message-board.jsonl
     turns.jsonl                  # exhausted-turn reason and fallback, when needed
@@ -32,14 +31,12 @@ simulation-specific state, and intermediate measurements. Case results contain
 the exact settings, scored/controlled identities, both outcomes and termination,
 and calculated scores. Those same result objects feed saved and displayed totals.
 The effective setup records the metadata used and which model choices came from
-YAML versus derived defaults. Per-case usage includes summarization calls. A
-zero cache-token total alone does not establish that the provider reported a
-cache miss. `cache_observation` counts action responses with cache telemetry and
-uses `null` for read/write totals when any action response did not report them;
-summary calls still appear in native usage totals. Successful provider usage
-is tallied even when a later request fails, and partial `usage.json` is saved
-on case failure when storage permits. Per-response reporting is also retained
-in native message snapshots.
+YAML versus derived defaults. Native CLI telemetry records request/token/cache
+usage, including summary calls and requests completed before a later failure.
+An absent or zero cache-token count does not establish a measured cache miss.
+Native message snapshots retain per-response usage. Direct library users can
+enable telemetry with `collect_telemetry`; simulations do not write a separate
+usage artifact.
 
 Native Harness `StepPersistence` retains messages, model reasoning when returned,
 tool calls/results, and interrupted runs. Shared-board posts persist as accepted.

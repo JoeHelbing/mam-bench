@@ -9,6 +9,14 @@ config and effective setup, then creates one provider, one fresh `CaseRuntime`
 and writer per case, constructs the selected simulation, and awaits
 `evaluate(runtime)`. It never steps a world.
 
+[runtime.py](../src/mam_bench/runtime.py) selects native `VLLMProvider` or
+`OpenRouterProvider` profiles and passes unified thinking settings to the model.
+Native profiles retain their tool-choice and reasoning safeguards. The local
+model adapter only normalizes vLLM's repetition stop while preserving its cause.
+An explicit `tool_choice: auto` opts out of forcing; otherwise native output
+selection decides when forcing is supported. Session history is repaired by
+PydanticAI before requests, rather than rewritten after stopped turns.
+
 For Schelling, [simulation.py](../src/mam_bench/simulations/schelling/simulation.py)
 constructs two distinct worlds through the same constructor, executes its single
 step loop for each, and writes initial/completed states. Its

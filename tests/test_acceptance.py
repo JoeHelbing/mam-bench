@@ -18,7 +18,7 @@ class ConfigurationAcceptanceTests(unittest.TestCase):
             BenchmarkConfig.model_validate(
                 {
                     "model": {
-                        "runtime": "openai-compatible",
+                        "runtime": "vllm",
                         "model": "scripted",
                         "base_url": "http://127.0.0.1:1234/v1",
                         "api_key_env": "TEST_KEY",

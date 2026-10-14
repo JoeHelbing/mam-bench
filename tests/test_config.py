@@ -210,3 +210,19 @@ class ConfigurationTests(unittest.TestCase):
         ):
             with self.subTest(settings=settings), self.assertRaises(ValidationError):
                 AgentSettings.model_validate(settings)
+
+    def test_compaction_defaults_are_valid_before_runtime_selection(self) -> None:
+        settings = AgentSettings(context_window_tokens=10_000)
+        self.assertEqual(settings.compaction_tail_tokens, 1750)
+        self.assertNotIn("compaction_tail_tokens", settings.model_fields_set)
+        with self.assertRaises(ValidationError):
+            AgentSettings(context_window_tokens=10_000, compaction_tail_tokens=40_000)
+
+    def test_vllm_replaces_the_generic_runtime(self) -> None:
+        model = selection().model_dump()
+        self.assertEqual(model["runtime"], "vllm")
+        model["runtime"] = "openai-compatible"
+        with self.assertRaises(ValidationError):
+            BenchmarkConfig.model_validate(
+                {"model": model, "cases": [schelling().model_dump()], "output_directory": "unused"}
+            )

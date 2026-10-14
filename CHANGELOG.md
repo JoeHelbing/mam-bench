@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.1](https://github.com/JoeHelbing/mam-bench/compare/v1.0.0...v1.0.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* **telemetry:** load Logfire settings from .env ([847b8f7](https://github.com/JoeHelbing/mam-bench/commit/847b8f78ccb53fc9ab658d7a356baccf3b3b9f89))
+* **telemetry:** load Logfire settings from .env ([4803ec5](https://github.com/JoeHelbing/mam-bench/commit/4803ec54ccb254e3faa567793931b98b5de56bba))
+
 ## [1.0.0](https://github.com/JoeHelbing/mam-bench/compare/v0.2.0...v1.0.0) (2026-10-14)
 
 

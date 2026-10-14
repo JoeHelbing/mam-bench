@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.0.0](https://github.com/JoeHelbing/mam-bench/compare/v0.2.0...v1.0.0) (2026-10-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* **config:** discover limits and preserve endpoint defaults
+* **runtime:** use native vLLM provider safeguards
+* **agents:** accept ready actions without claim priority
+
+### Features
+
+* **observability:** collect native OpenTelemetry signals ([505d2f3](https://github.com/JoeHelbing/mam-bench/commit/505d2f394962bfd4722d78c07b76c72491fdeeaf))
+* **observability:** collect native OpenTelemetry signals ([ac4f821](https://github.com/JoeHelbing/mam-bench/commit/ac4f821ab144606562b38d032a98c1794663efa8))
+* **openrouter:** resolve endpoint-aware model settings ([26c24a6](https://github.com/JoeHelbing/mam-bench/commit/26c24a6020a7ced5adb2a44ed7da0d2af1b6fd39))
+
+
+### Bug Fixes
+
+* **agents:** accept ready actions without claim priority ([14a97f9](https://github.com/JoeHelbing/mam-bench/commit/14a97f91649912ff376892211652980b5467e363))
+* **runtime:** handle vLLM repetition detection stops ([e66d225](https://github.com/JoeHelbing/mam-bench/commit/e66d22574c7ed1f8dd160a7eab500dc81aff562a))
+* **runtime:** handle vLLM repetition detection stops ([1716471](https://github.com/JoeHelbing/mam-bench/commit/1716471b5c8740621f99842ca1807e726ab8e2ce))
+
+
+### Code Refactoring
+
+* **config:** discover limits and preserve endpoint defaults ([3614eaa](https://github.com/JoeHelbing/mam-bench/commit/3614eaa41e89db8ab1c1e854fb3badf870e5df92))
+* **runtime:** use native vLLM provider safeguards ([dc32d22](https://github.com/JoeHelbing/mam-bench/commit/dc32d22367f8541be619539d3fcf19319d9b0309))
+
 ## [0.2.0](https://github.com/JoeHelbing/mam-bench/compare/v0.1.0...v0.2.0) (2026-10-07)
 
 

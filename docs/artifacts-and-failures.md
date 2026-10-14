@@ -72,12 +72,45 @@ Native `gen_ai.agent.call.id` matches the archived messages' `run_id`;
 and `list_snapshots` to read matching histories instead of decoding archive
 directory names or creating a second identity system.
 
-Setting `LOGFIRE_TOKEN` enables additional background OTLP HTTP delivery to
-Logfire. `LOGFIRE_BASE_URL` defaults to `https://logfire-us.pydantic.dev`; use
-the base URL for the region of the token. Keep credentials outside YAML and Git.
+The CLI reads `LOGFIRE_TOKEN` from the environment or the working directory's
+`.env` file to enable background OTLP HTTP delivery to Logfire. Environment
+values override `.env`, including an empty token to disable cloud delivery.
+`LOGFIRE_BASE_URL` follows the same precedence and defaults to
+`https://logfire-us.pydantic.dev`; use the base URL for the region of the token.
+Keep `.env` private and Git-ignored; put no credentials in YAML or Git.
+The startup log records `telemetry.export destination=logfire` or `local` and
+the run ID. This reports configuration; exporter failures are logged separately.
+Library collection remains local unless `send_to_logfire=True` is requested.
 Local collection works without a Logfire account or token. Remote delivery
 errors do not fail agent turns; HTTP exports have a three-second timeout.
 An abrupt process kill can lose unfinished spans and buffered cloud records.
+
+Each signal already carries the generated `mam_bench.run_id` resource attribute.
+Dashboards should select that attribute through a query-backed Logfire variable,
+so a new run requires no query edits. For a batch of runs, its launcher can set
+one shared `mam_bench.campaign` label in the standard `OTEL_RESOURCE_ATTRIBUTES`
+environment variable. The native SDK includes it on traces, logs and metrics;
+the benchmark needs no campaign registry, path discovery or new YAML fields.
+Use explicit selectors when campaigns overlap. Server/GPU measurements belong
+to their host or serving process; a separately observed benchmark status must
+not label those measurements as belonging to an old campaign.
+
+For example, a Logfire query-backed list variable named `run_id` can use:
+
+```sql
+SELECT otel_resource_attributes->>'mam_bench.run_id' AS run_id
+FROM records
+WHERE service_name = 'mam-bench'
+  AND otel_resource_attributes->>'mam_bench.run_id' IS NOT NULL
+GROUP BY 1
+ORDER BY max(start_timestamp) DESC
+```
+
+Panels filter with `otel_resource_attributes->>'mam_bench.run_id' = $run_id`.
+Use the same pattern for an optional campaign label. The dropdown is populated
+from recorded data, rather than a maintained list of dated campaign names.
+See [Logfire dashboard variables](https://pydantic.dev/docs/logfire/observe/dashboards/#variables)
+and [native OTel resource labels](https://opentelemetry.io/docs/languages/sdk-configuration/general/#otel_resource_attributes).
 
 Prompt, completion, tool content and model request parameters are disabled in
 telemetry. The export adapter also removes exception-event bodies and span

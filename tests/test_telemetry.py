@@ -2,7 +2,7 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, chdir
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Thread
@@ -46,7 +46,14 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                 usage=RequestUsage(input_tokens=10, output_tokens=2),
             )
 
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {"OTEL_RESOURCE_ATTRIBUTES": "mam_bench.campaign=synthetic-campaign"},
+                clear=True,
+            ),
+        ):
             root = Path(directory)
             with self.assertLogs("mam_bench", level="DEBUG"), collect_telemetry(root):
                 sessions = AgentSessions(
@@ -93,6 +100,8 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertNotIn("PRIVATE", json.dumps(exported))
             self.assertTrue(all(record["trace_id"] for record in exported["logs"]))
+            for records in exported.values():
+                self.assertIn('"mam_bench.campaign": "synthetic-campaign"', json.dumps(records))
 
     async def test_nested_compaction_requests_are_collected_once(self) -> None:
         async def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -196,7 +205,7 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                         (observed.output_directory / relative).read_bytes(),
                     )
 
-    async def test_rejected_remote_exports_preserve_completed_run_and_local_signals(self) -> None:
+    async def test_dotenv_export_and_environment_override_preserve_local_signals(self) -> None:
         received: list[str] = []
 
         class Reject(BaseHTTPRequestHandler):
@@ -218,12 +227,16 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                     patch.dict(
                         os.environ,
                         {
-                            "LOGFIRE_TOKEN": "synthetic-test-token",
                             "LOGFIRE_BASE_URL": f"http://127.0.0.1:{server.server_port}",
                         },
+                        clear=True,
                     ),
                 ):
                     root = Path(directory)
+                    (root / ".env").write_text(
+                        "LOGFIRE_TOKEN=synthetic-dotenv-token\n"
+                        "LOGFIRE_BASE_URL=http://127.0.0.1:1\n"
+                    )
 
                     async def respond(
                         messages: list[ModelMessage], info: AgentInfo
@@ -236,6 +249,7 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                     with (
                         self.assertLogs("opentelemetry", level="ERROR"),
                         self.assertLogs("mam_bench", level="DEBUG"),
+                        chdir(root),
                         collect_telemetry(root, send_to_logfire=True),
                     ):
                         sessions = AgentSessions(

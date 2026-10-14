@@ -51,6 +51,8 @@ or retry budgets select a simulation fallback and retain a diagnostic reason.
 They do not cause an infrastructure failure or an extra scoring penalty.
 Provider/network/timeouts, persistence failures, and simulation defects stop
 the invocation and cancel outstanding turns. Completed records remain available.
+Native compaction runs before requests; a server-rejected context overflow
+follows normal provider-failure handling.
 Failure records are best effort; failure to write one is logged without masking
 the original error. There is no resume or selective rerun support.
 

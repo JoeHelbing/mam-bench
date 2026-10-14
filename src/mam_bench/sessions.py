@@ -9,7 +9,6 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
-from typing import cast
 
 from anyio import Lock
 from openai import APIConnectionError, APIError, APITimeoutError
@@ -22,21 +21,13 @@ from pydantic_ai import (
     UserContent,
     capture_run_messages,
 )
-from pydantic_ai.capabilities import AbstractCapability, AgentCapability
+from pydantic_ai.capabilities import AgentCapability
 from pydantic_ai.exceptions import (
     IncompleteToolCall,
     ModelAPIError,
-    ModelHTTPError,
-    ModelRetry,
     UnexpectedModelBehavior,
     UsageLimitExceeded,
 )
-from pydantic_ai.messages import (
-    ModelRequest,
-    ModelResponse,
-)
-from pydantic_ai.models import ModelRequestContext
-from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai_harness import (
@@ -81,70 +72,6 @@ class _Compaction[DepsT](FallbackCompaction[DepsT]):
             "compaction.end messages=%d elapsed_s=%.3f", len(result), monotonic() - started
         )
         return result
-
-
-class _ContextOverflowRecovery[DepsT](AbstractCapability[DepsT]):
-    """Retry one rejected OpenRouter request in the native agent loop, never a whole turn."""
-
-    def __init__(self, compaction: _Compaction[DepsT]) -> None:
-        self.compaction = compaction
-        self.pending_error: ModelHTTPError | None = None
-        self.failed_parts: tuple[object, ...] = ()
-        self.retried = False
-
-    async def on_model_request_error(
-        self,
-        ctx: RunContext[DepsT],
-        *,
-        request_context: ModelRequestContext,
-        error: Exception,
-    ) -> ModelResponse:
-        if (
-            self.retried
-            or request_context.streaming
-            or not isinstance(request_context.model, OpenRouterModel)
-            or not isinstance(error, ModelHTTPError)
-            or error.status_code != 400
-            or not isinstance(error.body, dict)
-        ):
-            raise error
-        body: dict[str, object] = cast(dict[str, object], error.body)  # pyright: ignore[reportUnknownMemberType]
-        metadata = body.get("metadata")
-        if (
-            not isinstance(metadata, dict)
-            or cast(dict[str, object], metadata).get("error_type") != "context_length_exceeded"
-            or not request_context.messages
-            or not isinstance(request_context.messages[-1], ModelRequest)
-        ):
-            raise error
-        self.retried = True
-        self.pending_error = error
-        self.failed_parts = tuple(request_context.messages[-1].parts)
-        raise ModelRetry("Context length exceeded; retry with compacted history.") from error
-
-    async def before_model_request(
-        self, ctx: RunContext[DepsT], request_context: ModelRequestContext
-    ) -> ModelRequestContext:
-        error = self.pending_error
-        if error is None:
-            return request_context
-        self.pending_error = None
-        original = request_context.messages
-        compacted = await self.compaction.compact(list(original), ctx)
-        # The latest observation or tool returns must survive compaction alongside the retry.
-        retained_parts = [
-            part
-            for message in compacted
-            if isinstance(message, ModelRequest)
-            for part in message.parts
-        ]
-        if compacted == original or not all(part in retained_parts for part in self.failed_parts):
-            raise error
-        request_context.messages = compacted
-        logger.info(
-            "request.context_overflow_recovered messages=%d->%d", len(original), len(compacted)
-        )
-        return request_context
 
 
 @dataclass(frozen=True)
@@ -256,11 +183,8 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                 len(state.history),
             )
             with capture_run_messages() as messages:
-                recovery: _ContextOverflowRecovery[AgentDepsT] | None = None
                 try:
                     async with deadline:
-                        compaction, fallback = self._compaction()
-                        recovery = _ContextOverflowRecovery(fallback)
                         result = await self._agent.run(
                             user_prompt,
                             conversation_id=session_id,
@@ -275,9 +199,8 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                                     if self._archive is not None
                                     else ()
                                 ),
-                                compaction,
+                                self._compaction(),
                                 self._memory(session_id),
-                                recovery,
                                 *capabilities,
                             ),
                             toolsets=[self._board_tools(session_id)],
@@ -291,9 +214,6 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                     outcome = "output_token_limit"
                     turn = Stopped(outcome)
                 except UnexpectedModelBehavior as error:
-                    if recovery is not None and recovery.pending_error is not None:
-                        self._failure = ExecutionFailure("provider", "model request failed")
-                        raise self._failure from error
                     # These native PydanticAI errors have no dedicated subtype.
                     # Only exhausted turn budgets are recoverable; other failures abort.
                     if re.fullmatch(
@@ -390,9 +310,7 @@ class AgentSessions[AgentDepsT, OutputDataT]:
             injection_errors="raise",
         )
 
-    def _compaction(
-        self,
-    ) -> tuple[TieredCompaction[AgentDepsT], _Compaction[AgentDepsT]]:
+    def _compaction(self) -> TieredCompaction[AgentDepsT]:
         settings = self._settings
         model = self._agent.model
         if model is None:
@@ -414,12 +332,8 @@ class AgentSessions[AgentDepsT, OutputDataT]:
             preserve_first_user_message=False,
             receipts=True,
         )
-        fallback = _Compaction[AgentDepsT]([summarizer, sliding])
-        return (
-            TieredCompaction(
-                tiers=[fallback],
-                target_fraction=settings.compaction_trigger_fraction,
-                context_window=self._context_window_tokens,
-            ),
-            fallback,
+        return TieredCompaction(
+            tiers=[_Compaction[AgentDepsT]([summarizer, sliding])],
+            target_fraction=settings.compaction_trigger_fraction,
+            context_window=self._context_window_tokens,
         )

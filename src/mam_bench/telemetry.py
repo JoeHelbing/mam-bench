@@ -2,7 +2,6 @@
 
 import copy
 import logging
-import os
 from collections.abc import Generator, Sequence
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -37,10 +36,21 @@ from opentelemetry.sdk.trace.export import (
     SpanExportResult,
 )
 from opentelemetry.trace import Status, Tracer
+from pydantic import SecretStr
 from pydantic_ai import Agent
 from pydantic_ai.models.instrumented import InstrumentationSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from mam_bench.diagnostics import failure_trace
+
+
+class _LogfireSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="LOGFIRE_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    token: SecretStr = SecretStr("")
+    base_url: str = "https://logfire-us.pydantic.dev"
 
 
 class _SafeSpanExporter(SpanExporter):
@@ -109,8 +119,8 @@ def collect_telemetry(directory: Path, *, send_to_logfire: bool = False) -> Gene
     collection context per process; independent benchmark invocations use
     separate processes. Library imports never initialize providers or export.
     """
-    # Validate required credentials before creating providers or reader threads.
-    token = os.environ["LOGFIRE_TOKEN"] if send_to_logfire else ""
+    connection = _LogfireSettings() if send_to_logfire else None
+    token = connection.token.get_secret_value() if connection is not None else ""
     target = directory / "telemetry"
     target.mkdir(parents=True, exist_ok=False)
     resource = Resource.create({"service.name": "mam-bench", "mam_bench.run_id": directory.name})
@@ -150,8 +160,8 @@ def collect_telemetry(directory: Path, *, send_to_logfire: bool = False) -> Gene
         )
         stack.callback(trace_provider.shutdown)
         stack.callback(log_provider.shutdown)
-        if send_to_logfire:
-            base = os.environ.get("LOGFIRE_BASE_URL", "https://logfire-us.pydantic.dev").rstrip("/")
+        if connection is not None and token:
+            base = connection.base_url.rstrip("/")
             headers = {"Authorization": token}
             trace_provider.add_span_processor(
                 BatchSpanProcessor(
@@ -202,4 +212,9 @@ def collect_telemetry(directory: Path, *, send_to_logfire: bool = False) -> Gene
         stack.callback(logger.removeHandler, handler)
         tracer = trace_provider.get_tracer("mam_bench")
         with tracer.start_as_current_span("benchmark", attributes={"run_id": directory.name}):
+            logger.info(
+                "telemetry.export destination=%s run_id=%s",
+                "logfire" if token else "local",
+                directory.name,
+            )
             yield tracer

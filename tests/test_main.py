@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +22,10 @@ from support import civil, schelling, selection, stay
 
 class MainTests(unittest.TestCase):
     def setUp(self) -> None:
+        # Local credentials must never enable remote export in offline CLI tests.
+        environment = patch.dict(os.environ, {"LOGFIRE_TOKEN": ""})
+        environment.start()
+        self.addCleanup(environment.stop)
         discovery = patch(
             "mam_bench.model_setup._fetch_vllm_model",
             AsyncMock(return_value=VLLMModelMetadata(id="scripted", max_model_len=260_000)),

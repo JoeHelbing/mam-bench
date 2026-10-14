@@ -2,7 +2,6 @@
 
 import argparse
 import asyncio
-import os
 import sys
 from collections.abc import Sequence
 from contextlib import ExitStack
@@ -50,9 +49,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         with ExitStack() as stack:
 
             def started(path: Path) -> None:
-                stack.enter_context(
-                    collect_telemetry(path, send_to_logfire=bool(os.environ.get("LOGFIRE_TOKEN")))
-                )
+                stack.enter_context(collect_telemetry(path, send_to_logfire=True))
                 print(f"Output directory: {path}", file=sys.stderr, flush=True)
 
             return await runner.run(

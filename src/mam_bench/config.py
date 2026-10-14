@@ -91,6 +91,22 @@ class OpenRouterModel(BaseModel):
         return resolved
 
 
+class RepetitionDetection(BaseModel):
+    """Stop consecutive repeated token patterns on supporting vLLM endpoints."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    min_pattern_size: int = Field(default=16, ge=1, strict=True)
+    max_pattern_size: int = Field(default=128, ge=1, strict=True)
+    min_count: int = Field(default=8, ge=2, strict=True)
+
+    @model_validator(mode="after")
+    def validate_pattern_sizes(self) -> Self:
+        if self.min_pattern_size > self.max_pattern_size:
+            raise ValueError("min_pattern_size must not exceed max_pattern_size")
+        return self
+
+
 class OpenAICompatibleModel(BaseModel):
     """One selected model through the built-in OpenAI-compatible adapter."""
 
@@ -101,6 +117,7 @@ class OpenAICompatibleModel(BaseModel):
     base_url: str
     api_key_env: str
     settings: AgentSettings = AgentSettings()
+    repetition_detection: RepetitionDetection | None = None
 
     @model_validator(mode="after")
     def validate_compaction_tail(self) -> Self:

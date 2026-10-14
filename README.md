@@ -91,6 +91,23 @@ base_url: https://YOUR-ENDPOINT.example/v1
 api_key_env: MAM_MODEL_API_KEY
 ```
 
+For local vLLM builds supporting repeated-pattern detection, add this at the
+top level of the model YAML for future runs:
+
+```yaml
+repetition_detection:
+  min_pattern_size: 16
+  max_pattern_size: 128
+  min_count: 8
+```
+
+This stops consecutive repeated token patterns early; it does not change token
+probabilities. The policy applies to agent and summary requests and is retained
+in the run configuration. Omit it, or use `repetition_detection: null`, for a
+baseline or a server without this vLLM extension. The adapter retains a native
+repetition stop in provider details and uses bounded incomplete-output handling.
+These thresholds are an initial policy, not a measured optimum.
+
 Export `MAM_MODEL_API_KEY` in the environment, including for a local server
 that ignores its value: this adapter still requires the variable. Keep secrets
 out of the repo. Then run the shipped suite:
@@ -106,6 +123,10 @@ previous run. Results
 include model conversations; handle them as sensitive data. See
 [artifacts and failures](docs/artifacts-and-failures.md) for the saved records
 and failure behavior.
+
+Each CLI run also saves native OpenTelemetry traces, logs and metrics locally.
+Set `LOGFIRE_TOKEN` to send metadata to Logfire in the background. Full agent
+conversations remain in local Harness archives; cloud content capture is disabled.
 
 You can replace the six cases with a YAML suite of your own:
 

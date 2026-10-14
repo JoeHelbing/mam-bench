@@ -34,7 +34,15 @@ Both use [sessions.py](../src/mam_bench/sessions.py) for individual model turns,
 private history/memory, and communication. Instructions carry identity, goal,
 and standing rules; user inputs contain changing JSON observations. Each
 simulation owns legality and settlement. [scheduling.py](../src/mam_bench/scheduling.py)
-shares cohort ordering, concurrent admission, claim gates, failure cleanup, and
+shares cohort ordering, concurrent admission, failure cleanup, and
 addressed random streams. [artifacts.py](../src/mam_bench/artifacts.py) writes supplied
 records and preserves native archives. The runner retains case
 results, and `BenchmarkResult.total_score` sums their calculated scores.
+
+At run-directory creation, the CLI enters [telemetry.py](../src/mam_bench/telemetry.py)
+in the task that owns the benchmark. It configures native Pydantic AI
+instrumentation and OpenTelemetry providers/exporters for local traces, logs,
+and metrics, with optional Logfire delivery. Harness remains the full conversation
+archive; native call IDs connect exported traces to saved messages. The narrow
+export policy removes provider exception bodies without changing the native
+transport, usage accounting, or simulation execution.

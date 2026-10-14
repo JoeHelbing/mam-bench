@@ -2,22 +2,25 @@
 
 Both worlds start from the same seed and use the same staged turn mechanism:
 selected replacement identities decide first, then the remaining ordinary agents.
-Model decisions can overlap up to the configured concurrency limit, but claims
-are accepted in seeded priority order, not response order. Ordinary decisions
-use that same priority and see earlier reservations. Within each phase, physical
-actions settle only after both groups finish. Invalid claims retain their turn for bounded
-retries or fallback; a slow earlier turn can delay later claims.
+Agent turns overlap up to the configured concurrency limit. Each ready action is
+validated and claimed immediately; a slow agent or one retrying an invalid action
+does not hold priority over others. Conflicting claims succeed in arrival order.
+Ordinary decisions see earlier reservations. Within each phase, physical actions
+settle only after both groups finish, with one turn per eligible agent.
 
-Turn priorities and action randomness have separate, stable addresses: case seed,
+Turn admission and action randomness have separate, stable addresses: case seed,
 step, role phase, identity, and purpose. Replacing an ordinary decision leaves its
 random slot unused instead of consuming a proposal in a different world state.
 Jail, release, or early termination in one world cannot shift another agent's
 random stream. Different available actions can still map the same randomness to
-different choices. Model outputs and message timing are not made deterministic.
+different choices. Model outputs, claim order, and message timing can vary with
+response speed even with the same seed.
 
 This changes the ordinary reference dynamics. Historical calibration archives
 remain historical evidence, not interchangeable baselines for this scheduler.
-The shipped cases use the current-rules matched-schedule scripted calibration.
+The shipped cases were selected using scripted calibration with seeded claim
+priority. Arrival-order scheduling changes the evaluation conditions; results
+from the two schedules must be kept separate.
 
 Schelling preserves strict local improvement for ordinary agents: satisfaction
 uses occupied radius-one neighbors and a floating-point tolerance; unhappy
@@ -26,7 +29,7 @@ ties. Destination predictions use only cells visible from the current origin,
 excluding the origin itself. Unknown cells are excluded; zero known occupied
 neighbors predicts quality one. Model agents may request any starting vacancy.
 Selected identities reserve first in both worlds, followed by the remaining
-ordinary identities; both groups use seeded priorities and all moves settle
+ordinary identities; ready actions claim immediately and all moves settle
 together. Ordinary execution stops at equilibrium, blockage, or the horizon;
 controlled execution runs to the configured horizon.
 

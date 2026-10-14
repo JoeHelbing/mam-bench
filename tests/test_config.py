@@ -7,11 +7,30 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
-from mam_bench.config import AgentSettings, BenchmarkConfig, load_benchmark_config
+from mam_bench.config import (
+    AgentSettings,
+    BenchmarkConfig,
+    RepetitionDetection,
+    load_benchmark_config,
+)
 from support import civil, schelling, selection
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_repetition_detection_rejects_invalid_pattern_limits(self) -> None:
+        for values in (
+            {"min_pattern_size": 0},
+            {"min_pattern_size": 129},
+            {"max_pattern_size": 0},
+            {"min_count": 1},
+            {"min_count": True},
+            {"min_count": "8"},
+            {"max_pattern_size": 128.5},
+            {"unknown_setting": 1},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValidationError):
+                RepetitionDetection.model_validate(values)
+
     def test_required_case_fields_no_defaults_and_no_extra_parameters(self) -> None:
         for case in (schelling(), civil()):
             complete = case.model_dump()
@@ -92,7 +111,7 @@ class ConfigurationTests(unittest.TestCase):
             "simulation": "schelling",
             "tolerance": 0.7,
             "vacancy_fraction": 0.15,
-            "vision_radius": 1,
+            "vision_radius": 2,
             "seed": 10002,
         }
         citizen_settings = {

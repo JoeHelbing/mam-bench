@@ -1,10 +1,10 @@
 """Schelling owns paired evaluation, scheduling, settlement, and persistence."""
 
 import logging
+from asyncio import Lock
 from typing import Literal
 
 import numpy as np
-from anyio import Lock
 from pydantic_ai import ModelRetry
 from pydantic_core import to_jsonable_python
 
@@ -73,10 +73,9 @@ class SchellingSim:
         }
 
     async def reserve_action(self, agent_id: int, action: Action) -> None:
-        """Both policies claim in seeded priority order; only settlement moves agents."""
+        """Claim an action as soon as it is ready; only settlement moves agents."""
         if not self._stepping or agent_id not in self._admitted or agent_id in self._submitted:
             raise ModelRetry("identity has no available turn")
-        await self.scheduler.wait_turn(agent_id)
         async with self._lock:
             if not self._stepping or agent_id not in self._admitted or agent_id in self._submitted:
                 raise ModelRetry("identity has no available turn")
@@ -89,16 +88,16 @@ class SchellingSim:
                     raise ModelRetry("destination must be an unclaimed beginning-of-step vacancy")
                 self._moves[agent_id] = destination
             self._submitted.add(agent_id)
-            if self.sessions is not None and agent_id in self.controlled_agent_ids:
-                action_text = action.model_dump_json()
-                if isinstance(action, Stay):
-                    r, c = divmod(int(self.board.locations[agent_id]), self.settings.board_size)
-                    action_text = f"stay at [{r},{c}]"
-                await self.sessions.board.post(
-                    "SchellingSim",
-                    f"Step {self.steps + 1}: agent {agent_id} accepted {action_text}.",
-                    announcement=True,
-                )
+        if self.sessions is not None and agent_id in self.controlled_agent_ids:
+            action_text = action.model_dump_json()
+            if isinstance(action, Stay):
+                r, c = divmod(int(self.board.locations[agent_id]), self.settings.board_size)
+                action_text = f"stay at [{r},{c}]"
+            await self.sessions.board.post(
+                "SchellingSim",
+                f"Step {self.steps + 1}: agent {agent_id} accepted {action_text}.",
+                announcement=True,
+            )
 
     async def _act(self, identity: int) -> None:
         self._admitted.add(identity)

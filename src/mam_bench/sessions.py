@@ -23,11 +23,6 @@ from pydantic_ai import (
     capture_run_messages,
 )
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability
-from pydantic_ai.capabilities.abstract import (
-    ValidatedToolArgs,
-    WrapModelRequestHandler,
-    WrapToolExecuteHandler,
-)
 from pydantic_ai.exceptions import (
     IncompleteToolCall,
     ModelAPIError,
@@ -46,7 +41,6 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai_harness import (
     FallbackCompaction,
@@ -70,77 +64,19 @@ from mam_bench.diagnostics import ExecutionFailure, failure_trace
 logger = logging.getLogger(__name__)
 
 
-class _RequestLogging[DepsT](AbstractCapability[DepsT]):
-    def __init__(self, session_id: str, on_response: Callable[[ModelResponse], None]) -> None:
-        self.session_id = session_id
+class _CacheObservation[DepsT](AbstractCapability[DepsT]):
+    def __init__(self, on_response: Callable[[ModelResponse], None]) -> None:
         self.on_response = on_response
 
-    async def wrap_model_request(
+    async def after_model_request(
         self,
         ctx: RunContext[DepsT],
         *,
         request_context: ModelRequestContext,
-        handler: WrapModelRequestHandler,
+        response: ModelResponse,
     ) -> ModelResponse:
-        started = monotonic()
-        logger.debug(
-            "request.start session=%s request=%d messages=%d",
-            self.session_id,
-            ctx.usage.requests,
-            len(request_context.messages),
-        )
-        try:
-            response = await handler(request_context)
-        except BaseException as error:
-            logger.debug(
-                "request.failed session=%s elapsed_s=%.3f trace=%s",
-                self.session_id,
-                monotonic() - started,
-                failure_trace(error),
-            )
-            raise
         self.on_response(response)
-        logger.debug(
-            "request.end session=%s elapsed_s=%.3f input_tokens=%d output_tokens=%d "
-            "finish=%s tools=%s",
-            self.session_id,
-            monotonic() - started,
-            response.usage.input_tokens,
-            response.usage.output_tokens,
-            response.finish_reason,
-            [part.tool_name for part in response.parts if isinstance(part, ToolCallPart)],
-        )
         return response
-
-    async def wrap_tool_execute(
-        self,
-        ctx: RunContext[DepsT],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: ValidatedToolArgs,
-        handler: WrapToolExecuteHandler,
-    ) -> object:
-        started = monotonic()
-        logger.debug("tool.start session=%s tool=%s", self.session_id, call.tool_name)
-        try:
-            result = await handler(args)
-        except BaseException as error:
-            logger.debug(
-                "tool.failed session=%s tool=%s exception=%s elapsed_s=%.3f",
-                self.session_id,
-                call.tool_name,
-                type(error).__name__,
-                monotonic() - started,
-            )
-            raise
-        logger.debug(
-            "tool.end session=%s tool=%s elapsed_s=%.3f",
-            self.session_id,
-            call.tool_name,
-            monotonic() - started,
-        )
-        return result
 
 
 class _Compaction[DepsT](FallbackCompaction[DepsT]):
@@ -153,6 +89,9 @@ class _Compaction[DepsT](FallbackCompaction[DepsT]):
         logger.debug("compaction.start messages=%d", len(messages))
         try:
             result = await super().compact(messages, ctx)
+        except UsageLimitExceeded:
+            # Summarization shares the parent turn's budget and reserves its pending request.
+            raise
         except Exception as error:
             logger.error("compaction.failed trace=%s", failure_trace(error))
             raise ExecutionFailure("compaction", "compaction failed") from error
@@ -309,11 +248,11 @@ class AgentSessions[AgentDepsT, OutputDataT]:
         tools: FunctionToolset[AgentDepsT] = FunctionToolset()
 
         async def read_messages() -> MessagePage:
-            """Read the next page of unread shared messages and simulation announcements."""
+            """Read the next page of world messages to coordinate with other model agents."""
             return await self.board.read(session_id)
 
         async def post_message(text: str) -> int:
-            """Post up to 4000 characters to the shared message board."""
+            """Post up to 4000 characters for other model agents to read from the shared board."""
             return await self.board.post(session_id, text)
 
         tools.add_function(
@@ -375,7 +314,7 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                                     if self._archive is not None
                                     else ()
                                 ),
-                                _RequestLogging[AgentDepsT](session_id, self._observe_cache),
+                                _CacheObservation[AgentDepsT](self._observe_cache),
                                 compaction,
                                 self._memory(session_id),
                                 recovery,

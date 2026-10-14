@@ -69,10 +69,26 @@ class OpenRouterSettings(BaseSettings):
 
 
 class _CompatibleChatModel(OpenAIChatModel):
-    """Normalize SGLang telemetry while retaining normal completion validation."""
+    """Normalize known local-server extensions before completion validation."""
 
     def _process_response(self, response: ChatCompletion | str) -> ModelResponse:
+        repetition = isinstance(response, ChatCompletion) and any(
+            str(choice.finish_reason) == "repetition" for choice in response.choices
+        )
         if isinstance(response, ChatCompletion):
+            if repetition:
+                # Native early termination uses the same bounded incomplete-output
+                # handling as a length stop; preserve its actual cause below.
+                response = response.model_copy(
+                    update={
+                        "choices": [
+                            choice.model_copy(update={"finish_reason": "length"})
+                            if str(choice.finish_reason) == "repetition"
+                            else choice
+                            for choice in response.choices
+                        ]
+                    }
+                )
             metadata = cast(dict[str, object] | None, response.metadata)
             if isinstance(metadata, dict) and isinstance(metadata.get("weight_versions"), list):
                 # SGLang emits spans here; OpenAI metadata permits only string values.
@@ -84,7 +100,14 @@ class _CompatibleChatModel(OpenAIChatModel):
                         }
                     }
                 )
-        return super()._process_response(response)
+        result = super()._process_response(response)
+        if repetition:
+            result.provider_details = {
+                **(result.provider_details or {}),
+                "finish_reason": "repetition",
+                "stop_reason": "repetition_detected",
+            }
+        return result
 
 
 def create_model(selection: ModelSelection) -> Model:
@@ -103,6 +126,11 @@ def create_model(selection: ModelSelection) -> Model:
     )
 
     if isinstance(selection, OpenAICompatibleModel):
+        if selection.repetition_detection is not None:
+            request_settings["extra_body"] = {
+                **cast(dict[str, object], request_settings.get("extra_body") or {}),
+                "repetition_detection": selection.repetition_detection.model_dump(),
+            }
         model = _CompatibleChatModel(
             selection.model,
             # Local chat templates can require exactly one leading system message.

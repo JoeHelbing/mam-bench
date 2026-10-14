@@ -2,8 +2,10 @@
 
 import argparse
 import asyncio
+import os
 import sys
 from collections.abc import Sequence
+from contextlib import ExitStack
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -11,7 +13,8 @@ from yaml import YAMLError
 
 from mam_bench.config import DEFAULT_SUITE, load_benchmark_config
 from mam_bench.diagnostics import configure_logging
-from mam_bench.runner import BenchmarkRunFailure, BenchmarkRunner, CaseResult
+from mam_bench.runner import BenchmarkResult, BenchmarkRunFailure, BenchmarkRunner, CaseResult
+from mam_bench.telemetry import collect_telemetry
 
 
 def format_case(index: int, result: CaseResult) -> str:
@@ -41,15 +44,24 @@ def main(arguments: Sequence[str] | None = None) -> int:
         return 2
     configure_logging(config.log_level)
     runner = BenchmarkRunner(config)
-    try:
-        result = asyncio.run(
-            runner.run(
-                on_output_directory=lambda path: print(
-                    f"Output directory: {path}", file=sys.stderr, flush=True
-                ),
+
+    async def run_benchmark() -> BenchmarkResult:
+        # Collection and its trace context belong to the benchmark's async task.
+        with ExitStack() as stack:
+
+            def started(path: Path) -> None:
+                stack.enter_context(
+                    collect_telemetry(path, send_to_logfire=bool(os.environ.get("LOGFIRE_TOKEN")))
+                )
+                print(f"Output directory: {path}", file=sys.stderr, flush=True)
+
+            return await runner.run(
+                on_output_directory=started,
                 on_case=lambda index, case: print(format_case(index, case), flush=True),
             )
-        )
+
+    try:
+        result = asyncio.run(run_benchmark())
     except BenchmarkRunFailure as error:
         if error.case_index is not None:
             print(

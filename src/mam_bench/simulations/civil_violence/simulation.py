@@ -1,11 +1,11 @@
 """Binary Cascade phase rules, simulation-owned scheduling and paired evaluation."""
 
 import logging
+from asyncio import Lock
 from dataclasses import asdict
 from typing import Literal
 
 import numpy as np
-from anyio import Lock
 from pydantic_ai import ModelRetry
 from pydantic_core import to_jsonable_python
 
@@ -257,7 +257,6 @@ class CivilViolenceSim:
         """Validate a whole action before claiming any resource, for either policy."""
         if agent_id not in self._admitted or agent_id in self._submitted:
             raise ModelRetry("identity has no available turn in this phase")
-        await self.scheduler.wait_turn(agent_id)
         async with self._lock:
             if agent_id not in self._admitted or agent_id in self._submitted:
                 raise ModelRetry("identity has no available turn in this phase")
@@ -274,13 +273,13 @@ class CivilViolenceSim:
             except ValueError as error:
                 raise ModelRetry(str(error)) from None
             self._submitted.add(agent_id)
-            if self.sessions is not None and agent_id in self.controlled_agent_ids:
-                await self.sessions.board.post(
-                    "CivilViolenceSim",
-                    f"Step {self.steps + 1}: agent {agent_id} accepted "
-                    f"{type(action).__name__} {asdict(action)}.",
-                    announcement=True,
-                )
+        if self.sessions is not None and agent_id in self.controlled_agent_ids:
+            await self.sessions.board.post(
+                "CivilViolenceSim",
+                f"Step {self.steps + 1}: agent {agent_id} accepted "
+                f"{type(action).__name__} {asdict(action)}.",
+                announcement=True,
+            )
 
     async def _act(self, agent_id: int) -> None:
         self._admitted.add(agent_id)

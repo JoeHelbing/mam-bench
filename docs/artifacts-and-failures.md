@@ -2,7 +2,8 @@
 
 ```text
 <output>/<timestamp>-<uuid>/
-  config.json
+  config.json                   # original requested model and suite
+  effective-model.json          # requested settings and discovered serving facts
   completed-cases.jsonl
   benchmark.json                 # complete runs only; calculated total_score
   failure.json                   # failed runs, when storage permits
@@ -29,6 +30,14 @@ not separate phase snapshots. States contain stable identities, locations,
 simulation-specific state, and intermediate measurements. Case results contain
 the exact settings, scored/controlled identities, both outcomes and termination,
 and calculated scores. Those same result objects feed saved and displayed totals.
+The effective setup records discovered context/capabilities separately from
+requested settings. It does not claim to know unreported endpoint generation
+defaults. Native CLI telemetry records request/token/cache
+usage, including summary calls and requests completed before a later failure.
+An absent or zero cache-token count does not establish a measured cache miss.
+Native message snapshots retain per-response usage. Direct library users can
+enable telemetry with `collect_telemetry`; simulations do not write a separate
+usage artifact.
 
 Native Harness `StepPersistence` retains messages, model reasoning when returned,
 tool calls/results, and interrupted runs. Shared-board posts persist as accepted.
@@ -42,6 +51,8 @@ or retry budgets select a simulation fallback and retain a diagnostic reason.
 They do not cause an infrastructure failure or an extra scoring penalty.
 Provider/network/timeouts, persistence failures, and simulation defects stop
 the invocation and cancel outstanding turns. Completed records remain available.
+Native compaction runs before requests; a server-rejected context overflow
+follows normal provider-failure handling.
 Failure records are best effort; failure to write one is logged without masking
 the original error. There is no resume or selective rerun support.
 

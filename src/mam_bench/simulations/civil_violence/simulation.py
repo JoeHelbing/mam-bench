@@ -78,6 +78,7 @@ class CivilViolenceSim:
             AgentSessions(
                 model_agent.model_interface(runtime),
                 settings=runtime.settings,
+                context_window_tokens=runtime.context_window_tokens,
                 artifact_directory=runtime.writer.directory,
             )
             if runtime
@@ -344,6 +345,7 @@ class CivilViolenceSim:
             },
         )
         reference_outcome = await self.run(runtime.writer, "ordinary")
+
         controlled_outcome = await controlled.run(runtime.writer, "controlled")
         result = EvaluationResult(
             config=self.settings,

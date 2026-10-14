@@ -262,7 +262,6 @@ exhaustion means stay.
             str(self.agent_id),
             json.dumps(self.observation()),
             deps=self,
-            model_settings={"seed": simulation.settings.seed + simulation.steps + self.agent_id},
         )
         if isinstance(turn, Stopped):
             runtime.writer.append(

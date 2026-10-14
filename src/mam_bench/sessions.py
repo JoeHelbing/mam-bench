@@ -28,12 +28,6 @@ from pydantic_ai.exceptions import (
     UnexpectedModelBehavior,
     UsageLimitExceeded,
 )
-from pydantic_ai.messages import (
-    ModelRequest,
-    RetryPromptPart,
-    ToolCallPart,
-    ToolReturnPart,
-)
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai_harness import (
@@ -93,7 +87,6 @@ class Stopped:
 @dataclass
 class _SessionState:
     history: list[ModelMessage] = field(default_factory=lambda: list[ModelMessage]())
-    usage: RunUsage = field(default_factory=RunUsage)
     lock: Lock = field(default_factory=Lock)
 
 
@@ -104,11 +97,13 @@ class AgentSessions[AgentDepsT, OutputDataT]:
         self,
         agent: Agent[AgentDepsT, OutputDataT],
         *,
+        context_window_tokens: int,
         settings: AgentSettings | None = None,
         artifact_directory: Path | None = None,
     ) -> None:
         self._agent = agent
         self._settings = settings or AgentSettings()
+        self._context_window_tokens = context_window_tokens
         self._store = InMemoryStore()
         self._states: dict[str, _SessionState] = {}
         self._failure: BaseException | None = None
@@ -169,9 +164,11 @@ class AgentSessions[AgentDepsT, OutputDataT]:
         The simulation decides its fallback action for a stopped turn.
         Execution failures stop all sessions in this world.
         """
-        if not self._settings.use_sampling_seed and model_settings is not None:
-            model_settings = model_settings.copy()
-            model_settings.pop("seed", None)
+        if self._settings.max_completion_tokens is not None:
+            model_settings = {
+                "max_tokens": self._settings.max_completion_tokens,
+                **(model_settings or {}),
+            }
         state = self._state(session_id)
         async with state.lock:
             self._check_active()
@@ -290,39 +287,9 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                         usage.input_tokens,
                         usage.output_tokens,
                     )
-                if isinstance(turn, Stopped):
-                    self._close_stopped_turn(messages)
+                    self._usage.incr(usage)
                 state.history = list(messages)
-                state.usage.incr(usage)
-                self._usage.incr(usage)
                 return turn
-
-    @staticmethod
-    def _close_stopped_turn(messages: list[ModelMessage]) -> None:
-        """Pair pending calls before submitting this history in the next round."""
-        answered: set[str] = set()
-        for message in reversed(messages):
-            if isinstance(message, ModelRequest):
-                answered.update(
-                    part.tool_call_id
-                    for part in message.parts
-                    if isinstance(part, (ToolReturnPart, RetryPromptPart))
-                )
-            else:
-                missing = [
-                    ToolReturnPart(
-                        tool_name=part.tool_name,
-                        tool_call_id=part.tool_call_id,
-                        content=(
-                            "Turn ended at its usage or retry limit; no tool result was returned."
-                        ),
-                    )
-                    for part in message.parts
-                    if isinstance(part, ToolCallPart) and part.tool_call_id not in answered
-                ]
-                if missing:
-                    messages.append(ModelRequest(parts=missing))
-                break
 
     def _state(self, session_id: str) -> _SessionState:
         if not session_id:
@@ -351,21 +318,22 @@ class AgentSessions[AgentDepsT, OutputDataT]:
         summarizer: SummarizingCompaction[AgentDepsT] = SummarizingCompaction(
             model=model,
             max_tokens=1,
-            keep_tokens=settings.compaction_tail_tokens,
+            keep_tokens=settings.compaction_tail(self._context_window_tokens),
             incremental=True,
             preserve_first_user_message=False,
             receipts=True,
-            model_settings={"max_tokens": settings.summary_completion_tokens},
+            model_settings={"max_tokens": settings.summary_completion_tokens}
+            if settings.summary_completion_tokens is not None
+            else None,
         )
         sliding: SlidingWindowCompaction[AgentDepsT] = SlidingWindowCompaction(
             max_tokens=1,
-            keep_tokens=settings.compaction_tail_tokens,
+            keep_tokens=settings.compaction_tail(self._context_window_tokens),
             preserve_first_user_message=False,
             receipts=True,
         )
-        fallback = _Compaction[AgentDepsT]([summarizer, sliding])
         return TieredCompaction(
-            tiers=[fallback],
+            tiers=[_Compaction[AgentDepsT]([summarizer, sliding])],
             target_fraction=settings.compaction_trigger_fraction,
-            context_window=settings.context_window_tokens,
+            context_window=self._context_window_tokens,
         )

@@ -5,20 +5,30 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from mam_bench.artifacts import ArtifactWriter
-from mam_bench.config import AgentSettings, BenchmarkConfig, CaseSettings
+from mam_bench.config import AgentSettings, BenchmarkConfig, CaseSettings, ModelSelection
+from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunFailure, BenchmarkRunner
 from support import civil, observation, records, schelling, selection, stay
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        discovery = patch(
+            "mam_bench.model_setup._fetch_vllm_model",
+            AsyncMock(return_value=VLLMModelMetadata(id="scripted", max_model_len=260_000)),
+        )
+        discovery.start()
+        self.addCleanup(discovery.stop)
+
     async def test_complete_suite_order_fresh_case_state_and_saved_total(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = BenchmarkConfig(
@@ -35,6 +45,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             assert runner.output_directory is not None
             saved = json.loads((runner.output_directory / "benchmark.json").read_text())
             self.assertEqual(saved["total_score"], sum(case["score"] for case in saved["cases"]))
+            self.assertTrue((runner.output_directory / "effective-model.json").exists())
             before = {
                 p.relative_to(runner.output_directory): p.read_bytes()
                 for p in runner.output_directory.rglob("*")
@@ -48,6 +59,70 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 all(
                     (runner.output_directory / p).read_bytes() == data for p, data in before.items()
                 )
+            )
+
+    async def test_preflight_records_effective_model_before_first_case(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original = selection()
+            effective = original.model_copy(
+                update={"settings": AgentSettings(max_completion_tokens=512)}
+            )
+            config = BenchmarkConfig(
+                model=original,
+                cases=(schelling(max_steps=1),),
+                output_directory=Path(directory),
+            )
+            seen: list[ModelSelection] = []
+
+            def model_factory(selected: ModelSelection) -> FunctionModel:
+                seen.append(selected)
+                return FunctionModel(stay)
+
+            runner = BenchmarkRunner(config, model_factory=model_factory)
+            resolve = AsyncMock(
+                return_value=SimpleNamespace(
+                    selection=effective,
+                    context_window_tokens=16_384,
+                    metadata={"source": "test-endpoint", "reason": "smaller output limit"},
+                )
+            )
+            with patch("mam_bench.runner.resolve_model_setup", resolve):
+                result = await runner.run()
+            self.assertEqual(seen, [effective])
+            self.assertEqual(result.model, effective)
+            assert runner.output_directory is not None
+            output = runner.output_directory
+            original_record = json.loads((output / "config.json").read_text())
+            self.assertIsNone(original_record["model"]["settings"]["max_completion_tokens"])
+            record = json.loads((output / "effective-model.json").read_text())
+            self.assertEqual(record["model"]["settings"]["max_completion_tokens"], 512)
+            self.assertEqual(record["metadata"]["source"], "test-endpoint")
+            self.assertTrue((output / "cases/001/result.json").exists())
+
+    async def test_failed_preflight_starts_no_case_or_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runner = BenchmarkRunner(
+                BenchmarkConfig(
+                    model=selection(),
+                    cases=(schelling(max_steps=1),),
+                    output_directory=Path(directory),
+                ),
+                model_factory=lambda _: self.fail("preflight must precede model construction"),
+            )
+            with (
+                patch(
+                    "mam_bench.runner.resolve_model_setup",
+                    AsyncMock(side_effect=ValueError("missing endpoint limit")),
+                ),
+                self.assertRaises(BenchmarkRunFailure) as failure,
+            ):
+                await runner.run()
+            self.assertIsNone(failure.exception.case_index)
+            assert runner.output_directory is not None
+            self.assertFalse((runner.output_directory / "cases").exists())
+            self.assertEqual(
+                json.loads((runner.output_directory / "failure.json").read_text())["kind"],
+                "ValueError",
             )
 
     async def test_each_scheduler_cancels_on_failure_keeps_steps_and_blocks_total(self) -> None:

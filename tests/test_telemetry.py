@@ -6,7 +6,7 @@ from contextlib import ExitStack
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Thread
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from pydantic_ai import Agent, ModelMessagesTypeAdapter
 from pydantic_ai.exceptions import ModelAPIError
@@ -17,6 +17,7 @@ from pydantic_ai_harness.step_persistence import FileStepStore
 
 from mam_bench.config import AgentSettings, BenchmarkConfig
 from mam_bench.diagnostics import ExecutionFailure
+from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunner
 from mam_bench.sessions import AgentSessions, Completed
 from mam_bench.telemetry import collect_telemetry
@@ -24,6 +25,14 @@ from support import civil, schelling, selection, stay
 
 
 class TelemetryTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        discovery = patch(
+            "mam_bench.model_setup._fetch_vllm_model",
+            AsyncMock(return_value=VLLMModelMetadata(id="scripted", max_model_len=260_000)),
+        )
+        discovery.start()
+        self.addCleanup(discovery.stop)
+
     async def test_native_collection_keeps_full_history_and_exports_three_signals(self) -> None:
         calls = 0
 
@@ -40,7 +49,11 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
             root = Path(directory)
             with self.assertLogs("mam_bench", level="DEBUG"), collect_telemetry(root):
-                sessions = AgentSessions(Agent(FunctionModel(respond)), artifact_directory=root)
+                sessions = AgentSessions(
+                    Agent(FunctionModel(respond)),
+                    context_window_tokens=260_000,
+                    artifact_directory=root,
+                )
                 outcome = await sessions.run("agent-a", "PRIVATE PROMPT", deps=None)
             self.assertEqual(outcome, Completed("PRIVATE ANSWER"))
             self.assertEqual(sessions.usage.requests, 2)
@@ -93,8 +106,8 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
             with collect_telemetry(root):
                 sessions = AgentSessions(
                     Agent(FunctionModel(respond)),
+                    context_window_tokens=200,
                     settings=AgentSettings(
-                        context_window_tokens=200,
                         compaction_trigger_fraction=0.5,
                         compaction_tail_tokens=20,
                         summary_completion_tokens=16,
@@ -132,7 +145,11 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            sessions = AgentSessions(Agent(FunctionModel(respond)), artifact_directory=root)
+            sessions = AgentSessions(
+                Agent(FunctionModel(respond)),
+                context_window_tokens=260_000,
+                artifact_directory=root,
+            )
             with collect_telemetry(root), self.assertRaises(ExecutionFailure) as failure:
                 await sessions.run("agent-a", "retained prompt", deps=None)
             self.assertEqual(failure.exception.kind, "provider")
@@ -222,7 +239,9 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                         collect_telemetry(root, send_to_logfire=True),
                     ):
                         sessions = AgentSessions(
-                            Agent(FunctionModel(respond)), artifact_directory=root
+                            Agent(FunctionModel(respond)),
+                            context_window_tokens=260_000,
+                            artifact_directory=root,
                         )
                         outcome = await sessions.run("agent", "synthetic input", deps=None)
                     self.assertEqual(outcome, Completed("done"))

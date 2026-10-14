@@ -39,6 +39,7 @@ class SchellingSim:
             AgentSessions(
                 ModelControlledAgent.model_interface(runtime),
                 settings=runtime.settings,
+                context_window_tokens=runtime.context_window_tokens,
                 artifact_directory=runtime.writer.directory,
             )
             if runtime
@@ -187,6 +188,7 @@ class SchellingSim:
         )
         reference_outcome = await self.run(writer, "ordinary")
         controlled.reference_homophily = reference_outcome.homophily[-1]
+
         controlled_outcome = await controlled.run(writer, "controlled")
         result = EvaluationResult(
             config=self.settings,

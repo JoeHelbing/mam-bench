@@ -30,7 +30,9 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             return ModelResponse(parts=[])
 
         runtime = AgentSessions(
-            Agent(FunctionModel(slow)), settings=AgentSettings(timeout_seconds=0.01)
+            Agent(FunctionModel(slow)),
+            context_window_tokens=260_000,
+            settings=AgentSettings(timeout_seconds=0.01),
         )
         with (
             self.assertLogs("mam_bench", level="DEBUG") as captured,
@@ -48,7 +50,7 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         async def broken(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             raise APITimeoutError(request=httpx.Request("POST", "https://SECRET.invalid"))
 
-        runtime = AgentSessions(Agent(FunctionModel(broken)))
+        runtime = AgentSessions(Agent(FunctionModel(broken)), context_window_tokens=260_000)
         with (
             self.assertLogs("mam_bench", level="DEBUG") as captured,
             self.assertRaises(ExecutionFailure),
@@ -69,7 +71,7 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 return ModelResponse(parts=[ToolCallPart("post_message", {"text": "PRIVATE POST"})])
             return ModelResponse(parts=[TextPart("PRIVATE OUTPUT")])
 
-        runtime = AgentSessions(Agent(FunctionModel(scripted)))
+        runtime = AgentSessions(Agent(FunctionModel(scripted)), context_window_tokens=260_000)
         with self.assertLogs("mam_bench", level="DEBUG") as captured:
             self.assertEqual(
                 await runtime.run("a", "PRIVATE INPUT", deps=None), Completed("PRIVATE OUTPUT")

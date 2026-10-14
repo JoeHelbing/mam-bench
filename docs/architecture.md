@@ -2,9 +2,25 @@
 
 For either simulation, start at [main.py](../main.py): parse an explicit model file
 and suite, then [config.py](../src/mam_bench/config.py) validates the complete nested
-configuration. [BenchmarkRunner](../src/mam_bench/runner.py) creates one provider,
-one fresh `CaseRuntime` and writer per case, constructs the selected simulation,
-and awaits `evaluate(runtime)`. It never steps a world.
+configuration. [model_setup.py](../src/mam_bench/model_setup.py) discovers the
+served context and available capabilities from vLLM or OpenRouter once before
+any case, and validates YAML request overrides against known constraints. It
+leaves omitted generation settings to the endpoint. The runner records the input
+config and effective setup, then creates one provider, one fresh `CaseRuntime`
+and writer per case with discovered context passed separately from YAML settings,
+constructs the selected simulation, and awaits
+`evaluate(runtime)`. It never steps a world.
+
+[runtime.py](../src/mam_bench/runtime.py) selects native `VLLMProvider` or
+`OpenRouterProvider` profiles and passes unified thinking settings to the model.
+Native profiles retain their tool-choice and reasoning safeguards. The runtime
+enables native OpenRouter cache controls without a separate cache policy.
+Model requests receive no automatic sampling seed; simulation random streams
+remain addressed by the case seed. The local model adapter only normalizes vLLM's
+repetition stop while preserving its cause.
+An explicit `tool_choice: auto` opts out of forcing; otherwise native output
+selection decides when forcing is supported. Session history is repaired by
+PydanticAI before requests, rather than rewritten after stopped turns.
 
 For Schelling, [simulation.py](../src/mam_bench/simulations/schelling/simulation.py)
 constructs two distinct worlds through the same constructor, executes its single
@@ -31,7 +47,15 @@ Both use [sessions.py](../src/mam_bench/sessions.py) for individual model turns,
 private history/memory, and communication. Instructions carry identity, goal,
 and standing rules; user inputs contain changing JSON observations. Each
 simulation owns legality and settlement. [scheduling.py](../src/mam_bench/scheduling.py)
-shares cohort ordering, concurrent admission, claim gates, failure cleanup, and
+shares cohort ordering, concurrent admission, failure cleanup, and
 addressed random streams. [artifacts.py](../src/mam_bench/artifacts.py) writes supplied
 records and preserves native archives. The runner retains case
 results, and `BenchmarkResult.total_score` sums their calculated scores.
+
+At run-directory creation, the CLI enters [telemetry.py](../src/mam_bench/telemetry.py)
+in the task that owns the benchmark. It configures native Pydantic AI
+instrumentation and OpenTelemetry providers/exporters for local traces, logs,
+and metrics, with optional Logfire delivery. Harness remains the full conversation
+archive; native call IDs connect exported traces to saved messages. The narrow
+export policy removes provider exception bodies without changing the native
+transport, usage accounting, or simulation execution.

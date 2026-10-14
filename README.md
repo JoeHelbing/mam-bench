@@ -85,11 +85,39 @@ The directory is Git-ignored. Replace the placeholders with a real model ID and
 endpoint; do not put credentials in YAML:
 
 ```yaml
-runtime: openai-compatible
+runtime: vllm
 model: YOUR_MODEL_ID
 base_url: https://YOUR-ENDPOINT.example/v1
 api_key_env: MAM_MODEL_API_KEY
 ```
+
+Use the actual served model ID so PydanticAI's `VLLMProvider` can select its
+model-family profile. It handles reasoning, tool schemas, and system-message
+formatting. Generic OpenAI-compatible and SGLang runtimes are not supported.
+`settings.reasoning_effort` uses native unified thinking (`none` disables it).
+Omitted sampling, reasoning, and output-token settings use endpoint defaults,
+including for history summaries. MAM-Bench does not add a model-request seed;
+case seeds still control simulation randomness. Put desired request overrides
+under `settings` in the model YAML.
+`tool_choice: required` retains native fallback when a profile cannot force
+tools; `tool_choice: auto` opts out of forcing while keeping terminal actions.
+
+For local vLLM builds supporting repeated-pattern detection, add this at the
+top level of the model YAML for future runs:
+
+```yaml
+repetition_detection:
+  min_pattern_size: 16
+  max_pattern_size: 128
+  min_count: 8
+```
+
+This stops consecutive repeated token patterns early; it does not change token
+probabilities. The policy applies to agent and summary requests and is retained
+in the run configuration. Omit it, or use `repetition_detection: null`, for a
+baseline or a server without this vLLM extension. The adapter retains a native
+repetition stop in provider details and uses bounded incomplete-output handling.
+These thresholds are an initial policy, not a measured optimum.
 
 Export `MAM_MODEL_API_KEY` in the environment, including for a local server
 that ignores its value: this adapter still requires the variable. Keep secrets
@@ -100,11 +128,16 @@ uv run --no-sync main.py --model .scratch/model.yaml --output results/default
 ```
 
 **This makes real model requests and can incur substantial charges.** Check
-endpoint support and pricing before running all six cases. Each invocation
-creates a new output directory and does not overwrite a previous run. Results
+endpoint support, data-use terms, and pricing before running all six cases.
+Each invocation creates a new output directory and does not overwrite a
+previous run. Results
 include model conversations; handle them as sensitive data. See
 [artifacts and failures](docs/artifacts-and-failures.md) for the saved records
 and failure behavior.
+
+Each CLI run also saves native OpenTelemetry traces, logs and metrics locally.
+Set `LOGFIRE_TOKEN` to send metadata to Logfire in the background. Full agent
+conversations remain in local Harness archives; cloud content capture is disabled.
 
 You can replace the six cases with a YAML suite of your own:
 
@@ -115,12 +148,46 @@ uv run --no-sync main.py --model .scratch/model.yaml \
 
 The [custom suite guide](docs/custom-test-suite.md) lists every allowed field.
 The shipped cases select `max_steps: 30`; custom cases can choose another
-positive integer in either simulation. For OpenRouter instead, select
+positive integer in either simulation. For OpenRouter, select
 `runtime: openrouter` with `model` and `provider` in the model YAML, and set
-`OPENROUTER_API_KEY` in the environment or `.env`. Model sampling, tool choice,
-request budgets, and compaction settings are validated in
-[config.py](src/mam_bench/config.py). If you use mise, `mise install` and
-`mise run setup` prepare the pinned project tools and dependencies.
+`OPENROUTER_API_KEY` in the environment or `.env`:
+
+```yaml
+runtime: openrouter
+model: meta/muse-spark-1.3-contributor
+provider: meta
+settings:
+  reasoning_effort: medium
+  tool_choice: auto
+```
+
+Meta's live Muse endpoint rejected `required` even though its metadata
+advertised support, so this example selects `auto` explicitly. Before the first
+case, setup discovers the selected provider's limits from OpenRouter endpoint
+metadata or the served vLLM model's `/v1/models` entry. Missing context metadata
+stops setup; context limits cannot be supplied in YAML. All selected OpenRouter
+routes must report context; the smallest context/prompt ceiling applies when
+routes differ. Larger served context remains available to the benchmark.
+
+Setup rejects request overrides that violate known constraints. Unknown parameter
+capabilities are left to the native provider and endpoint. Omitted generation
+settings remain unset; setup does not invent output reservations or silently
+reduce requested limits. Compaction, retained history, memory, concurrency, and
+timeouts remain benchmark settings. Compaction uses the discovered context and
+the configured trigger fraction (default 70%); token estimates and unknown
+endpoint output defaults cannot guarantee that every request fits.
+Direct library callers supply discovered context separately to `CaseRuntime`
+and `AgentSessions`.
+
+PydanticAI owns model-specific reasoning, tool safeguards, and prompt-cache
+breakpoints. MAM-Bench enables its native OpenRouter instruction, message, and
+tool caching controls; native profiles handle supported hints. Native telemetry
+records reported cache usage; hints never guarantee a hit. The run saves requested
+settings and discovered serving facts separately; unreported endpoint defaults
+remain unknown. See [config.py](src/mam_bench/config.py) and
+[model_setup.py](src/mam_bench/model_setup.py). If you use mise,
+`mise install` and `mise run setup` prepare the pinned project tools and
+dependencies.
 
 ## Reference
 

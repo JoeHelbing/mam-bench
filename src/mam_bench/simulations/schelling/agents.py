@@ -95,7 +95,6 @@ class OrdinaryAgent(SimulationAgent):
         return Move(row=row, column=column)
 
     async def choose_action(self) -> Action:
-        await self.simulation.scheduler.wait_turn(self.agent_id)
         return self.propose_action()
 
 
@@ -159,8 +158,8 @@ local vision is shown; remaining_vacancies counts all unclaimed vacancies.
 You may move to any unclaimed vacancy that existed at the start of the step,
 even outside your view, or stay. You do not have to improve your own satisfaction.
 Within each world, agents decide from that step's unchanged board. Selected
-identities reserve first, then the remaining ordinary agents. Claims follow seeded
-priority, not response speed. Only one agent can claim each vacancy. All moves
+identities reserve first, then the remaining ordinary agents. Ready actions claim
+immediately in arrival order. Only one agent can claim each vacancy. All moves
 settle together; vacated cells become available next step.
 
 Ordinary agents
@@ -263,7 +262,6 @@ exhaustion means stay.
             str(self.agent_id),
             json.dumps(self.observation()),
             deps=self,
-            model_settings={"seed": simulation.settings.seed + simulation.steps + self.agent_id},
         )
         if isinstance(turn, Stopped):
             runtime.writer.append(

@@ -15,7 +15,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from mam_bench.artifacts import ArtifactWriter
-from mam_bench.config import AgentSettings, OpenAICompatibleModel
+from mam_bench.config import AgentSettings, VLLMModel
 from mam_bench.runtime import CaseRuntime
 from mam_bench.simulations.civil_violence.settings import CivilViolenceSettings
 from mam_bench.simulations.schelling.settings import SchellingSettings
@@ -60,9 +60,9 @@ def civil(**updates: object) -> CivilViolenceSettings:
     )
 
 
-def selection() -> OpenAICompatibleModel:
-    return OpenAICompatibleModel(
-        runtime="openai-compatible",
+def selection() -> VLLMModel:
+    return VLLMModel(
+        runtime="vllm",
         model="scripted",
         base_url="http://127.0.0.1:1/v1",
         api_key_env="UNUSED_OFFLINE_TEST_KEY",
@@ -134,6 +134,7 @@ def runtime(path: Path, model: FunctionModel | None = None, **settings: object) 
         model or FunctionModel(stay),
         AgentSettings.model_validate({"concurrency": 2, "timeout_seconds": 5, **settings}),
         ArtifactWriter(path),
+        context_window_tokens=260_000,
     )
 
 

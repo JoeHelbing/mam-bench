@@ -1,6 +1,5 @@
 """Provider construction and settings shared by every simulation."""
 
-import json
 import os
 from dataclasses import dataclass
 from typing import cast
@@ -10,19 +9,19 @@ from openai.types.chat import ChatCompletion
 from pydantic import Field, SecretStr
 from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import Model
-from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.openrouter import (
     OpenRouterModel,
     OpenRouterModelSettings,
 )
 from pydantic_ai.profiles.openai import OpenAIModelProfile
-from pydantic_ai.providers.openai import OpenAIProvider
-from pydantic_ai.providers.openrouter import OpenRouterModelProfile, OpenRouterProvider
+from pydantic_ai.providers.openrouter import OpenRouterProvider
+from pydantic_ai.providers.vllm import VLLMProvider
 from pydantic_ai.settings import ModelSettings
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from mam_bench.artifacts import ArtifactWriter
-from mam_bench.config import AgentSettings, ModelSelection, OpenAICompatibleModel
+from mam_bench.config import AgentSettings, ModelSelection, VLLMModel
 
 
 @dataclass(frozen=True)
@@ -32,6 +31,7 @@ class CaseRuntime:
     model: Model
     settings: AgentSettings
     writer: ArtifactWriter
+    context_window_tokens: int
 
 
 class OpenRouterSettings(BaseSettings):
@@ -49,68 +49,93 @@ class OpenRouterSettings(BaseSettings):
     api_key: SecretStr = Field(min_length=1)
 
 
-class _CompatibleChatModel(OpenAIChatModel):
-    """Normalize SGLang telemetry while retaining normal completion validation."""
+class _VLLMChatModel(OpenAIChatModel):
+    """Normalize vLLM repetition stops until the native model accepts them."""
 
     def _process_response(self, response: ChatCompletion | str) -> ModelResponse:
-        if isinstance(response, ChatCompletion):
-            metadata = cast(dict[str, object] | None, response.metadata)
-            if isinstance(metadata, dict) and isinstance(metadata.get("weight_versions"), list):
-                # SGLang emits spans here; OpenAI metadata permits only string values.
-                response = response.model_copy(
-                    update={
-                        "metadata": {
-                            **metadata,
-                            "weight_versions": json.dumps(metadata["weight_versions"]),
-                        }
-                    }
-                )
-        return super()._process_response(response)
+        repetition = isinstance(response, ChatCompletion) and any(
+            str(choice.finish_reason) == "repetition" for choice in response.choices
+        )
+        if isinstance(response, ChatCompletion) and repetition:
+            # Native early termination uses the same bounded incomplete-output
+            # handling as a length stop; preserve its actual cause below.
+            response = response.model_copy(
+                update={
+                    "choices": [
+                        choice.model_copy(update={"finish_reason": "length"})
+                        if str(choice.finish_reason) == "repetition"
+                        else choice
+                        for choice in response.choices
+                    ]
+                }
+            )
+        result = super()._process_response(response)
+        if repetition:
+            result.provider_details = {
+                **(result.provider_details or {}),
+                "finish_reason": "repetition",
+                "stop_reason": "repetition_detected",
+            }
+        return result
 
 
 def create_model(selection: ModelSelection) -> Model:
-    """Create a model whose request defaults also apply to history summaries."""
+    """Apply shared request overrides; sessions own action and summary output caps."""
 
     agent_settings = selection.settings
-    # Provider-level forcing must retain PydanticAI's terminal output tools.
-    # ModelSettings.tool_choice='required' instead forces function tools only.
-    force_tools = agent_settings.tool_choice == "required"
-    request_settings = ModelSettings(
-        temperature=agent_settings.temperature,
-        top_p=agent_settings.top_p,
-        max_tokens=agent_settings.max_completion_tokens,
-        timeout=agent_settings.timeout_seconds,
-        extra_body={"top_k": agent_settings.top_k},
-    )
+    profile = OpenAIModelProfile()
+    if agent_settings.tool_choice == "auto":
+        # Tool-only output implies forcing. Opt out without asserting support
+        # or disabling the providers' conditional safety checks.
+        profile["openai_supports_tool_choice_required"] = False
+    request_settings = ModelSettings(timeout=agent_settings.timeout_seconds)
+    if agent_settings.temperature is not None:
+        request_settings["temperature"] = agent_settings.temperature
+    if agent_settings.top_p is not None:
+        request_settings["top_p"] = agent_settings.top_p
+    if agent_settings.reasoning_effort is not None:
+        request_settings["thinking"] = (
+            False if agent_settings.reasoning_effort == "none" else agent_settings.reasoning_effort
+        )
+    if agent_settings.top_k is not None:
+        request_settings["extra_body"] = {"top_k": agent_settings.top_k}
 
-    if isinstance(selection, OpenAICompatibleModel):
-        model = _CompatibleChatModel(
+    if isinstance(selection, VLLMModel):
+        if selection.repetition_detection is not None:
+            request_settings["extra_body"] = {
+                **cast(dict[str, object], request_settings.get("extra_body") or {}),
+                "repetition_detection": selection.repetition_detection.model_dump(),
+            }
+        model = _VLLMChatModel(
             selection.model,
-            # Local chat templates can require exactly one leading system message.
-            # Let PydanticAI combine instructions without changing their role or text.
-            profile=OpenAIModelProfile(
-                openai_chat_supports_multiple_system_messages=False,
-                openai_supports_tool_choice_required=force_tools,
-                openai_supports_forced_tool_choice_with_thinking=force_tools,
-            ),
-            provider=OpenAIProvider(
+            profile=profile,
+            provider=VLLMProvider(
                 base_url=selection.base_url,
                 api_key=os.environ[selection.api_key_env],
             ),
-            settings=OpenAIChatModelSettings(
-                **request_settings,
-                openai_reasoning_effort=agent_settings.reasoning_effort,
-            ),
+            settings=request_settings,
         )
     else:
         settings = OpenRouterSettings()  # pyright: ignore[reportCallIssue]
+        if selection.required_tool_choice_supported is False:
+            profile["openai_supports_tool_choice_required"] = False
+        router_settings = OpenRouterModelSettings(
+            **request_settings,
+            openrouter_provider={
+                "only": [selection.provider],
+                "allow_fallbacks": False,
+                "require_parameters": True,
+            },
+        )
+        router_settings["openrouter_cache_instructions"] = True
+        router_settings["openrouter_cache_messages"] = True
+        router_settings["openrouter_cache_tool_definitions"] = True
+        profile["openai_chat_supports_max_completion_tokens"] = (
+            selection.completion_token_parameter == "max_completion_tokens"
+        )
         model = OpenRouterModel(
             selection.model,
-            profile=OpenRouterModelProfile(
-                openai_supports_tool_choice_required=force_tools,
-                openai_supports_forced_tool_choice_with_thinking=force_tools,
-                openrouter_supports_forced_tool_choice_with_thinking=force_tools,
-            ),
+            profile=profile,
             provider=OpenRouterProvider(
                 openai_client=AsyncOpenAI(
                     base_url=settings.base_url,
@@ -118,15 +143,7 @@ def create_model(selection: ModelSelection) -> Model:
                     default_headers={"X-Title": "MAM-Bench"},
                 )
             ),
-            settings=OpenRouterModelSettings(
-                **request_settings,
-                openrouter_provider={
-                    "only": [selection.provider],
-                    "allow_fallbacks": False,
-                    "require_parameters": True,
-                },
-                openrouter_reasoning={"effort": agent_settings.reasoning_effort},
-            ),
+            settings=router_settings,
         )
 
     return model

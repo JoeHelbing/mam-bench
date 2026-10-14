@@ -146,7 +146,7 @@ _Avoid_: canonical Schelling model, original Schelling model
 **Staged Round**:
 One Reference Profile transition in which agents evaluate satisfaction from one
 frozen state. Selected replacement identities reserve first, followed by the
-remaining ordinary identities; each group follows its seeded Turn Priority.
+remaining ordinary identities; ready actions reserve in arrival order.
 All reserved moves are then applied together.
 _Avoid_: immediate sequential movement, response-order settlement
 
@@ -261,12 +261,6 @@ step or role phase. It receives a frozen observation, can communicate and use
 private memory, and ends with a legal role-specific action or fallback.
 _Avoid_: wave, request, round
 
-**Turn Priority**:
-The seeded order in which a group's action claims are accepted. Corresponding
-identities have the same priority in paired worlds, regardless of decision policy
-or response speed. Priority is distinct from concurrent decision-making.
-_Avoid_: response order, wall-clock order
-
 **Paired Random Slot**:
 The randomness assigned to one identity and decision purpose in one step and
 role phase. Corresponding slots match across paired worlds; an unused slot does
@@ -292,7 +286,7 @@ _Avoid_: policy rejection, stay, zero score
 
 **Counterfactual Reference**:
 The all-Ordinary-Agent run computed before a Model Evaluation from its same
-initial condition, selected-identity priority, and Paired Random Slots. Its values
+initial condition, selected identities, and Paired Random Slots. Its values
 remain in memory and supply the ordinary outcome comparator.
 _Avoid_: landscape average, reference landscape cell
 

@@ -5,7 +5,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import main
 import yaml
@@ -14,11 +14,20 @@ from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from mam_bench.config import BenchmarkConfig
+from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunner
 from support import civil, schelling, selection, stay
 
 
 class MainTests(unittest.TestCase):
+    def setUp(self) -> None:
+        discovery = patch(
+            "mam_bench.model_setup._fetch_vllm_model",
+            AsyncMock(return_value=VLLMModelMetadata(id="scripted", max_model_len=260_000)),
+        )
+        discovery.start()
+        self.addCleanup(discovery.stop)
+
     def files(self, root: Path) -> list[str]:
         (root / "model.yaml").write_text(yaml.safe_dump(selection().model_dump()))
         (root / "suite.yaml").write_text(
@@ -63,6 +72,9 @@ class MainTests(unittest.TestCase):
             self.assertIn('"objective":"increase"', text)
             self.assertIn("Combined Benchmark Score:", text)
             self.assertIn("Output directory:", errors.getvalue())
+            run = next((Path(directory) / "results").iterdir())
+            for signal in ("traces", "logs", "metrics"):
+                self.assertTrue((run / "telemetry" / f"{signal}.jsonl").read_text())
 
     def test_failed_case_is_visible_but_never_prints_total_or_sensitive_body(self) -> None:
         async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -89,6 +101,8 @@ class MainTests(unittest.TestCase):
             self.assertNotIn("Combined Benchmark Score:", output.getvalue())
             self.assertIn("Failed case:", errors.getvalue())
             self.assertNotIn("SECRET-PROVIDER", errors.getvalue())
+            for record in (Path(directory) / "results").rglob("*.json*"):
+                self.assertNotIn("SECRET-PROVIDER", record.read_text())
 
     def test_invalid_model_with_default_suite_does_not_claim_suite_is_deferred(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

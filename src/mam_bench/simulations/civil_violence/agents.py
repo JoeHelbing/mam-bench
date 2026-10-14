@@ -67,8 +67,8 @@ unclaimed vacancy that was empty at the start of your phase, even outside your
 view, or stay. Ordinary agents can move only one cell, including diagonally.
 Citizens act and settle first; police then see the updated board and act and
 settle. Within each phase everyone sees that phase's frozen board. Selected
-identities reserve first in both worlds, then ordinary agents. Claims follow
-seeded priority, not response speed. Conflicting claims receive retry feedback.
+identities reserve first in both worlds, then ordinary agents. Ready actions
+claim immediately in arrival order. Conflicting claims receive retry feedback.
 Vacated cells and arrests do not create destinations until the next phase.
 
 Ordinary citizen behavior
@@ -133,7 +133,6 @@ class OrdinaryAgent(SimulationAgent):
         raise NotImplementedError
 
     async def choose_action(self) -> Action:
-        await self.simulation.scheduler.wait_turn(self.agent_id)
         return self.propose_action()
 
 
@@ -258,7 +257,6 @@ class ModelControlledAgent(SimulationAgent):
             str(self.agent_id),
             json.dumps(self.observation()),
             deps=self,
-            model_settings={"seed": simulation.settings.seed + simulation.steps + self.agent_id},
         )
         if isinstance(turn, Stopped):
             fallback = self.fallback_action()

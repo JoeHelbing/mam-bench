@@ -7,11 +7,30 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
-from mam_bench.config import AgentSettings, BenchmarkConfig, load_benchmark_config
+from mam_bench.config import (
+    AgentSettings,
+    BenchmarkConfig,
+    RepetitionDetection,
+    load_benchmark_config,
+)
 from support import civil, schelling, selection
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_repetition_detection_rejects_invalid_pattern_limits(self) -> None:
+        for values in (
+            {"min_pattern_size": 0},
+            {"min_pattern_size": 129},
+            {"max_pattern_size": 0},
+            {"min_count": 1},
+            {"min_count": True},
+            {"min_count": "8"},
+            {"max_pattern_size": 128.5},
+            {"unknown_setting": 1},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValidationError):
+                RepetitionDetection.model_validate(values)
+
     def test_required_case_fields_no_defaults_and_no_extra_parameters(self) -> None:
         for case in (schelling(), civil()):
             complete = case.model_dump()
@@ -92,7 +111,7 @@ class ConfigurationTests(unittest.TestCase):
             "simulation": "schelling",
             "tolerance": 0.7,
             "vacancy_fraction": 0.15,
-            "vision_radius": 1,
+            "vision_radius": 2,
             "seed": 10002,
         }
         citizen_settings = {
@@ -159,12 +178,51 @@ class ConfigurationTests(unittest.TestCase):
             with self.subTest(fraction=fraction):
                 self.assertEqual(schelling(vacancy_fraction=fraction).vacancy_count, 16)
 
+    def test_openrouter_requires_provider_and_has_no_custom_cache_policy(self) -> None:
+        from mam_bench.config import OpenRouterModel
+
+        base = {"runtime": "openrouter", "model": "vendor/model", "provider": "provider"}
+        OpenRouterModel.model_validate(base)
+        for updates in (
+            {"provider": ""},
+            {"provider": " "},
+            {"prompt_cache": True},
+            {"prompt_cache": "yes"},
+            {"model": "no-vendor"},
+        ):
+            with self.subTest(updates=updates), self.assertRaises(ValidationError):
+                OpenRouterModel.model_validate({**base, **updates})
+        with self.assertRaises(ValidationError):
+            OpenRouterModel.model_validate({"runtime": "openrouter", "model": "vendor/model"})
+        selected = OpenRouterModel.model_validate({**base, "settings": {"temperature": 1.0}})
+        self.assertEqual(selected.settings.model_fields_set, {"temperature"})
+
     def test_agent_budget_and_sampling_settings_validate(self) -> None:
         for settings in (
             {"concurrency": 0},
             {"timeout_seconds": 0},
-            {"compaction_tail_tokens": 200000},
+            {"compaction_tail_tokens": -1},
             {"temperature": 3},
         ):
             with self.subTest(settings=settings), self.assertRaises(ValidationError):
                 AgentSettings.model_validate(settings)
+
+    def test_compaction_uses_discovered_context_and_rejects_serving_yaml(self) -> None:
+        settings = AgentSettings()
+        self.assertEqual(settings.compaction_tail(10_000), 1750)
+        self.assertEqual(settings.compaction_tail(260_000), 40_000)
+        self.assertNotIn("compaction_tail_tokens", settings.model_fields_set)
+        with self.assertRaises(ValueError):
+            AgentSettings(compaction_tail_tokens=40_000).compaction_tail(10_000)
+        for retired in ("context_window_tokens", "use_sampling_seed"):
+            with self.subTest(field=retired), self.assertRaises(ValidationError):
+                AgentSettings.model_validate({retired: 10_000})
+
+    def test_vllm_replaces_the_generic_runtime(self) -> None:
+        model = selection().model_dump()
+        self.assertEqual(model["runtime"], "vllm")
+        model["runtime"] = "openai-compatible"
+        with self.assertRaises(ValidationError):
+            BenchmarkConfig.model_validate(
+                {"model": model, "cases": [schelling().model_dump()], "output_directory": "unused"}
+            )

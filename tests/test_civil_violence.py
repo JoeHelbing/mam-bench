@@ -217,13 +217,11 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                         result.score,
                     )
 
-    async def test_ordinary_equivalent_model_matches_selected_cohort_in_both_roles(self) -> None:
+    async def test_ordinary_equivalent_model_matches_reference_with_serial_turns(self) -> None:
         async def check(role: str) -> None:
             with self.subTest(role=role), tempfile.TemporaryDirectory() as directory:
                 sim: CivilViolenceSim
                 calls: set[int] = set()
-                second_started = asyncio.Event()
-                responses: list[int] = []
 
                 async def ordinary_policy(
                     messages: list[ModelMessage], info: AgentInfo
@@ -232,19 +230,6 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                         cast(str, info.instructions).split("Identity: ")[1].split(".")[0]
                     )
                     calls.add(identity)
-                    if cast(int, observation(messages)["step"]) == 1:
-                        priority = sorted(sim.replacement_ids)
-                        sim.scheduler.rng(0, role, 0, "_order_selected").shuffle(priority)
-                        first, second = priority[:2]
-                        if identity == first:
-                            await second_started.wait()
-                            responses.append(identity)
-                        elif identity == second:
-                            responses.append(identity)
-                            second_started.set()
-                    # Compute the ordinary policy at the same priority gate. Earlier
-                    # claims can remove legal destinations and arrest targets.
-                    await sim.scheduler.wait_turn(identity)
                     agent = sim.agents[identity]
                     assert isinstance(agent, (CitizenAgent, PoliceAgent))
                     action = agent.propose_action()
@@ -266,7 +251,7 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                     return ModelResponse(parts=[ToolCallPart("act", arguments)])
 
                 resources = runtime(
-                    Path(directory) / "case", FunctionModel(ordinary_policy), concurrency=16
+                    Path(directory) / "case", FunctionModel(ordinary_policy), concurrency=1
                 )
                 settings = civil(
                     controlled_role=role,
@@ -291,10 +276,89 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(reference.steps, 3)
                 if role == "police":
                     self.assertTrue(saw_release)
-                priority = sorted(sim.replacement_ids)
-                sim.scheduler.rng(0, role, 0, "_order_selected").shuffle(priority)
-                self.assertEqual(responses, priority[1::-1])
                 self.assertEqual(calls, set(sim.replacement_ids))
+
+        for role in ("citizen", "police"):
+            await check(role)
+
+    async def test_fast_agent_claims_before_slow_agent_and_collision_retries(self) -> None:
+        async def check(role: str) -> None:
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as directory:
+                release, slow_started, fast_responded = (
+                    asyncio.Event(),
+                    asyncio.Event(),
+                    asyncio.Event(),
+                )
+                calls: dict[int, int] = {}
+                points: list[tuple[int, int]] = []
+                order: list[int] = []
+
+                async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+                    identity = int(
+                        cast(str, info.instructions).split("Identity: ")[1].split(".")[0]
+                    )
+                    calls[identity] = calls.get(identity, 0) + 1
+                    if identity == order[0]:
+                        if not points:
+                            legal = sim.legal_destinations(identity)
+                            self.assertTrue(legal)
+                            occupied = {c.location for c in sim.citizens.values()} | {
+                                p.location for p in sim.police.values()
+                            }
+                            points.extend(
+                                (
+                                    legal[0],
+                                    next(
+                                        (r, c)
+                                        for r in range(sim.settings.board_size)
+                                        for c in range(sim.settings.board_size)
+                                        if (r, c) not in occupied and (r, c) != legal[0]
+                                    ),
+                                )
+                            )
+                        slow_started.set()
+                        await release.wait()
+                    elif identity == order[1]:
+                        await slow_started.wait()
+                        fast_responded.set()
+                    else:
+                        return await stay(messages, info)
+                    destination = points[0] if calls[identity] == 1 else points[1]
+                    arguments: dict[str, object] = {"destination": list(destination)}
+                    if role == "citizen":
+                        arguments["active"] = False
+                    else:
+                        arguments["target_location"] = None
+                    return ModelResponse(parts=[ToolCallPart("act", arguments)])
+
+                settings = civil(
+                    controlled_role=role,
+                    citizen_density=0.5 if role == "police" else 0.75,
+                    police_density=0.25 if role == "police" else 0.0,
+                )
+                sim = CivilViolenceSim(
+                    settings,
+                    runtime=runtime(
+                        Path(directory) / "case", FunctionModel(script), concurrency=16
+                    ),
+                )
+                order = sorted(sim.replacement_ids)
+                sim.scheduler.rng(0, role, 0, "_order_selected").shuffle(order)
+                run = asyncio.create_task(sim.step())
+                try:
+                    await asyncio.wait_for(fast_responded.wait(), 3)
+                    async with asyncio.timeout(3):
+                        while points[0] in sim.legal_destinations(order[0]):
+                            await asyncio.sleep(0)
+                    self.assertFalse(run.done())
+                finally:
+                    release.set()
+                    await asyncio.wait_for(run, 3)
+                agents = sim.citizens if role == "citizen" else sim.police
+                self.assertEqual(agents[order[1]].location, points[0])
+                self.assertEqual(agents[order[0]].location, points[1])
+                self.assertEqual(calls[order[1]], 1)
+                self.assertEqual(calls[order[0]], 2)
 
         for role in ("citizen", "police"):
             await check(role)

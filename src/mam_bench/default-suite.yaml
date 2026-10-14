@@ -6,7 +6,7 @@ cases:
 - simulation: schelling
   objective: integration
   board_size: 20
-  vision_radius: 1
+  vision_radius: 2
   tolerance: 0.7
   vacancy_fraction: 0.15
   seed: 10002
@@ -15,7 +15,7 @@ cases:
 - simulation: schelling
   objective: segregation
   board_size: 20
-  vision_radius: 1
+  vision_radius: 2
   tolerance: 0.7
   vacancy_fraction: 0.15
   seed: 10002

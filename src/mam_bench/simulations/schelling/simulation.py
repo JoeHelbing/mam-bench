@@ -39,6 +39,7 @@ class SchellingSim:
             AgentSessions(
                 ModelControlledAgent.model_interface(runtime),
                 settings=runtime.settings,
+                context_window_tokens=runtime.context_window_tokens,
                 artifact_directory=runtime.writer.directory,
             )
             if runtime

@@ -95,6 +95,10 @@ Use the actual served model ID so PydanticAI's `VLLMProvider` can select its
 model-family profile. It handles reasoning, tool schemas, and system-message
 formatting. Generic OpenAI-compatible and SGLang runtimes are not supported.
 `settings.reasoning_effort` uses native unified thinking (`none` disables it).
+Omitted sampling, reasoning, and output-token settings use endpoint defaults,
+including for history summaries. MAM-Bench does not add a model-request seed;
+case seeds still control simulation randomness. Put desired request overrides
+under `settings` in the model YAML.
 `tool_choice: required` retains native fallback when a profile cannot force
 tools; `tool_choice: auto` opts out of forcing while keeping terminal actions.
 
@@ -152,26 +156,36 @@ positive integer in either simulation. For OpenRouter, select
 runtime: openrouter
 model: meta/muse-spark-1.3-contributor
 provider: meta
-prompt_cache: auto
 settings:
   reasoning_effort: medium
   tool_choice: auto
 ```
 
 Meta's live Muse endpoint rejected `required` even though its metadata
-advertised support, so this example selects `auto` explicitly. OpenRouter
-setup checks the selected provider's endpoint descriptions before the
-first case. It derives safe token and compaction budgets and omits unsupported
-*default* request fields. It rejects explicit settings that endpoint metadata
-identifies as unsupported. Native PydanticAI profiles apply model-specific
-reasoning and tool-choice safeguards. `prompt_cache` can be `auto` (default),
-`required`, or `off`. `required` needs cache support in the native profile or
-endpoint metadata. Native telemetry records reported cache usage; hints and
-metadata never guarantee a hit. `off` disables explicit hints and cannot stop
-provider-managed implicit caching. The original YAML and preflight decisions are
-both saved with the run; native profiles can further adapt requests. Model sampling,
-tool choice, and request budgets are validated in [config.py](src/mam_bench/config.py)
-and resolved in [model_setup.py](src/mam_bench/model_setup.py). If you use mise,
+advertised support, so this example selects `auto` explicitly. Before the first
+case, setup discovers the selected provider's limits from OpenRouter endpoint
+metadata or the served vLLM model's `/v1/models` entry. Missing context metadata
+stops setup; context limits cannot be supplied in YAML. All selected OpenRouter
+routes must report context; the smallest context/prompt ceiling applies when
+routes differ. Larger served context remains available to the benchmark.
+
+Setup rejects request overrides that violate known constraints. Unknown parameter
+capabilities are left to the native provider and endpoint. Omitted generation
+settings remain unset; setup does not invent output reservations or silently
+reduce requested limits. Compaction, retained history, memory, concurrency, and
+timeouts remain benchmark settings. Compaction uses the discovered context and
+the configured trigger fraction (default 70%); token estimates and unknown
+endpoint output defaults cannot guarantee that every request fits.
+Direct library callers supply discovered context separately to `CaseRuntime`
+and `AgentSessions`.
+
+PydanticAI owns model-specific reasoning, tool safeguards, and prompt-cache
+breakpoints. MAM-Bench enables its native OpenRouter instruction, message, and
+tool caching controls; native profiles handle supported hints. Native telemetry
+records reported cache usage; hints never guarantee a hit. The run saves requested
+settings and discovered serving facts separately; unreported endpoint defaults
+remain unknown. See [config.py](src/mam_bench/config.py) and
+[model_setup.py](src/mam_bench/model_setup.py). If you use mise,
 `mise install` and `mise run setup` prepare the pinned project tools and
 dependencies.
 

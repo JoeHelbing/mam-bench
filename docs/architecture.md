@@ -2,17 +2,22 @@
 
 For either simulation, start at [main.py](../main.py): parse an explicit model file
 and suite, then [config.py](../src/mam_bench/config.py) validates the complete nested
-configuration. For OpenRouter, [model_setup.py](../src/mam_bench/model_setup.py)
-resolves the selected provider's endpoint metadata, YAML choices, token budgets,
-and prompt-cache policy once before any case. The runner records both the input
+configuration. [model_setup.py](../src/mam_bench/model_setup.py) discovers the
+served context and available capabilities from vLLM or OpenRouter once before
+any case, and validates YAML request overrides against known constraints. It
+leaves omitted generation settings to the endpoint. The runner records the input
 config and effective setup, then creates one provider, one fresh `CaseRuntime`
-and writer per case, constructs the selected simulation, and awaits
+and writer per case with discovered context passed separately from YAML settings,
+constructs the selected simulation, and awaits
 `evaluate(runtime)`. It never steps a world.
 
 [runtime.py](../src/mam_bench/runtime.py) selects native `VLLMProvider` or
 `OpenRouterProvider` profiles and passes unified thinking settings to the model.
-Native profiles retain their tool-choice and reasoning safeguards. The local
-model adapter only normalizes vLLM's repetition stop while preserving its cause.
+Native profiles retain their tool-choice and reasoning safeguards. The runtime
+enables native OpenRouter cache controls without a separate cache policy.
+Model requests receive no automatic sampling seed; simulation random streams
+remain addressed by the case seed. The local model adapter only normalizes vLLM's
+repetition stop while preserving its cause.
 An explicit `tool_choice: auto` opts out of forcing; otherwise native output
 selection decides when forcing is supported. Session history is repaired by
 PydanticAI before requests, rather than rewritten after stopped turns.

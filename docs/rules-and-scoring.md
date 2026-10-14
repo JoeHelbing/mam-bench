@@ -1,5 +1,11 @@
 # Rules and scores
 
+Model results describe the model as served: available context and omitted
+generation settings come from its endpoint. A server configuration change can
+therefore change results even when model YAML is identical. Run artifacts record
+requested settings and discovered limits; unreported endpoint defaults remain
+unknown.
+
 Both worlds start from the same seed and use the same staged turn mechanism:
 selected replacement identities decide first, then the remaining ordinary agents.
 Agent turns overlap up to the configured concurrency limit. Each ready action is

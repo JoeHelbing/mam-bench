@@ -15,34 +15,29 @@ class AgentSettings(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
-    temperature: float = Field(default=1.0, ge=0, le=2)
-    top_p: float = Field(default=0.95, gt=0, le=1)
-    top_k: int = Field(default=20, ge=0)
-    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] = "medium"
-    max_completion_tokens: int = Field(default=32_768, gt=0)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    top_p: float | None = Field(default=None, gt=0, le=1)
+    top_k: int | None = Field(default=None, ge=0)
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] | None = None
+    max_completion_tokens: int | None = Field(default=None, gt=0)
     concurrency: int = Field(default=4, gt=0)
-    use_sampling_seed: bool = True
-    tool_choice: Literal["required", "auto"] = "required"
+    tool_choice: Literal["required", "auto"] | None = None
     strict_parameterless_tools: bool = Field(default=False, strict=True)
     timeout_seconds: float = Field(default=3_600.0, gt=0)
-    context_window_tokens: int = Field(default=260_000, gt=0)
     compaction_trigger_fraction: float = Field(default=0.7, gt=0, lt=1)
-    compaction_tail_tokens: int = Field(
-        default_factory=lambda data: min(
-            40_000, int(data["context_window_tokens"] * data["compaction_trigger_fraction"]) // 4
-        ),
-        ge=0,
-    )
-    summary_completion_tokens: int = Field(default=16_000, gt=0)
+    compaction_tail_tokens: int | None = Field(default=None, ge=0)
+    summary_completion_tokens: int | None = Field(default=None, gt=0)
     memory_injection_tokens: int = Field(default=4_000, gt=0)
 
-    @model_validator(mode="after")
-    def validate_compaction_tail(self) -> Self:
-        """Keep the verbatim tail below the threshold that triggers compaction."""
-        trigger_tokens = self.context_window_tokens * self.compaction_trigger_fraction
-        if self.compaction_tail_tokens >= trigger_tokens:
+    def compaction_tail(self, context_window_tokens: int) -> int:
+        """Resolve the retained history against the actual serving context."""
+        trigger_tokens = int(context_window_tokens * self.compaction_trigger_fraction)
+        tail = self.compaction_tail_tokens
+        if tail is None:
+            tail = min(40_000, trigger_tokens // 4)
+        if tail >= trigger_tokens:
             raise ValueError("compaction_tail_tokens must be below the compaction trigger")
-        return self
+        return tail
 
 
 class OpenRouterModel(BaseModel):
@@ -53,33 +48,31 @@ class OpenRouterModel(BaseModel):
     runtime: Literal["openrouter"]
     model: str = Field(min_length=1, pattern=r"^\S+/\S+$")
     provider: str = Field(min_length=1, pattern=r"^\S(?:.*\S)?$")
-    prompt_cache: Literal["auto", "required", "off"] = "auto"
     settings: AgentSettings = AgentSettings()
 
     # Derived by preflight, never accepted as user configuration.
-    _omitted_parameters: frozenset[str] = PrivateAttr(default_factory=frozenset)
     _completion_token_parameter: Literal["max_tokens", "max_completion_tokens"] = PrivateAttr(
         default="max_tokens"
     )
+    _required_tool_choice_supported: bool | None = PrivateAttr(default=None)
 
     @property
     def completion_token_parameter(self) -> Literal["max_tokens", "max_completion_tokens"]:
         return self._completion_token_parameter
 
     @property
-    def omitted_parameters(self) -> frozenset[str]:
-        return self._omitted_parameters
+    def required_tool_choice_supported(self) -> bool | None:
+        return self._required_tool_choice_supported
 
     def with_setup(
         self,
-        settings: AgentSettings,
-        omitted_parameters: frozenset[str],
         completion_token_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens",
+        required_tool_choice_supported: bool | None = None,
     ) -> Self:
         """Attach verified runtime decisions without adding YAML configuration fields."""
-        resolved = self.model_copy(update={"settings": settings})
-        resolved._omitted_parameters = omitted_parameters
+        resolved = self.model_copy()
         resolved._completion_token_parameter = completion_token_parameter
+        resolved._required_tool_choice_supported = required_tool_choice_supported
         return resolved
 
 

@@ -3,7 +3,7 @@
 ```text
 <output>/<timestamp>-<uuid>/
   config.json                   # original requested model and suite
-  effective-model.json          # resolved model settings and endpoint metadata
+  effective-model.json          # requested settings and discovered serving facts
   completed-cases.jsonl
   benchmark.json                 # complete runs only; calculated total_score
   failure.json                   # failed runs, when storage permits
@@ -30,8 +30,9 @@ not separate phase snapshots. States contain stable identities, locations,
 simulation-specific state, and intermediate measurements. Case results contain
 the exact settings, scored/controlled identities, both outcomes and termination,
 and calculated scores. Those same result objects feed saved and displayed totals.
-The effective setup records the metadata used and which model choices came from
-YAML versus derived defaults. Native CLI telemetry records request/token/cache
+The effective setup records discovered context/capabilities separately from
+requested settings. It does not claim to know unreported endpoint generation
+defaults. Native CLI telemetry records request/token/cache
 usage, including summary calls and requests completed before a later failure.
 An absent or zero cache-token count does not establish a measured cache miss.
 Native message snapshots retain per-response usage. Direct library users can

@@ -89,13 +89,13 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.client.default_headers["X-Title"], "MAM-Bench")
         return model
 
-    async def test_openrouter_sends_native_routing_reasoning_and_terminal_tool(self) -> None:
+    async def test_openrouter_preserves_endpoint_defaults_and_terminal_tools(self) -> None:
         model = self.router_model()
         request = AsyncMock(return_value=completion(tool_call=True))
         with patch.object(model.client.chat.completions, "create", request):
             response = await model.request(
                 [ModelRequest(parts=[UserPromptPart("Choose an action.")])],
-                {"seed": 42},
+                None,
                 ModelRequestParameters(
                     output_mode="tool",
                     output_tools=[
@@ -114,21 +114,19 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             sent["extra_body"],
             {
-                "top_k": 20,
                 "provider": {
                     "only": ["selected-provider"],
                     "allow_fallbacks": False,
                     "require_parameters": True,
                 },
-                "reasoning": {"effort": "medium", "enabled": True},
             },
         )
-        self.assertEqual(sent["max_tokens"], 32_768)
+        self.assertIs(sent["max_tokens"], omit)
         self.assertIs(sent["max_completion_tokens"], omit)
-        self.assertEqual(sent["temperature"], 1.0)
-        self.assertEqual(sent["top_p"], 0.95)
+        self.assertIs(sent["temperature"], omit)
+        self.assertIs(sent["top_p"], omit)
         self.assertEqual(sent["timeout"], 3_600.0)
-        self.assertEqual(sent["seed"], 42)
+        self.assertIs(sent["seed"], omit)
         self.assertIsNot(sent.get("parallel_tool_calls"), False)
         self.assertEqual(sent["tool_choice"], "required")
         tools = cast(list[dict[str, object]], sent["tools"])
@@ -165,7 +163,10 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     setup = await resolve_model_setup(
                         OpenRouterSelection(
-                            runtime="openrouter", model="openai/gpt-4.1", provider="azure"
+                            runtime="openrouter",
+                            model="openai/gpt-4.1",
+                            provider="azure",
+                            settings=AgentSettings(max_completion_tokens=32768),
                         )
                     )
                 requests: list[dict[str, object]] = []
@@ -185,7 +186,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                         model = create_model(setup.selection)
                     await model.request(
                         [ModelRequest(parts=[UserPromptPart("Choose an action.")])],
-                        None,
+                        {"max_tokens": 32768},
                         ModelRequestParameters(
                             output_mode="tool",
                             allow_text_output=False,
@@ -211,12 +212,9 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                     {"only": ["azure"], "allow_fallbacks": False, "require_parameters": True},
                 )
 
-    async def test_resolved_request_omits_unsupported_defaults(self) -> None:
+    async def test_unconfigured_request_leaves_parameters_unset(self) -> None:
         selected = OpenRouterSelection(
             runtime="openrouter", model="vendor/test-model", provider="selected-provider"
-        ).with_setup(
-            AgentSettings(),
-            frozenset({"temperature", "top_p", "top_k", "reasoning"}),
         )
         model = create_model(selected)
         assert isinstance(model, OpenRouterModel)
@@ -242,8 +240,11 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_cache_adds_native_breakpoints_to_claude_requests(self) -> None:
         selected = OpenRouterSelection(
-            runtime="openrouter", model="anthropic/claude-sonnet-4", provider="anthropic"
-        ).with_setup(AgentSettings(tool_choice="auto"), frozenset())
+            runtime="openrouter",
+            model="anthropic/claude-sonnet-4",
+            provider="anthropic",
+            settings=AgentSettings(tool_choice="auto"),
+        )
         model = create_model(selected)
         assert isinstance(model, OpenRouterModel)
         self.addAsyncCleanup(model.client.close)
@@ -296,7 +297,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                         ]
                     )
                 ],
-                None,
+                {"max_tokens": 2048},
                 ModelRequestParameters(),
             )
 
@@ -341,7 +342,12 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                     writer = ArtifactWriter(Path(directory) / f"{tool_choice}-{strict}")
                     sim = SchellingSim(
                         schelling(),
-                        runtime=CaseRuntime(model=model, settings=settings, writer=writer),
+                        runtime=CaseRuntime(
+                            context_window_tokens=260_000,
+                            model=model,
+                            settings=settings,
+                            writer=writer,
+                        ),
                     )
                     request = AsyncMock(
                         return_value=completion(
@@ -357,6 +363,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse((writer.directory / "turns.jsonl").exists())
                     for call in request.await_args_list:
                         sent = cast(dict[str, object], call.kwargs)
+                        self.assertIs(sent["seed"], omit)
                         self.assertEqual(sent["tool_choice"], tool_choice)
                         tools = cast(list[dict[str, object]], sent["tools"])
                         functions = [cast(dict[str, object], tool["function"]) for tool in tools]
@@ -402,7 +409,6 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             sent["extra_body"],
             {
-                "top_k": 20,
                 "repetition_detection": {
                     "min_pattern_size": 16,
                     "max_pattern_size": 128,
@@ -427,7 +433,10 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                 runtime="openrouter", model="qwen/qwen-3-coder", provider="selected-provider"
             ),
             OpenRouterSelection(
-                runtime="openrouter", model="anthropic/claude-sonnet-4", provider="anthropic"
+                runtime="openrouter",
+                model="anthropic/claude-sonnet-4",
+                provider="anthropic",
+                settings=AgentSettings(reasoning_effort="medium"),
             ),
         ):
             with self.subTest(model=selected.model):
@@ -464,7 +473,9 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                         model=name,
                         provider="selected-provider",
                         settings=AgentSettings(
-                            reasoning_effort=cast(Literal["medium", "none"], effort)
+                            reasoning_effort=cast(Literal["medium", "none"], effort),
+                            temperature=1.0,
+                            top_p=0.95,
                         ),
                     )
                 )
@@ -498,7 +509,10 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                 self.addAsyncCleanup(model.client.close)
                 writer = ArtifactWriter(Path(directory) / "case")
                 sim = CivilViolenceSim(
-                    civil(), runtime=CaseRuntime(model=model, settings=settings, writer=writer)
+                    civil(),
+                    runtime=CaseRuntime(
+                        context_window_tokens=260_000, model=model, settings=settings, writer=writer
+                    ),
                 )
                 for identity in sim.controlled_agent_ids:
                     sim.citizens[identity].location = None
@@ -510,6 +524,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(request.await_count, len(sim.controlled_agent_ids))
                 for call in request.await_args_list:
                     sent = cast(dict[str, object], call.kwargs)
+                    self.assertIs(sent["seed"], omit)
                     tools = cast(list[dict[str, object]], sent["tools"])
                     functions = [cast(dict[str, object], tool["function"]) for tool in tools]
                     by_name = {cast(str, function["name"]): function for function in functions}
@@ -526,10 +541,9 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_summary_inherits_provider_defaults_without_agent_seed(self) -> None:
         settings = AgentSettings(
-            context_window_tokens=200,
+            max_completion_tokens=1000,
             compaction_trigger_fraction=0.5,
             compaction_tail_tokens=20,
-            summary_completion_tokens=16,
             memory_injection_tokens=100,
         )
         model = create_model(
@@ -544,17 +558,18 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(model.client.close)
         sessions = AgentSessions(
             Agent(model, output_type=str),
+            context_window_tokens=200,
             settings=settings,
         )
         request = AsyncMock(return_value=completion())
         with patch.object(model.client.chat.completions, "create", request):
-            await sessions.run("agent-7", "A" * 600, deps=None, model_settings={"seed": 42})
-            await sessions.run("agent-7", "B" * 600, deps=None, model_settings={"seed": 43})
+            await sessions.run("agent-7", "A" * 600, deps=None)
+            await sessions.run("agent-7", "B" * 600, deps=None)
 
         calls = [cast(dict[str, object], call.kwargs) for call in request.call_args_list]
-        self.assertEqual([call["max_tokens"] for call in calls], [32_768, 16, 32_768])
+        self.assertEqual([call["max_tokens"] for call in calls], [1000, omit, 1000])
         self.assertIs(calls[1]["tool_choice"], omit)
-        self.assertEqual([call["seed"] for call in calls], [42, omit, 43])
+        self.assertTrue(all(call["seed"] is omit for call in calls))
         self.assertEqual(calls[0]["extra_body"], calls[1]["extra_body"])
         self.assertEqual(calls[1]["extra_body"], calls[2]["extra_body"])
         self.assertTrue(all(call["timeout"] == 3_600.0 for call in calls))

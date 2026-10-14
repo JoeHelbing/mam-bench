@@ -134,6 +134,7 @@ def runtime(path: Path, model: FunctionModel | None = None, **settings: object) 
         model or FunctionModel(stay),
         AgentSettings.model_validate({"concurrency": 2, "timeout_seconds": 5, **settings}),
         ArtifactWriter(path),
+        context_window_tokens=260_000,
     )
 
 

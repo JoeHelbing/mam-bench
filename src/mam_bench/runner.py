@@ -87,7 +87,9 @@ class BenchmarkRunner:
                 case_writer = ArtifactWriter(
                     self.output_directory / "cases" / f"{case_index + 1:03d}"
                 )
-                runtime = CaseRuntime(model, setup.selection.settings, case_writer)
+                runtime = CaseRuntime(
+                    model, setup.selection.settings, case_writer, setup.context_window_tokens
+                )
                 simulation = (
                     SchellingSim(settings)
                     if isinstance(settings, SchellingSettings)

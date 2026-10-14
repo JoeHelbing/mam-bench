@@ -31,6 +31,7 @@ class CaseRuntime:
     model: Model
     settings: AgentSettings
     writer: ArtifactWriter
+    context_window_tokens: int
 
 
 class OpenRouterSettings(BaseSettings):
@@ -79,7 +80,7 @@ class _VLLMChatModel(OpenAIChatModel):
 
 
 def create_model(selection: ModelSelection) -> Model:
-    """Create a model whose request defaults also apply to history summaries."""
+    """Apply shared request overrides; sessions own action and summary output caps."""
 
     agent_settings = selection.settings
     profile = OpenAIModelProfile()
@@ -87,16 +88,17 @@ def create_model(selection: ModelSelection) -> Model:
         # Tool-only output implies forcing. Opt out without asserting support
         # or disabling the providers' conditional safety checks.
         profile["openai_supports_tool_choice_required"] = False
-    request_settings = ModelSettings(
-        temperature=agent_settings.temperature,
-        top_p=agent_settings.top_p,
-        max_tokens=agent_settings.max_completion_tokens,
-        timeout=agent_settings.timeout_seconds,
-        thinking=False
-        if agent_settings.reasoning_effort == "none"
-        else agent_settings.reasoning_effort,
-        extra_body={"top_k": agent_settings.top_k},
-    )
+    request_settings = ModelSettings(timeout=agent_settings.timeout_seconds)
+    if agent_settings.temperature is not None:
+        request_settings["temperature"] = agent_settings.temperature
+    if agent_settings.top_p is not None:
+        request_settings["top_p"] = agent_settings.top_p
+    if agent_settings.reasoning_effort is not None:
+        request_settings["thinking"] = (
+            False if agent_settings.reasoning_effort == "none" else agent_settings.reasoning_effort
+        )
+    if agent_settings.top_k is not None:
+        request_settings["extra_body"] = {"top_k": agent_settings.top_k}
 
     if isinstance(selection, VLLMModel):
         if selection.repetition_detection is not None:
@@ -115,11 +117,8 @@ def create_model(selection: ModelSelection) -> Model:
         )
     else:
         settings = OpenRouterSettings()  # pyright: ignore[reportCallIssue]
-        for parameter in selection.omitted_parameters:
-            if parameter in ("temperature", "top_p"):
-                request_settings.pop(parameter, None)
-            elif parameter == "top_k":
-                request_settings.pop("extra_body", None)
+        if selection.required_tool_choice_supported is False:
+            profile["openai_supports_tool_choice_required"] = False
         router_settings = OpenRouterModelSettings(
             **request_settings,
             openrouter_provider={
@@ -128,12 +127,9 @@ def create_model(selection: ModelSelection) -> Model:
                 "require_parameters": True,
             },
         )
-        if "reasoning" in selection.omitted_parameters:
-            router_settings.pop("thinking", None)
-        if selection.prompt_cache != "off":
-            router_settings["openrouter_cache_instructions"] = True
-            router_settings["openrouter_cache_messages"] = True
-            router_settings["openrouter_cache_tool_definitions"] = True
+        router_settings["openrouter_cache_instructions"] = True
+        router_settings["openrouter_cache_messages"] = True
+        router_settings["openrouter_cache_tool_definitions"] = True
         profile["openai_chat_supports_max_completion_tokens"] = (
             selection.completion_token_parameter == "max_completion_tokens"
         )

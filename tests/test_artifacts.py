@@ -28,9 +28,9 @@ class ArtifactTests(unittest.IsolatedAsyncioTestCase):
             root = Path(directory)
             runtime = AgentSessions(
                 Agent(FunctionModel(respond)),
+                context_window_tokens=200,
                 artifact_directory=root,
                 settings=AgentSettings(
-                    context_window_tokens=200,
                     compaction_tail_tokens=20,
                     summary_completion_tokens=16,
                     memory_injection_tokens=100,
@@ -71,7 +71,11 @@ class ArtifactTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            runtime = AgentSessions(Agent(FunctionModel(fail_after_post)), artifact_directory=root)
+            runtime = AgentSessions(
+                Agent(FunctionModel(fail_after_post)),
+                context_window_tokens=260_000,
+                artifact_directory=root,
+            )
             with self.assertRaises(ExecutionFailure):
                 await runtime.run("agent-a", "hello agent", deps=None)
             rows = [
@@ -116,6 +120,7 @@ class ArtifactTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             runtime = AgentSessions(
                 Agent(FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart("ok")]))),
+                context_window_tokens=260_000,
                 artifact_directory=Path(directory),
             )
             with (

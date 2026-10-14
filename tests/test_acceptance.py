@@ -3,11 +3,13 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from pydantic import ValidationError
 from pydantic_ai.models.function import FunctionModel
 
 from mam_bench.config import BenchmarkConfig
+from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunner
 from support import civil, schelling, selection, stay
 
@@ -31,6 +33,14 @@ class ConfigurationAcceptanceTests(unittest.TestCase):
 
 
 class SuiteAcceptanceTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        discovery = patch(
+            "mam_bench.model_setup._fetch_vllm_model",
+            AsyncMock(return_value=VLLMModelMetadata(id="scripted", max_model_len=260_000)),
+        )
+        discovery.start()
+        self.addCleanup(discovery.stop)
+
     async def test_scripted_mixed_suite_completes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = BenchmarkConfig(

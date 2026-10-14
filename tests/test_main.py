@@ -5,7 +5,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import main
 import yaml
@@ -14,11 +14,20 @@ from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from mam_bench.config import BenchmarkConfig
+from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunner
 from support import civil, schelling, selection, stay
 
 
 class MainTests(unittest.TestCase):
+    def setUp(self) -> None:
+        discovery = patch(
+            "mam_bench.model_setup._fetch_vllm_model",
+            AsyncMock(return_value=VLLMModelMetadata(id="scripted", max_model_len=260_000)),
+        )
+        discovery.start()
+        self.addCleanup(discovery.stop)
+
     def files(self, root: Path) -> list[str]:
         (root / "model.yaml").write_text(yaml.safe_dump(selection().model_dump()))
         (root / "suite.yaml").write_text(

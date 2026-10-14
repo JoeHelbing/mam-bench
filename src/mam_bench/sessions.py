@@ -170,11 +170,13 @@ class AgentSessions[AgentDepsT, OutputDataT]:
         self,
         agent: Agent[AgentDepsT, OutputDataT],
         *,
+        context_window_tokens: int,
         settings: AgentSettings | None = None,
         artifact_directory: Path | None = None,
     ) -> None:
         self._agent = agent
         self._settings = settings or AgentSettings()
+        self._context_window_tokens = context_window_tokens
         self._store = InMemoryStore()
         self._states: dict[str, _SessionState] = {}
         self._failure: BaseException | None = None
@@ -235,9 +237,11 @@ class AgentSessions[AgentDepsT, OutputDataT]:
         The simulation decides its fallback action for a stopped turn.
         Execution failures stop all sessions in this world.
         """
-        if not self._settings.use_sampling_seed and model_settings is not None:
-            model_settings = model_settings.copy()
-            model_settings.pop("seed", None)
+        if self._settings.max_completion_tokens is not None:
+            model_settings = {
+                "max_tokens": self._settings.max_completion_tokens,
+                **(model_settings or {}),
+            }
         state = self._state(session_id)
         async with state.lock:
             self._check_active()
@@ -396,15 +400,17 @@ class AgentSessions[AgentDepsT, OutputDataT]:
         summarizer: SummarizingCompaction[AgentDepsT] = SummarizingCompaction(
             model=model,
             max_tokens=1,
-            keep_tokens=settings.compaction_tail_tokens,
+            keep_tokens=settings.compaction_tail(self._context_window_tokens),
             incremental=True,
             preserve_first_user_message=False,
             receipts=True,
-            model_settings={"max_tokens": settings.summary_completion_tokens},
+            model_settings={"max_tokens": settings.summary_completion_tokens}
+            if settings.summary_completion_tokens is not None
+            else None,
         )
         sliding: SlidingWindowCompaction[AgentDepsT] = SlidingWindowCompaction(
             max_tokens=1,
-            keep_tokens=settings.compaction_tail_tokens,
+            keep_tokens=settings.compaction_tail(self._context_window_tokens),
             preserve_first_user_message=False,
             receipts=True,
         )
@@ -413,7 +419,7 @@ class AgentSessions[AgentDepsT, OutputDataT]:
             TieredCompaction(
                 tiers=[fallback],
                 target_fraction=settings.compaction_trigger_fraction,
-                context_window=settings.context_window_tokens,
+                context_window=self._context_window_tokens,
             ),
             fallback,
         )

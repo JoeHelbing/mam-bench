@@ -178,15 +178,11 @@ class ConfigurationTests(unittest.TestCase):
             with self.subTest(fraction=fraction):
                 self.assertEqual(schelling(vacancy_fraction=fraction).vacancy_count, 16)
 
-    def test_openrouter_prompt_cache_and_required_provider(self) -> None:
+    def test_openrouter_requires_provider_and_has_no_custom_cache_policy(self) -> None:
         from mam_bench.config import OpenRouterModel
 
         base = {"runtime": "openrouter", "model": "vendor/model", "provider": "provider"}
-        self.assertEqual(OpenRouterModel.model_validate(base).prompt_cache, "auto")
-        for value in ("auto", "required", "off"):
-            self.assertEqual(
-                OpenRouterModel.model_validate({**base, "prompt_cache": value}).prompt_cache, value
-            )
+        OpenRouterModel.model_validate(base)
         for updates in (
             {"provider": ""},
             {"provider": " "},
@@ -205,18 +201,22 @@ class ConfigurationTests(unittest.TestCase):
         for settings in (
             {"concurrency": 0},
             {"timeout_seconds": 0},
-            {"compaction_tail_tokens": 200000},
+            {"compaction_tail_tokens": -1},
             {"temperature": 3},
         ):
             with self.subTest(settings=settings), self.assertRaises(ValidationError):
                 AgentSettings.model_validate(settings)
 
-    def test_compaction_defaults_are_valid_before_runtime_selection(self) -> None:
-        settings = AgentSettings(context_window_tokens=10_000)
-        self.assertEqual(settings.compaction_tail_tokens, 1750)
+    def test_compaction_uses_discovered_context_and_rejects_serving_yaml(self) -> None:
+        settings = AgentSettings()
+        self.assertEqual(settings.compaction_tail(10_000), 1750)
+        self.assertEqual(settings.compaction_tail(260_000), 40_000)
         self.assertNotIn("compaction_tail_tokens", settings.model_fields_set)
-        with self.assertRaises(ValidationError):
-            AgentSettings(context_window_tokens=10_000, compaction_tail_tokens=40_000)
+        with self.assertRaises(ValueError):
+            AgentSettings(compaction_tail_tokens=40_000).compaction_tail(10_000)
+        for retired in ("context_window_tokens", "use_sampling_seed"):
+            with self.subTest(field=retired), self.assertRaises(ValidationError):
+                AgentSettings.model_validate({retired: 10_000})
 
     def test_vllm_replaces_the_generic_runtime(self) -> None:
         model = selection().model_dump()

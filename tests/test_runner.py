@@ -15,11 +15,20 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, BenchmarkConfig, CaseSettings, ModelSelection
+from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunFailure, BenchmarkRunner
 from support import civil, observation, records, schelling, selection, stay
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        discovery = patch(
+            "mam_bench.model_setup._fetch_vllm_model",
+            AsyncMock(return_value=VLLMModelMetadata(id="scripted", max_model_len=260_000)),
+        )
+        discovery.start()
+        self.addCleanup(discovery.stop)
+
     async def test_complete_suite_order_fresh_case_state_and_saved_total(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = BenchmarkConfig(
@@ -73,6 +82,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             resolve = AsyncMock(
                 return_value=SimpleNamespace(
                     selection=effective,
+                    context_window_tokens=16_384,
                     metadata={"source": "test-endpoint", "reason": "smaller output limit"},
                 )
             )
@@ -83,7 +93,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             assert runner.output_directory is not None
             output = runner.output_directory
             original_record = json.loads((output / "config.json").read_text())
-            self.assertEqual(original_record["model"]["settings"]["max_completion_tokens"], 32_768)
+            self.assertIsNone(original_record["model"]["settings"]["max_completion_tokens"])
             record = json.loads((output / "effective-model.json").read_text())
             self.assertEqual(record["model"]["settings"]["max_completion_tokens"], 512)
             self.assertEqual(record["metadata"]["source"], "test-endpoint")

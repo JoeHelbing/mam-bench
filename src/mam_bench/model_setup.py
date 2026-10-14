@@ -1,15 +1,15 @@
-"""Resolve OpenRouter endpoint capabilities once, before creating a benchmark run."""
+"""Discover serving constraints before running cases; YAML owns request choices."""
 
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 from urllib.parse import quote
 
-from openai import APIError, AsyncOpenAI
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from pydantic_ai.providers.openrouter import OpenRouterProvider
+from openai import AsyncOpenAI
+from pydantic import BaseModel, ConfigDict, Field
 
-from mam_bench.config import AgentSettings, ModelSelection, OpenRouterModel, VLLMModel
+from mam_bench.config import AgentSettings, ModelSelection, VLLMModel
 from mam_bench.runtime import OpenRouterSettings
 
 
@@ -25,7 +25,6 @@ class EndpointMetadata(BaseModel):
     max_prompt_tokens: int | None = Field(default=None, gt=0)
     supported_parameters: list[str] | None = None
     supports_tool_choice: dict[str, bool] | None = None
-    supports_implicit_caching: bool = False
 
 
 class ModelEndpointData(BaseModel):
@@ -38,11 +37,19 @@ class EndpointResponse(BaseModel):
     data: ModelEndpointData
 
 
+class VLLMModelMetadata(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    id: str
+    max_model_len: int | None = Field(default=None, gt=0)
+
+
 @dataclass(frozen=True)
 class ResolvedModelSetup:
-    """Effective runtime selection and JSON-safe evidence for the run artifact."""
+    """Requested selection, discovered context and JSON-safe serving evidence."""
 
     selection: ModelSelection
+    context_window_tokens: int
     metadata: dict[str, object]
 
 
@@ -60,6 +67,20 @@ async def _fetch_endpoints(model: str) -> EndpointResponse:
         return EndpointResponse.model_validate(payload)
 
 
+async def _fetch_vllm_model(selection: VLLMModel) -> VLLMModelMetadata:
+    async with AsyncOpenAI(
+        base_url=selection.base_url,
+        api_key=os.environ[selection.api_key_env],
+        max_retries=0,
+        timeout=30,
+    ) as client:
+        models = await client.models.list()
+        for model in models.data:
+            if model.id == selection.model:
+                return VLLMModelMetadata.model_validate(model.model_dump())
+    raise ValueError(f"Selected model {selection.model!r} is not served by the vLLM endpoint")
+
+
 def _matches_provider(endpoint: EndpointMetadata, provider: str) -> bool:
     selected = provider.casefold()
     tag = endpoint.tag.casefold()
@@ -68,252 +89,130 @@ def _matches_provider(endpoint: EndpointMetadata, provider: str) -> bool:
     )
 
 
-def _budgets(
-    settings: AgentSettings, endpoints: list[EndpointMetadata]
-) -> tuple[dict[str, object], dict[str, object]]:
-    explicit = settings.model_fields_set
-    values: dict[str, object] = {}
-    provenance: dict[str, object] = {}
-
-    def limit(field: str, endpoint_field: str) -> int:
-        found = [getattr(endpoint, endpoint_field) for endpoint in endpoints]
-        supplied = int(getattr(settings, field))
-        if not found or any(value is None for value in found):
-            if field not in explicit:
-                raise ValueError(
-                    f"Missing endpoint {endpoint_field}; set settings.{field} explicitly"
-                )
-            known = [value for value in found if isinstance(value, int)]
-            if known and supplied > min(known):
-                raise ValueError(f"settings.{field} exceeds the selected provider limit")
-            return supplied
-        ceiling = min(found)
-        if field in explicit and supplied > ceiling:
-            raise ValueError(f"settings.{field} exceeds the selected provider limit {ceiling}")
-        if field == "context_window_tokens" and field in explicit:
-            return supplied
-        return ceiling
-
-    context = limit("context_window_tokens", "context_length")
-    output_limit = limit("max_completion_tokens", "max_completion_tokens")
-    headroom = max(1024, context // 20)
-    output = (
-        settings.max_completion_tokens
-        if "max_completion_tokens" in explicit
-        else min(32768, output_limit, max(1, context // 8))
-    )
-    summary = (
-        settings.summary_completion_tokens
-        if "summary_completion_tokens" in explicit
-        else min(16000, output, max(1, context // 16))
-    )
-    memory = (
-        settings.memory_injection_tokens
-        if "memory_injection_tokens" in explicit
-        else min(4000, max(1, context // 64))
-    )
-    # Reserve both normal and summary output. The extra 5% (at least 1024 tokens)
-    # covers instructions, tools and a new turn; this is an estimate, not a tokenizer.
-    prompt_limits = [e.max_prompt_tokens for e in endpoints if e.max_prompt_tokens is not None]
-    prompt_limit = min([context, *prompt_limits])
-    available = min(prompt_limit, context - max(output, summary)) - headroom - memory
-    if available <= 1 or output > output_limit or summary > output_limit:
-        raise ValueError("Token budgets leave no safe prompt room or exceed the output limit")
-    fraction = (
-        settings.compaction_trigger_fraction
-        if "compaction_trigger_fraction" in explicit
-        else (available / context)
-    )
-    trigger = int(context * fraction)
-    if trigger > available:
-        raise ValueError("compaction_trigger_fraction leaves insufficient output/headroom reserve")
-    tail = (
-        settings.compaction_tail_tokens
-        if "compaction_tail_tokens" in explicit
-        else min(40000, trigger // 4)
-    )
-    if tail + summary + memory >= trigger:
-        raise ValueError("Compaction tail, summary and memory must fit below the trigger")
-    values.update(
-        context_window_tokens=context,
-        max_completion_tokens=output,
-        summary_completion_tokens=summary,
-        memory_injection_tokens=memory,
-        compaction_trigger_fraction=fraction,
-        compaction_tail_tokens=tail,
-    )
-    for field in values:
-        provenance[field] = "yaml" if field in explicit else "derived_from_endpoint_limits"
-    return values, {
-        "fields": provenance,
-        "headroom_tokens": headroom,
-        "prompt_limit_tokens": prompt_limit,
-        "output_limit_tokens": output_limit,
-        "trigger_tokens": trigger,
-    }
-
-
-def _validate_cache_policy(selection: OpenRouterModel, endpoints: list[EndpointMetadata]) -> None:
-    if selection.prompt_cache != "required":
-        return
-    profile = OpenRouterProvider.model_profile(selection.model) or {}
-    if profile.get("openrouter_supports_cache_control") or (
-        endpoints and all(endpoint.supports_implicit_caching for endpoint in endpoints)
-    ):
-        return
-    raise ValueError("prompt_cache required, but selected endpoints have no verified cache support")
+def _validate_limits(
+    settings: AgentSettings,
+    context: int,
+    output_limits: list[int],
+    prompt_context: int | None = None,
+) -> None:
+    settings.compaction_tail(prompt_context if prompt_context is not None else context)
+    for field in ("max_completion_tokens", "summary_completion_tokens"):
+        requested = getattr(settings, field)
+        if requested is not None and requested > min([context, *output_limits]):
+            raise ValueError(f"settings.{field} exceeds the selected serving limit")
 
 
 async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
-    """Fetch metadata once; never make inference calls or cache model responses.
-
-    Explicit YAML settings are constraints. Unsupported omitted sampling defaults
-    are removed from requests, not silently presented as supported configuration.
-    """
+    """Discover once, validate known constraints, and leave omitted requests unset."""
     if isinstance(selection, VLLMModel):
-        return ResolvedModelSetup(selection, {"source": "yaml", "runtime": selection.runtime})
-
-    endpoints: list[EndpointMetadata] = []
-    metadata_error: str | None = None
-    try:
-        response = await _fetch_endpoints(selection.model)
-    except (APIError, ValidationError) as error:
-        # Do not persist exception messages: HTTP errors can contain private URLs.
-        metadata_error = type(error).__name__
-    else:
-        endpoints = [
-            endpoint
-            for endpoint in response.data.endpoints
-            if _matches_provider(endpoint, selection.provider) and endpoint.status == 0
-        ]
-        if not endpoints:
-            raise ValueError(f"No active endpoints for selected provider {selection.provider!r}")
-
-    settings = selection.settings
-    explicit = settings.model_fields_set
-    supported: set[str] | None = None
-    if endpoints and all(endpoint.supported_parameters is not None for endpoint in endpoints):
-        supported = set[str].intersection(
-            *(set(endpoint.supported_parameters or []) for endpoint in endpoints)
+        model = await _fetch_vllm_model(selection)
+        if model.max_model_len is None:
+            raise ValueError("Selected vLLM model does not report its serving context limit")
+        _validate_limits(selection.settings, model.max_model_len, [])
+        return ResolvedModelSetup(
+            selection,
+            model.max_model_len,
+            {
+                "source": "vllm_models",
+                "fetched_at": datetime.now(UTC).isoformat(),
+                "model": model.model_dump(mode="json"),
+                "context_window_tokens": model.max_model_len,
+            },
         )
-    values, budgets = _budgets(settings, endpoints)
-    omitted: set[str] = set()
-    decisions: list[str] = []
-    completion_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
+
+    response = await _fetch_endpoints(selection.model)
+    endpoints = [
+        endpoint
+        for endpoint in response.data.endpoints
+        if _matches_provider(endpoint, selection.provider) and endpoint.status == 0
+    ]
+    if not endpoints:
+        raise ValueError(f"No active endpoints for selected provider {selection.provider!r}")
+    if any(endpoint.context_length is None for endpoint in endpoints):
+        raise ValueError("Selected OpenRouter endpoints do not report their serving context limits")
+    context = min(
+        endpoint.context_length for endpoint in endpoints if endpoint.context_length is not None
+    )
+    prompt_limits = [e.max_prompt_tokens for e in endpoints if e.max_prompt_tokens is not None]
+    prompt_context = min([context, *prompt_limits])
+    output_limits = [
+        e.max_completion_tokens for e in endpoints if e.max_completion_tokens is not None
+    ]
+    _validate_limits(selection.settings, context, output_limits, prompt_context)
+
+    known_parameters = [
+        set(endpoint.supported_parameters)
+        for endpoint in endpoints
+        if endpoint.supported_parameters is not None
+    ]
+    supported = set[str].intersection(*known_parameters) if known_parameters else None
     if supported is not None:
-        if "tools" not in supported:
-            raise ValueError("Selected provider endpoints do not support tools")
+        if not {"tools", "tool_choice"} <= supported:
+            raise ValueError("Selected provider endpoints do not support tools and tool_choice")
         for field, parameter in {
             "temperature": "temperature",
             "top_p": "top_p",
             "top_k": "top_k",
             "reasoning_effort": "reasoning",
-            "use_sampling_seed": "seed",
         }.items():
-            if parameter not in supported:
-                disabled = (field == "use_sampling_seed" and not settings.use_sampling_seed) or (
-                    field == "reasoning_effort" and settings.reasoning_effort == "none"
-                )
-                if field in explicit and not disabled:
-                    raise ValueError(
-                        f"Explicit settings.{field} is unsupported by selected endpoints"
-                    )
-                omitted.add(parameter)
-                if field == "use_sampling_seed":
-                    values[field] = False
-                decisions.append(f"Omitted unsupported default {field}")
-        if "max_tokens" not in supported:
-            if "max_completion_tokens" not in supported:
-                raise ValueError("Selected endpoints have no shared completion token parameter")
-            completion_parameter = "max_completion_tokens"
-        if "tool_choice" not in supported:
-            raise ValueError("Selected endpoints do not support tool_choice")
-        required_supported = "tool_choice" in supported and all(
-            endpoint.supports_tool_choice is not None
-            and endpoint.supports_tool_choice.get("required", False)
-            for endpoint in endpoints
-        )
-        if settings.tool_choice == "required" and not required_supported:
-            if "tool_choice" in explicit:
-                raise ValueError(
-                    "Explicit required tool_choice is unsupported by selected endpoints"
-                )
-            values["tool_choice"] = "auto"
-            decisions.append("Default tool_choice changed to auto")
-    else:
-        if not {"context_window_tokens", "max_completion_tokens"} <= explicit:
-            raise ValueError(
-                "Endpoint capabilities are missing; set context_window_tokens and "
-                "max_completion_tokens explicitly to proceed with unknown capabilities"
+            if getattr(selection.settings, field) is not None and parameter not in supported:
+                raise ValueError(f"Explicit settings.{field} is unsupported by selected endpoints")
+
+    completion_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
+    if (
+        any(
+            value is not None
+            for value in (
+                selection.settings.max_completion_tokens,
+                selection.settings.summary_completion_tokens,
             )
-        decisions.append("Parameter capabilities unknown; requests retain configured defaults")
-
-    if values.get("tool_choice", settings.tool_choice) == "auto" and any(
-        endpoint.supports_tool_choice is not None
-        and not endpoint.supports_tool_choice.get("auto", False)
-        for endpoint in endpoints
+        )
+        and supported is not None
+        and "max_tokens" not in supported
     ):
-        raise ValueError("Selected endpoints do not support auto tool_choice")
+        if "max_completion_tokens" not in supported:
+            raise ValueError("Selected endpoints have no shared completion token parameter")
+        completion_parameter = "max_completion_tokens"
 
-    field_sources = {
-        field: "yaml"
-        if field in explicit
-        else ("derived_from_endpoint_metadata" if field in values else "default")
-        for field in type(settings).model_fields
-    }
-    for field, parameter in {
-        "temperature": "temperature",
-        "top_p": "top_p",
-        "top_k": "top_k",
-        "reasoning_effort": "reasoning",
-        "use_sampling_seed": "seed",
-    }.items():
-        if parameter in omitted:
-            field_sources[field] = "omitted_unsupported"
-    effective_settings = AgentSettings.model_validate({**settings.model_dump(), **values})
-    _validate_cache_policy(selection, endpoints)
-    effective = selection.with_setup(
-        effective_settings,
-        frozenset(omitted),
-        completion_parameter,
-    )
-    if endpoints:
-        # Provider routing takes slugs, while endpoint metadata also exposes display names.
+    required_support = None
+    if any(
+        e.supports_tool_choice is not None and e.supports_tool_choice.get("required") is False
+        for e in endpoints
+    ):
+        required_support = False
+    if required_support is False and any(
+        e.supports_tool_choice is not None and e.supports_tool_choice.get("auto") is False
+        for e in endpoints
+    ):
+        raise ValueError("Selected endpoints have no shared usable tool_choice mode")
+    if selection.settings.tool_choice is not None and any(
+        e.supports_tool_choice is not None
+        and e.supports_tool_choice.get(selection.settings.tool_choice) is False
+        for e in endpoints
+    ):
+        raise ValueError("Explicit tool_choice is unsupported by selected endpoints")
+    effective = selection.with_setup(completion_parameter, required_support)
+    # Provider routing takes slugs; metadata may also match a display name.
+    if selection.provider.casefold() == endpoints[0].provider_name.casefold():
         matching_tags = {endpoint.tag.split("/", 1)[0] for endpoint in endpoints}
-        if selection.provider.casefold() == endpoints[0].provider_name.casefold():
-            if len(matching_tags) != 1:
-                raise ValueError(
-                    "Provider display name matches multiple slugs; choose a provider tag"
-                )
-            effective = effective.model_copy(update={"provider": matching_tags.pop()})
+        if len(matching_tags) != 1:
+            raise ValueError("Provider display name matches multiple slugs; choose a provider tag")
+        effective = effective.model_copy(update={"provider": matching_tags.pop()})
     return ResolvedModelSetup(
         effective,
+        prompt_context,
         {
-            "source": "openrouter_model_endpoints"
-            if metadata_error is None
-            else "explicit_limits_fallback",
-            "endpoint_path": f"/models/{selection.model}/endpoints",
+            "source": "openrouter_model_endpoints",
             "fetched_at": datetime.now(UTC).isoformat(),
-            "metadata_error": metadata_error,
             "model": selection.model,
             "provider": effective.provider,
             "requested_provider": selection.provider,
             "endpoints": [endpoint.model_dump(mode="json") for endpoint in endpoints],
+            "context_window_tokens": prompt_context,
+            "context_length": context,
             "supported_parameters": sorted(supported) if supported is not None else None,
-            "omitted_parameters": sorted(omitted),
+            "parameter_metadata_complete": len(known_parameters) == len(endpoints),
             "completion_token_parameter": completion_parameter,
-            "decisions": decisions,
-            "budgets": budgets,
-            "field_sources": field_sources,
             "endpoint_status_policy": "Only status=0 accepted; not a health guarantee",
-            "null_prompt_limit_policy": (
-                "Use shared context limit when no separate prompt limit is published"
-            ),
-            "prompt_cache": {
-                "requested": selection.prompt_cache,
-                "note": "off disables explicit hints, not provider-managed implicit caching; "
-                "metadata support neither guarantees nor rules out actual hits",
-            },
-            "effective_settings": effective_settings.model_dump(mode="json"),
         },
     )

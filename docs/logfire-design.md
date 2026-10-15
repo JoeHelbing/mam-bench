@@ -140,10 +140,10 @@ SDK-supported export/scrubbing seam after inspecting the installed trial SDK;
 test with an exception containing a sentinel secret before enabling production
 instrumentation. No raw HTTP headers/bodies or `capture_all=True` baseline.
 
-Full model conversations and reasoning remain in native archives. The default
-cloud metadata provides archive IDs and relative references. Conversation
-capture can be a separately reviewed diagnostic mode; the synthetic trial does
-not authorize exporting historical benchmark conversations.
+Native instrumentation captures prompts, replies, reasoning, and tool
+arguments/results by default. Logfire receives that content when cloud delivery
+is configured; complete conversation histories also remain in Harness archives.
+Provider exception messages and stack traces are still omitted from exports.
 
 ## Metrics
 
@@ -200,7 +200,7 @@ from simulation failure handling.
 
 `telemetry.py` initializes and closes explicit SDK providers. Native console
 exporters write traces/logs/metrics JSONL under the run directory. Native HTTP
-exporters deliver the same metadata to Logfire when `LOGFIRE_TOKEN` is present.
+exporters deliver the same records to Logfire when `LOGFIRE_TOKEN` is present.
 Local traces and logs flush on completion; metrics export every 30 seconds and
 at shutdown. Cloud traces/logs use standard batch processors; HTTP timeout is
 three seconds. The CLI owns the context in its async task; library imports do

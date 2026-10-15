@@ -139,8 +139,9 @@ include model conversations; handle them as sensitive data. See
 and failure behavior.
 
 Each CLI run also saves native OpenTelemetry traces, logs and metrics locally.
-Set `LOGFIRE_TOKEN` to send metadata to Logfire in the background. Full agent
-conversations remain in local Harness archives; cloud content capture is disabled.
+Prompts, replies, reasoning and tool arguments/results are captured by default.
+Set `LOGFIRE_TOKEN` to send this telemetry to Logfire in the background. Complete
+agent conversations also remain in local Harness archives.
 
 You can replace the six cases with a YAML suite of your own:
 

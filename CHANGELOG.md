@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.2](https://github.com/JoeHelbing/mam-bench/compare/v1.0.1...v1.0.2) (2026-10-15)
+
+
+### Bug Fixes
+
+* **runtime:** cap default output at a quarter of context ([3bfab73](https://github.com/JoeHelbing/mam-bench/commit/3bfab73de53d3c55981e9e2f531fed481dbf51b4))
+* **runtime:** cap default output at a quarter of context ([bc2171d](https://github.com/JoeHelbing/mam-bench/commit/bc2171dd5500acef460787bc43a2a0732d5b3a14))
+* **telemetry:** capture conversation content by default ([b52f7b1](https://github.com/JoeHelbing/mam-bench/commit/b52f7b1f691d78250e769d4ee9c3bb7b7af51812))
+* **telemetry:** capture conversation content by default ([234b5fe](https://github.com/JoeHelbing/mam-bench/commit/234b5fe4b14e618302c6b3b9d87592e8f7842444))
+
 ## [1.0.1](https://github.com/JoeHelbing/mam-bench/compare/v1.0.0...v1.0.1) (2026-10-14)
 
 

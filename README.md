@@ -95,10 +95,13 @@ Use the actual served model ID so PydanticAI's `VLLMProvider` can select its
 model-family profile. It handles reasoning, tool schemas, and system-message
 formatting. Generic OpenAI-compatible and SGLang runtimes are not supported.
 `settings.reasoning_effort` uses native unified thinking (`none` disables it).
-Omitted sampling, reasoning, and output-token settings use endpoint defaults,
-including for history summaries. MAM-Bench does not add a model-request seed;
-case seeds still control simulation randomness. Put desired request overrides
-under `settings` in the model YAML.
+Omitted sampling and reasoning settings use endpoint defaults, including for
+history summaries. Action and summary output caps default to one quarter of the
+discovered serving context, bounded by any reported provider output limit. For
+a 262,144-token context, the default is 65,536 output tokens per request. Override
+these with `settings.max_completion_tokens` and `settings.summary_completion_tokens`
+in the model YAML. MAM-Bench does not add a model-request seed; case seeds still
+control simulation randomness. Put desired request overrides under `settings`.
 `tool_choice: required` retains native fallback when a profile cannot force
 tools; `tool_choice: auto` opts out of forcing while keeping terminal actions.
 
@@ -136,8 +139,9 @@ include model conversations; handle them as sensitive data. See
 and failure behavior.
 
 Each CLI run also saves native OpenTelemetry traces, logs and metrics locally.
-Set `LOGFIRE_TOKEN` to send metadata to Logfire in the background. Full agent
-conversations remain in local Harness archives; cloud content capture is disabled.
+Prompts, replies, reasoning and tool arguments/results are captured by default.
+Set `LOGFIRE_TOKEN` to send this telemetry to Logfire in the background. Complete
+agent conversations also remain in local Harness archives.
 
 You can replace the six cases with a YAML suite of your own:
 

@@ -89,26 +89,36 @@ def _matches_provider(endpoint: EndpointMetadata, provider: str) -> bool:
     )
 
 
-def _validate_limits(
+def _resolve_limits(
     settings: AgentSettings,
     context: int,
     output_limits: list[int],
     prompt_context: int | None = None,
-) -> None:
+) -> AgentSettings:
+    output_fields = ("max_completion_tokens", "summary_completion_tokens")
+    default_output = min([max(1, context // 4), *output_limits])
+    settings = settings.model_copy(
+        update={
+            field: default_output for field in output_fields if getattr(settings, field) is None
+        }
+    )
     settings.compaction_tail(prompt_context if prompt_context is not None else context)
-    for field in ("max_completion_tokens", "summary_completion_tokens"):
+    for field in output_fields:
         requested = getattr(settings, field)
         if requested is not None and requested > min([context, *output_limits]):
             raise ValueError(f"settings.{field} exceeds the selected serving limit")
+    return settings
 
 
 async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
-    """Discover once, validate known constraints, and leave omitted requests unset."""
+    """Discover serving limits and default output caps to a quarter of context."""
     if isinstance(selection, VLLMModel):
         model = await _fetch_vllm_model(selection)
         if model.max_model_len is None:
             raise ValueError("Selected vLLM model does not report its serving context limit")
-        _validate_limits(selection.settings, model.max_model_len, [])
+        selection = selection.model_copy(
+            update={"settings": _resolve_limits(selection.settings, model.max_model_len, [])}
+        )
         return ResolvedModelSetup(
             selection,
             model.max_model_len,
@@ -138,7 +148,11 @@ async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
     output_limits = [
         e.max_completion_tokens for e in endpoints if e.max_completion_tokens is not None
     ]
-    _validate_limits(selection.settings, context, output_limits, prompt_context)
+    selection = selection.model_copy(
+        update={
+            "settings": _resolve_limits(selection.settings, context, output_limits, prompt_context)
+        }
+    )
 
     known_parameters = [
         set(endpoint.supported_parameters)
@@ -159,17 +173,7 @@ async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
                 raise ValueError(f"Explicit settings.{field} is unsupported by selected endpoints")
 
     completion_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
-    if (
-        any(
-            value is not None
-            for value in (
-                selection.settings.max_completion_tokens,
-                selection.settings.summary_completion_tokens,
-            )
-        )
-        and supported is not None
-        and "max_tokens" not in supported
-    ):
+    if supported is not None and "max_tokens" not in supported:
         if "max_completion_tokens" not in supported:
             raise ValueError("Selected endpoints have no shared completion token parameter")
         completion_parameter = "max_completion_tokens"

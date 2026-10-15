@@ -166,9 +166,10 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                             runtime="openrouter",
                             model="openai/gpt-4.1",
                             provider="azure",
-                            settings=AgentSettings(max_completion_tokens=32768),
                         )
                     )
+                max_tokens = setup.selection.settings.max_completion_tokens
+                assert max_tokens is not None
                 requests: list[dict[str, object]] = []
 
                 def respond(
@@ -186,7 +187,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                         model = create_model(setup.selection)
                     await model.request(
                         [ModelRequest(parts=[UserPromptPart("Choose an action.")])],
-                        {"max_tokens": 32768},
+                        {"max_tokens": max_tokens},
                         ModelRequestParameters(
                             output_mode="tool",
                             allow_text_output=False,

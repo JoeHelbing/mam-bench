@@ -1,10 +1,12 @@
 # Rules and scores
 
-Model results describe the model as served: available context and omitted
-generation settings come from its endpoint. A server configuration change can
-therefore change results even when model YAML is identical. Run artifacts record
-requested settings and discovered limits; unreported endpoint defaults remain
-unknown.
+Model results describe the model as served: available context and omitted sampling
+and reasoning settings come from its endpoint. Action and history-summary output
+caps default to one quarter of the discovered serving context, bounded by any
+reported provider output limit; explicit YAML caps override these defaults.
+A server configuration change can therefore change results even when model YAML
+is identical. Run artifacts record requested settings, effective caps, and discovered
+limits; unreported endpoint defaults remain unknown.
 
 Both worlds start from the same seed and use the same staged turn mechanism:
 selected replacement identities decide first, then the remaining ordinary agents.

@@ -63,9 +63,11 @@ nested summarizer requests. Set `MAM_BENCH_LOG_LEVEL` to override the YAML
 Conversation artifacts intentionally retain model content.
 
 The CLI collects all three telemetry signals locally using standard SDK JSON
-exporters. Request/tool spans export when they finish; metrics export every 30
-seconds and at orderly shutdown. These files do not contain complete histories:
-Harness owns those lossless archives. Read each JSONL record independently;
+exporters. Native instrumentation includes prompts, replies, reasoning, and tool
+arguments/results by default, both locally and when sending to Logfire.
+Request/tool spans export when they finish; metrics export every 30 seconds and
+at orderly shutdown. Harness owns the complete conversation archives, including
+the history retained before a failure. Read each JSONL record independently;
 the console-export JSON is a diagnostic format, not an OTLP protobuf dump.
 Native `gen_ai.agent.call.id` matches the archived messages' `run_id`;
 `gen_ai.conversation.id` identifies the session. Use `FileStepStore.list_runs`

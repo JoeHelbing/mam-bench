@@ -1,4 +1,4 @@
-"""Native OTel collection; full conversations remain in Harness persistence."""
+"""Native OTel collection with conversation content and durable Harness histories."""
 
 import copy
 import logging
@@ -113,7 +113,7 @@ class _SafeLoggingHandler(LoggingHandler):
 
 @contextmanager
 def collect_telemetry(directory: Path, *, send_to_logfire: bool = False) -> Generator[Tracer]:
-    """Collect one CLI invocation, optionally delivering metadata to Logfire.
+    """Collect one CLI invocation, optionally delivering it to Logfire.
 
     This owns process-wide Agent instrumentation for the invocation. Use one
     collection context per process; independent benchmark invocations use
@@ -194,7 +194,7 @@ def collect_telemetry(directory: Path, *, send_to_logfire: bool = False) -> Gene
             InstrumentationSettings(
                 tracer_provider=trace_provider,
                 meter_provider=meter_provider,
-                include_content=False,
+                include_content=True,
                 include_binary_content=False,
                 include_model_request_parameters=False,
                 use_aggregated_usage_attribute_names=True,

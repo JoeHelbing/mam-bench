@@ -68,13 +68,9 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
             runs = await store.list_runs(conversation_id="agent-a")
             snapshots = await store.list_snapshots(run_id=runs[0].run_id)
             history = ModelMessagesTypeAdapter.dump_json(snapshots[-1].messages)
-            for content in (
-                b"PRIVATE PROMPT",
-                b"PRIVATE POST",
-                b"PRIVATE REASONING",
-                b"PRIVATE ANSWER",
-            ):
-                self.assertIn(content, history)
+            contents = ("PRIVATE PROMPT", "PRIVATE POST", "PRIVATE REASONING", "PRIVATE ANSWER")
+            for content in contents:
+                self.assertIn(content.encode(), history)
             exported = {
                 name: [
                     json.loads(line)
@@ -98,7 +94,8 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 sum(span["attributes"]["gen_ai.usage.input_tokens"] for span in requests), 20
             )
-            self.assertNotIn("PRIVATE", json.dumps(exported))
+            for content in contents:
+                self.assertIn(content, json.dumps(requests))
             self.assertTrue(all(record["trace_id"] for record in exported["logs"]))
             for records in exported.values():
                 self.assertIn('"mam_bench.campaign": "synthetic-campaign"', json.dumps(records))

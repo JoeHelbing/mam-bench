@@ -50,7 +50,7 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(patcher.stop)
         return fetch
 
-    async def test_discovers_once_without_inventing_request_defaults(self) -> None:
+    async def test_discovers_once_and_defaults_output_to_quarter_context(self) -> None:
         fetch = self.metadata(
             endpoint(),
             endpoint(tag="provider/region", context_length=64000, max_prompt_tokens=48000),
@@ -61,9 +61,10 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
         fetch.assert_awaited_once_with("vendor/model")
         self.assertEqual(result.context_window_tokens, 48000)
         self.assertEqual(result.metadata["context_length"], 64000)
-        self.assertEqual(result.selection.settings, selected.settings)
-        self.assertIsNone(result.selection.settings.max_completion_tokens)
-        self.assertIsNone(result.selection.settings.summary_completion_tokens)
+        self.assertEqual(result.selection.settings.max_completion_tokens, 16000)
+        self.assertEqual(result.selection.settings.summary_completion_tokens, 16000)
+        self.assertIsNone(selected.settings.max_completion_tokens)
+        self.assertIsNone(selected.settings.summary_completion_tokens)
         self.assertIsNone(result.selection.settings.temperature)
         self.assertIsNone(result.selection.settings.reasoning_effort)
         self.assertEqual(result.selection.settings.compaction_tail(48000), 8400)
@@ -71,7 +72,7 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
         json.dumps(result.metadata)
 
     async def test_only_explicit_unsupported_parameters_fail(self) -> None:
-        self.metadata(endpoint(supported_parameters=["tools", "tool_choice"]))
+        self.metadata(endpoint(supported_parameters=["tools", "tool_choice", "max_tokens"]))
         await resolve_model_setup(router())
         for settings in (
             {"temperature": 1.0},
@@ -79,8 +80,6 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
             {"top_k": 20},
             {"reasoning_effort": "medium"},
             {"reasoning_effort": "none"},
-            {"max_completion_tokens": 1000},
-            {"summary_completion_tokens": 1000},
         ):
             with (
                 self.subTest(settings=settings),
@@ -101,6 +100,9 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_known_limits_validate_requests_without_changing_them(self) -> None:
         self.metadata(endpoint(context_length=16000, max_completion_tokens=2000))
+        defaults = await resolve_model_setup(router())
+        self.assertEqual(defaults.selection.settings.max_completion_tokens, 2000)
+        self.assertEqual(defaults.selection.settings.summary_completion_tokens, 2000)
         for settings in (
             {"max_completion_tokens": 3000},
             {"summary_completion_tokens": 3000},
@@ -108,7 +110,9 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(settings=settings), self.assertRaises(ValueError):
                 await resolve_model_setup(router(**settings))
-        selected = router(max_completion_tokens=2000, temperature=0.5)
+        selected = router(
+            max_completion_tokens=2000, summary_completion_tokens=1000, temperature=0.5
+        )
         result = await resolve_model_setup(selected)
         self.assertEqual(result.selection.settings, selected.settings)
 
@@ -132,7 +136,9 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unknown_capabilities_do_not_prevent_explicit_requests(self) -> None:
         self.metadata(endpoint(supported_parameters=None, max_completion_tokens=None))
-        selected = router(temperature=0.5, max_completion_tokens=1000)
+        selected = router(
+            temperature=0.5, max_completion_tokens=1000, summary_completion_tokens=2000
+        )
         result = await resolve_model_setup(selected)
         self.assertEqual(result.selection.settings, selected.settings)
         self.assertIsNone(result.metadata["supported_parameters"])
@@ -147,7 +153,7 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "temperature"):
             await resolve_model_setup(selected)
 
-    async def test_completion_parameter_is_resolved_only_when_requested(self) -> None:
+    async def test_completion_parameter_supports_default_and_explicit_caps(self) -> None:
         self.metadata(
             endpoint(supported_parameters=["tools", "tool_choice", "max_completion_tokens"])
         )
@@ -155,7 +161,13 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
         assert isinstance(requested.selection, OpenRouterModel)
         self.assertEqual(requested.selection.completion_token_parameter, "max_completion_tokens")
         defaults = await resolve_model_setup(router())
-        self.assertIsNone(defaults.selection.settings.max_completion_tokens)
+        assert isinstance(defaults.selection, OpenRouterModel)
+        self.assertEqual(defaults.selection.settings.max_completion_tokens, 32000)
+        self.assertEqual(defaults.selection.completion_token_parameter, "max_completion_tokens")
+        self.metadata(endpoint(supported_parameters=["tools", "tool_choice"]))
+        for settings in ({}, {"max_completion_tokens": 1000}, {"summary_completion_tokens": 1000}):
+            with self.subTest(settings=settings), self.assertRaisesRegex(ValueError, "completion"):
+                await resolve_model_setup(router(**settings))
 
     async def test_tool_variants_are_facts_not_rewritten_yaml(self) -> None:
         self.metadata(endpoint(supports_tool_choice={"auto": True, "required": False}))
@@ -186,12 +198,16 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_vllm_uses_served_context_and_preserves_request_overrides(self) -> None:
         selected = selection().model_copy(
-            update={"settings": AgentSettings(max_completion_tokens=2000)}
+            update={
+                "settings": AgentSettings(
+                    max_completion_tokens=6000, summary_completion_tokens=1000
+                )
+            }
         )
         fetch = AsyncMock(return_value=VLLMModelMetadata(id="scripted", max_model_len=16000))
         with patch("mam_bench.model_setup._fetch_vllm_model", fetch):
             result = await resolve_model_setup(selected)
-            self.assertIs(result.selection, selected)
+            self.assertEqual(result.selection.settings, selected.settings)
             self.assertEqual(result.context_window_tokens, 16000)
             self.assertEqual(result.metadata["source"], "vllm_models")
             fetch.assert_awaited_once_with(selected)
@@ -246,6 +262,11 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
                         if name == "scripted":
                             result = await resolve_model_setup(selected)
                             self.assertEqual(result.context_window_tokens, 65536)
+                            self.assertEqual(result.selection.settings.max_completion_tokens, 16384)
+                            self.assertEqual(
+                                result.selection.settings.summary_completion_tokens, 16384
+                            )
+                            self.assertIsNone(selected.settings.max_completion_tokens)
                             json.dumps(result.metadata)
                         else:
                             with self.assertRaisesRegex(ValueError, "not served"):

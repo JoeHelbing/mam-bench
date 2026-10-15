@@ -5,7 +5,9 @@ and suite, then [config.py](../src/mam_bench/config.py) validates the complete n
 configuration. [model_setup.py](../src/mam_bench/model_setup.py) discovers the
 served context and available capabilities from vLLM or OpenRouter once before
 any case, and validates YAML request overrides against known constraints. It
-leaves omitted generation settings to the endpoint. The runner records the input
+defaults action and summary output caps to one quarter of served context, bounded
+by known provider output limits. Omitted sampling and reasoning settings use
+endpoint defaults. The runner records the input
 config and effective setup, then creates one provider, one fresh `CaseRuntime`
 and writer per case with discovered context passed separately from YAML settings,
 constructs the selected simulation, and awaits

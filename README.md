@@ -95,10 +95,13 @@ Use the actual served model ID so PydanticAI's `VLLMProvider` can select its
 model-family profile. It handles reasoning, tool schemas, and system-message
 formatting. Generic OpenAI-compatible and SGLang runtimes are not supported.
 `settings.reasoning_effort` uses native unified thinking (`none` disables it).
-Omitted sampling, reasoning, and output-token settings use endpoint defaults,
-including for history summaries. MAM-Bench does not add a model-request seed;
-case seeds still control simulation randomness. Put desired request overrides
-under `settings` in the model YAML.
+Omitted sampling and reasoning settings use endpoint defaults, including for
+history summaries. Action and summary output caps default to one quarter of the
+discovered serving context, bounded by any reported provider output limit. For
+a 262,144-token context, the default is 65,536 output tokens per request. Override
+these with `settings.max_completion_tokens` and `settings.summary_completion_tokens`
+in the model YAML. MAM-Bench does not add a model-request seed; case seeds still
+control simulation randomness. Put desired request overrides under `settings`.
 `tool_choice: required` retains native fallback when a profile cannot force
 tools; `tool_choice: auto` opts out of forcing while keeping terminal actions.
 

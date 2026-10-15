@@ -173,17 +173,7 @@ async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
                 raise ValueError(f"Explicit settings.{field} is unsupported by selected endpoints")
 
     completion_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
-    if (
-        any(
-            value is not None
-            for value in (
-                selection.settings.max_completion_tokens,
-                selection.settings.summary_completion_tokens,
-            )
-        )
-        and supported is not None
-        and "max_tokens" not in supported
-    ):
+    if supported is not None and "max_tokens" not in supported:
         if "max_completion_tokens" not in supported:
             raise ValueError("Selected endpoints have no shared completion token parameter")
         completion_parameter = "max_completion_tokens"

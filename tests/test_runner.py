@@ -122,12 +122,13 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await runner.run()
             self.assertIsNone(failure.exception.case_index)
+            self.assertIsInstance(failure.exception.__cause__, ValueError)
             assert runner.output_directory is not None
             self.assertFalse((runner.output_directory / "cases").exists())
-            self.assertEqual(
-                json.loads((runner.output_directory / "failure.json").read_text())["kind"],
-                "ValueError",
-            )
+            record = json.loads((runner.output_directory / "failure.json").read_text())
+            self.assertEqual(record["kind"], "ValueError")
+            self.assertEqual(record["error"], "missing endpoint limit")
+            self.assertIn("ValueError: missing endpoint limit", record["traceback"])
 
     async def test_each_scheduler_cancels_on_failure_keeps_steps_and_blocks_total(self) -> None:
         for failed_case in (schelling(), civil(threshold=10_000)):
@@ -201,6 +202,11 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 for path in (root / "cases/002/agent-messages").rglob("events.jsonl")
             )
             self.assertIn("SECRET-PROVIDER-BODY", events)
+            for path in (root / "failure.json", root / "cases/002/failure.json"):
+                record = json.loads(path.read_text())
+                self.assertIn("ModelAPIError", record["traceback"])
+                self.assertIn("SECRET-PROVIDER-BODY", record["traceback"])
+            self.assertIsInstance(failure.exception.__cause__, Exception)
 
     async def test_storage_failure_retains_previous_steps_and_reports_failed_failure_write(
         self,

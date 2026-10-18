@@ -973,7 +973,9 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(not sim.citizens[i].active for i in origins))
             fallbacks = records(resources.writer.directory / "turns.jsonl")
             self.assertEqual(len(fallbacks), 16)
-            self.assertTrue(all(row["reason"] == "retry_exhaustion" for row in fallbacks))
+            self.assertTrue(all(row["reason"] == "tool_error_limit" for row in fallbacks))
+            assert sim.sessions is not None
+            self.assertEqual(sim.sessions.usage.requests, 3 * len(fallbacks))
 
     async def test_invalid_police_action_exhausts_then_falls_back(self) -> None:
         async def invalid(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -1000,6 +1002,6 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(c.location is not None for c in sim.citizens.values()))
             fallbacks = records(resources.writer.directory / "turns.jsonl")
             self.assertEqual(len(fallbacks), 16)
-            self.assertTrue(all(row["reason"] == "retry_exhaustion" for row in fallbacks))
+            self.assertTrue(all(row["reason"] == "tool_error_limit" for row in fallbacks))
             assert sim.sessions is not None
-            self.assertEqual(sim.sessions.usage.requests, 6 * len(fallbacks))
+            self.assertEqual(sim.sessions.usage.requests, 3 * len(fallbacks))

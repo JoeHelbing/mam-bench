@@ -19,11 +19,11 @@ Native profiles retain their tool-choice and reasoning safeguards. The runtime
 enables native OpenRouter cache controls without a separate cache policy.
 Model requests receive no automatic sampling seed; simulation random streams
 remain addressed by the case seed. [kludge.py](../src/mam_bench/kludge.py) collects
-all temporary provider workarounds: vLLM repetition stops, explicit thinking
-settings, OpenAI's fixed-array schema encoding, and standalone Qwen, Gemma and
-Bolt serving plugins. Each documents its cause, evidence and removal condition
-there. [Serving instructions](../serving/README.md) describe exporting plugins
-for the separate vLLM Python environment; frozen run copies remain evidence.
+temporary client workarounds: vLLM repetition stops, stream capture, explicit
+thinking settings, and OpenAI's fixed-array schema encoding. Each documents its
+cause and removal condition there. Server-side Qwen, Gemma and Bolt corrections
+are explained in the [vLLM serving guide](vllm-serving-workarounds.md), for
+operators to apply to their own serving installation.
 An explicit `tool_choice: auto` opts out of forcing; otherwise native output
 selection decides when forcing is supported. Session history is repaired by
 PydanticAI before requests, rather than rewritten after stopped turns.

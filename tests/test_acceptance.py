@@ -11,7 +11,7 @@ from pydantic_ai.models.function import FunctionModel
 from mam_bench.config import BenchmarkConfig
 from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunner
-from support import civil, schelling, selection, stay
+from support import civil, schelling, selection, stay, streaming_model
 
 
 class ConfigurationAcceptanceTests(unittest.TestCase):
@@ -49,7 +49,7 @@ class SuiteAcceptanceTests(unittest.IsolatedAsyncioTestCase):
                 output_directory=Path(directory),
             )
             result = await BenchmarkRunner(
-                config, model_factory=lambda _: FunctionModel(stay)
+                config, model_factory=lambda _: streaming_model(FunctionModel(stay))
             ).run()
             self.assertEqual(len(result.cases), 2)
             self.assertEqual(result.total_score, sum(case.score for case in result.cases))

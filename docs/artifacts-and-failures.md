@@ -19,6 +19,8 @@
     controlled-outcome.json
     result.json                  # one simulation-owned result, including score
     agent-messages/              # native Pydantic AI Harness archives
+    agent-streams/<call-id>.jsonl # native streaming events, appended as received
+    provider-streams/<call-id>.jsonl # vLLM SDK chunks before native event mapping
     message-board.jsonl
     turns.jsonl                  # exhausted-turn reason and fallback, when needed
     failure.json                 # failed case, when storage permits
@@ -42,6 +44,24 @@ usage artifact.
 Native Harness `StepPersistence` retains messages, model reasoning when returned,
 tool calls/results, and interrupted runs. Shared-board posts persist as accepted.
 Native snapshots overlap; inspect them rather than concatenating histories.
+When an artifact directory is supplied, turns and compaction summaries use
+streaming requests. Each stream record contains its arrival timestamp, native
+conversation ID, request step, and event. Files use the native agent call ID;
+text, reasoning, and tool-argument deltas remain readable before completion and
+after cancellation. These are diagnostic events, not accepted simulation actions
+or exact token counts. In-memory sessions without artifacts retain their existing
+request path. Closing each append flushes Python buffers; this is not an fsync
+guarantee against power loss.
+Archived vLLM calls additionally request `return_token_ids=true` and
+`include_reasoning=true`, without changing the thinking-mode switch. Provider
+stream records retain each SDK-decoded JSON chunk (including extra fields), its
+arrival timestamp, conversation ID, and request step. These are not byte-for-byte
+SSE frames. Token-only chunks with empty parsed deltas are saved too; concatenate
+each choice's `token_ids` in order within one call/request step/choice, then decode
+with the exact served tokenizer and `skip_special_tokens=False`. Prompt token IDs
+are separate and must not be included in generated output. A partial stream only
+establishes which tokens reached the client before cancellation. This capture
+does not recover older unrecorded requests or change accepted simulation actions.
 Compaction does not erase earlier archived messages. Private notebook operations
 are in tool histories; standalone notebook files and summarizer conversations
 are not separate artifacts.

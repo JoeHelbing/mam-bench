@@ -124,6 +124,7 @@ class MainTests(unittest.TestCase):
                 self.assertEqual(main.main(["--model", str(model)]), 2)
                 runner.assert_not_called()
             self.assertIn("model", errors.getvalue())
+            self.assertIn("input_value=", errors.getvalue())
             self.assertNotIn("deferred", errors.getvalue())
 
     def test_last_case_validation_prevents_runner_construction(self) -> None:

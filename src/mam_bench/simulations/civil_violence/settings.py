@@ -6,9 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class CivilViolenceSettings(BaseModel):
-    model_config = ConfigDict(
-        frozen=True, extra="forbid", allow_inf_nan=False, hide_input_in_errors=True
-    )
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
     simulation: Literal["civil-violence"]
     controlled_role: Literal["citizen", "police"]

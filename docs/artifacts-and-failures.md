@@ -81,7 +81,8 @@ the invocation and cancel outstanding turns. Completed records remain available.
 Native compaction runs before requests; a server-rejected context overflow
 follows normal provider-failure handling.
 Failure records are best effort; failure to write one is logged without masking
-the original error. There is no resume or selective rerun support.
+the original error. Configuration errors print original file/YAML/validation details, including
+invalid values. There is no resume or selective rerun support.
 
 INFO logging reports case progress; DEBUG adds session timing and usage.
 Native OpenTelemetry spans supply model request and tool timing, including

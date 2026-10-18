@@ -7,7 +7,6 @@ from collections.abc import Sequence
 from contextlib import ExitStack
 from pathlib import Path
 
-from pydantic import ValidationError
 from yaml import YAMLError
 
 from mam_bench.config import DEFAULT_SUITE, load_benchmark_config
@@ -32,14 +31,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
     args = parser.parse_args(arguments)
     try:
         config = load_benchmark_config(args.model, args.suite, output_directory=args.output)
-    except (ValidationError, ValueError, OSError, YAMLError) as error:
-        # ValidationError hides input values; YAML parser errors can contain arbitrary input.
-        print(
-            str(error)
-            if isinstance(error, ValidationError)
-            else f"Configuration error ({type(error).__name__}).",
-            file=sys.stderr,
-        )
+    except (ValueError, OSError, YAMLError) as error:
+        print(error, file=sys.stderr)
         return 2
     configure_logging(config.log_level)
     runner = BenchmarkRunner(config)

@@ -429,5 +429,5 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(len(sim.sessions.history("0")), history)
             fallbacks = records(resources.writer.directory / "turns.jsonl")
             self.assertEqual(len(fallbacks), 8)
-            self.assertTrue(all(row["reason"] == "retry_exhaustion" for row in fallbacks))
-            self.assertEqual(sim.sessions.usage.requests, 6 * len(fallbacks))
+            self.assertTrue(all(row["reason"] == "tool_error_limit" for row in fallbacks))
+            self.assertEqual(sim.sessions.usage.requests, 3 * len(fallbacks))

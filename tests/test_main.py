@@ -17,7 +17,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from mam_bench.config import BenchmarkConfig
 from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunner
-from support import civil, schelling, selection, stay
+from support import civil, schelling, selection, stay, streaming_model
 
 
 class MainTests(unittest.TestCase):
@@ -56,7 +56,9 @@ class MainTests(unittest.TestCase):
 
     def test_cli_prints_effective_cases_and_complete_total(self) -> None:
         def runner(config: BenchmarkConfig) -> BenchmarkRunner:
-            return BenchmarkRunner(config, model_factory=lambda _: FunctionModel(stay))
+            return BenchmarkRunner(
+                config, model_factory=lambda _: streaming_model(FunctionModel(stay))
+            )
 
         with tempfile.TemporaryDirectory() as directory:
             args = self.files(Path(directory))
@@ -88,7 +90,9 @@ class MainTests(unittest.TestCase):
             return await stay(messages, info)
 
         def runner(config: BenchmarkConfig) -> BenchmarkRunner:
-            return BenchmarkRunner(config, model_factory=lambda _: FunctionModel(script))
+            return BenchmarkRunner(
+                config, model_factory=lambda _: streaming_model(FunctionModel(script))
+            )
 
         with tempfile.TemporaryDirectory() as directory:
             args = self.files(Path(directory))

@@ -14,12 +14,13 @@ constructs the selected simulation, and awaits
 `evaluate(runtime)`. It never steps a world.
 
 [runtime.py](../src/mam_bench/runtime.py) selects native `VLLMProvider` or
-`OpenRouterProvider` profiles and passes unified thinking settings to the model.
+`OpenRouterProvider` profiles and applies configured request settings.
 Native profiles retain their tool-choice and reasoning safeguards. The runtime
 enables native OpenRouter cache controls without a separate cache policy.
 Model requests receive no automatic sampling seed; simulation random streams
-remain addressed by the case seed. The local model adapter only normalizes vLLM's
-repetition stop while preserving its cause.
+remain addressed by the case seed. [kludge.py](../src/mam_bench/kludge.py) collects
+the vLLM repetition-stop adapter, explicit thinking settings, and raw streamed
+provider capture. Each workaround records its evidence and removal condition.
 An explicit `tool_choice: auto` opts out of forcing; otherwise native output
 selection decides when forcing is supported. Session history is repaired by
 PydanticAI before requests, rather than rewritten after stopped turns.

@@ -7,8 +7,8 @@ from typing import Literal, cast
 from unittest.mock import AsyncMock, patch
 
 import httpx2 as httpx
-from openai import AsyncOpenAI, omit
-from openai.types.chat import ChatCompletion
+from openai import AsyncOpenAI, AsyncStream, omit
+from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from pydantic_ai import Agent
 from pydantic_ai.messages import (
     ModelRequest,
@@ -26,7 +26,7 @@ from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, VLLMModel
 from mam_bench.config import OpenRouterModel as OpenRouterSelection
 from mam_bench.runtime import CaseRuntime, create_model
-from mam_bench.sessions import AgentSessions
+from mam_bench.sessions import AgentSessions, Completed
 from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
 from mam_bench.simulations.schelling.simulation import SchellingSim
 from support import civil, schelling
@@ -64,6 +64,26 @@ def completion(
             "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
         }
     )
+
+
+def streamed_request(client: AsyncOpenAI, *, tool_name: str, tool_args: str) -> AsyncMock:
+    async def create(**kwargs: object) -> AsyncStream[ChatCompletionChunk]:
+        assert kwargs["stream"] is True
+        answer = completion(tool_call=True, tool_name=tool_name, tool_args=tool_args)
+        chunk = answer.model_dump(mode="json")
+        chunk["object"] = "chat.completion.chunk"
+        choice = chunk["choices"][0]
+        choice["delta"] = choice.pop("message")
+        for index, call in enumerate(choice["delta"]["tool_calls"]):
+            call["index"] = index
+        response = httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content="data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n",
+        )
+        return AsyncStream(cast_to=ChatCompletionChunk, response=response, client=client)
+
+    return AsyncMock(side_effect=create)
 
 
 @patch.dict(
@@ -316,6 +336,61 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(sent["max_tokens"], omit)
         self.assertIsInstance(response.parts[0], TextPart)
 
+    async def test_vllm_sessions_send_explicit_effort_for_an_unrecognized_model(self) -> None:
+        for effort in ("none", "medium"):
+            with self.subTest(effort=effort):
+                settings = AgentSettings(reasoning_effort=effort)
+                model = create_model(
+                    VLLMModel(
+                        runtime="vllm",
+                        model="nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB",
+                        base_url="https://compatible.example.test/v1",
+                        api_key_env="COMPAT_TEST_API_KEY",
+                        settings=settings,
+                    )
+                )
+                assert isinstance(model, OpenAIChatModel)
+                self.addAsyncCleanup(model.client.close)
+                agent: Agent[None, str] = Agent(model)
+                sessions = AgentSessions(agent, context_window_tokens=262144, settings=settings)
+                request = AsyncMock(return_value=completion())
+                with patch.object(model.client.chat.completions, "create", request):
+                    result = await sessions.run("probe", "Respond.", deps=None)
+                self.assertEqual(result, Completed("Summary or response."))
+                self.assertEqual(request.call_args.kwargs["reasoning_effort"], effort)
+
+    async def test_qwen38_sessions_send_thinking_through_the_chat_template(self) -> None:
+        for effort, expected in (
+            ("none", {"enable_thinking": False}),
+            ("medium", {"enable_thinking": True, "reasoning_effort": "medium"}),
+        ):
+            with self.subTest(effort=effort):
+                settings = AgentSettings(
+                    reasoning_effort=cast(Literal["none", "medium"], effort), top_k=10
+                )
+                model = create_model(
+                    VLLMModel(
+                        runtime="vllm",
+                        model="nvidia/Qwen3.8-27B-NVFP4",
+                        base_url="https://compatible.example.test/v1",
+                        api_key_env="COMPAT_TEST_API_KEY",
+                        settings=settings,
+                    )
+                )
+                assert isinstance(model, OpenAIChatModel)
+                self.addAsyncCleanup(model.client.close)
+                agent: Agent[None, str] = Agent(model)
+                sessions = AgentSessions(agent, context_window_tokens=262144, settings=settings)
+                request = AsyncMock(return_value=completion())
+                with patch.object(model.client.chat.completions, "create", request):
+                    result = await sessions.run("probe", "Respond.", deps=None)
+                self.assertEqual(result, Completed("Summary or response."))
+                self.assertEqual(
+                    request.call_args.kwargs["extra_body"],
+                    {"top_k": 10, "chat_template_kwargs": expected},
+                )
+                self.assertIs(request.call_args.kwargs["reasoning_effort"], omit)
+
     async def test_strict_parameterless_tools_reach_the_model_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             for tool_choice, strict in (
@@ -350,12 +425,8 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                             writer=writer,
                         ),
                     )
-                    request = AsyncMock(
-                        return_value=completion(
-                            tool_call=True,
-                            tool_name="move",
-                            tool_args='{"destination": null}',
-                        )
+                    request = streamed_request(
+                        model.client, tool_name="move", tool_args='{"destination": null}'
                     )
                     with patch.object(model.client.chat.completions, "create", request):
                         await sim.step()
@@ -518,7 +589,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                 for identity in sim.controlled_agent_ids:
                     sim.citizens[identity].location = None
                     sim.citizens[identity].jail_remaining = 1
-                request = AsyncMock(return_value=completion(tool_call=True, tool_name="defer"))
+                request = streamed_request(model.client, tool_name="defer", tool_args="{}")
                 with patch.object(model.client.chat.completions, "create", request):
                     await sim.step()
 

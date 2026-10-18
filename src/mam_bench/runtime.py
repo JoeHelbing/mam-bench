@@ -5,11 +5,8 @@ from dataclasses import dataclass
 from typing import cast
 
 from openai import AsyncOpenAI
-from openai.types.chat import ChatCompletion
 from pydantic import Field, SecretStr
-from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import Model
-from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.openrouter import (
     OpenRouterModel,
     OpenRouterModelSettings,
@@ -22,6 +19,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, ModelSelection, VLLMModel
+from mam_bench.kludge import VLLMChatModel, vllm_settings
 
 
 @dataclass(frozen=True)
@@ -47,36 +45,6 @@ class OpenRouterSettings(BaseSettings):
 
     base_url: str = "https://openrouter.ai/api/v1"
     api_key: SecretStr = Field(min_length=1)
-
-
-class _VLLMChatModel(OpenAIChatModel):
-    """Normalize vLLM repetition stops until the native model accepts them."""
-
-    def _process_response(self, response: ChatCompletion | str) -> ModelResponse:
-        repetition = isinstance(response, ChatCompletion) and any(
-            str(choice.finish_reason) == "repetition" for choice in response.choices
-        )
-        if isinstance(response, ChatCompletion) and repetition:
-            # Native early termination uses the same bounded incomplete-output
-            # handling as a length stop; preserve its actual cause below.
-            response = response.model_copy(
-                update={
-                    "choices": [
-                        choice.model_copy(update={"finish_reason": "length"})
-                        if str(choice.finish_reason) == "repetition"
-                        else choice
-                        for choice in response.choices
-                    ]
-                }
-            )
-        result = super()._process_response(response)
-        if repetition:
-            result.provider_details = {
-                **(result.provider_details or {}),
-                "finish_reason": "repetition",
-                "stop_reason": "repetition_detected",
-            }
-        return result
 
 
 def create_model(selection: ModelSelection) -> Model:
@@ -106,14 +74,14 @@ def create_model(selection: ModelSelection) -> Model:
                 **cast(dict[str, object], request_settings.get("extra_body") or {}),
                 "repetition_detection": selection.repetition_detection.model_dump(),
             }
-        model = _VLLMChatModel(
+        model = VLLMChatModel(
             selection.model,
             profile=profile,
             provider=VLLMProvider(
                 base_url=selection.base_url,
                 api_key=os.environ[selection.api_key_env],
             ),
-            settings=request_settings,
+            settings=vllm_settings(selection, request_settings),
         )
     else:
         settings = OpenRouterSettings()  # pyright: ignore[reportCallIssue]

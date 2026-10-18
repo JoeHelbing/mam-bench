@@ -21,7 +21,7 @@ from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunner
 from mam_bench.sessions import AgentSessions, Completed
 from mam_bench.telemetry import collect_telemetry
-from support import civil, schelling, selection, stay
+from support import civil, schelling, selection, stay, streaming_model
 
 
 class TelemetryTests(unittest.IsolatedAsyncioTestCase):
@@ -57,7 +57,7 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
             root = Path(directory)
             with self.assertLogs("mam_bench", level="DEBUG"), collect_telemetry(root):
                 sessions = AgentSessions(
-                    Agent(FunctionModel(respond)),
+                    Agent(streaming_model(FunctionModel(respond))),
                     context_window_tokens=260_000,
                     artifact_directory=root,
                 )
@@ -92,7 +92,8 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                 {message.run_id for message in snapshots[-1].messages},
             )
             self.assertEqual(
-                sum(span["attributes"]["gen_ai.usage.input_tokens"] for span in requests), 20
+                sum(span["attributes"]["gen_ai.usage.input_tokens"] for span in requests),
+                sessions.usage.input_tokens,
             )
             for content in contents:
                 self.assertIn(content, json.dumps(requests))
@@ -111,7 +112,7 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
             root = Path(directory)
             with collect_telemetry(root):
                 sessions = AgentSessions(
-                    Agent(FunctionModel(respond)),
+                    Agent(streaming_model(FunctionModel(respond))),
                     context_window_tokens=200,
                     settings=AgentSettings(
                         compaction_trigger_fraction=0.5,
@@ -152,7 +153,7 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             sessions = AgentSessions(
-                Agent(FunctionModel(respond)),
+                Agent(streaming_model(FunctionModel(respond))),
                 context_window_tokens=260_000,
                 artifact_directory=root,
             )
@@ -182,9 +183,13 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                 cases=(schelling(max_steps=2), civil(max_steps=2)),
                 output_directory=root,
             )
-            plain = BenchmarkRunner(config, model_factory=lambda _: FunctionModel(stay))
+            plain = BenchmarkRunner(
+                config, model_factory=lambda _: streaming_model(FunctionModel(stay))
+            )
             expected = await plain.run()
-            observed = BenchmarkRunner(config, model_factory=lambda _: FunctionModel(stay))
+            observed = BenchmarkRunner(
+                config, model_factory=lambda _: streaming_model(FunctionModel(stay))
+            )
             # The CLI enters and exits collection in the same task that owns the run.
             with ExitStack() as stack:
 
@@ -250,7 +255,7 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                         collect_telemetry(root, send_to_logfire=True),
                     ):
                         sessions = AgentSessions(
-                            Agent(FunctionModel(respond)),
+                            Agent(streaming_model(FunctionModel(respond))),
                             context_window_tokens=260_000,
                             artifact_directory=root,
                         )

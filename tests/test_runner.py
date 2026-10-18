@@ -17,7 +17,7 @@ from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, BenchmarkConfig, CaseSettings, ModelSelection
 from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunFailure, BenchmarkRunner
-from support import civil, observation, records, schelling, selection, stay
+from support import civil, observation, records, schelling, selection, stay, streaming_model
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
@@ -37,7 +37,9 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 output_directory=Path(directory),
             )
             seen: list[str] = []
-            runner = BenchmarkRunner(config, model_factory=lambda _: FunctionModel(stay))
+            runner = BenchmarkRunner(
+                config, model_factory=lambda _: streaming_model(FunctionModel(stay))
+            )
             result = await runner.run(on_case=lambda _, case: seen.append(case.config.simulation))
             self.assertEqual(seen, ["schelling", "civil-violence", "schelling"])
             self.assertAlmostEqual(result.cases[0].score, -result.cases[2].score)
@@ -51,7 +53,9 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 for p in runner.output_directory.rglob("*")
                 if p.is_file()
             }
-            rerun = BenchmarkRunner(config, model_factory=lambda _: FunctionModel(stay))
+            rerun = BenchmarkRunner(
+                config, model_factory=lambda _: streaming_model(FunctionModel(stay))
+            )
             again = await rerun.run()
             self.assertNotEqual(runner.output_directory, rerun.output_directory)
             self.assertEqual(result, again)
@@ -76,7 +80,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
             def model_factory(selected: ModelSelection) -> FunctionModel:
                 seen.append(selected)
-                return FunctionModel(stay)
+                return streaming_model(FunctionModel(stay))
 
             runner = BenchmarkRunner(config, model_factory=model_factory)
             resolve = AsyncMock(
@@ -160,7 +164,9 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 cases=(schelling(max_steps=1), failed_case, schelling()),
                 output_directory=Path(directory),
             )
-            runner = BenchmarkRunner(config, model_factory=lambda _: FunctionModel(script))
+            runner = BenchmarkRunner(
+                config, model_factory=lambda _: streaming_model(FunctionModel(script))
+            )
             with (
                 self.assertLogs("mam_bench", level="ERROR") as logs,
                 self.assertRaises(BenchmarkRunFailure) as failure,
@@ -213,7 +219,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 BenchmarkConfig(
                     model=selection(), cases=(schelling(),), output_directory=Path(directory)
                 ),
-                model_factory=lambda _: FunctionModel(stay),
+                model_factory=lambda _: streaming_model(FunctionModel(stay)),
             )
             with (
                 patch.object(ArtifactWriter, "append", append),

@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pydantic_ai import Agent, ModelMessagesTypeAdapter
-from pydantic_ai.exceptions import ModelAPIError
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ThinkingPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai_harness.step_persistence import FileStepStore
@@ -67,7 +67,7 @@ class ArtifactTests(unittest.IsolatedAsyncioTestCase):
             calls += 1
             if calls == 1:
                 return ModelResponse(parts=[ToolCallPart("post_message", {"text": "hello board"})])
-            raise ModelAPIError("offline", "SECRET-PROVIDER-BODY")
+            raise ModelHTTPError(400, "offline", "SECRET-PROVIDER-BODY")
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

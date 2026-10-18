@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
+from typing import cast
 
 from anyio import Lock
 from openai import APIConnectionError, APIError, APITimeoutError
@@ -22,14 +23,22 @@ from pydantic_ai import (
     UserContent,
     capture_run_messages,
 )
+from pydantic_ai.agent import ModelRequestNode
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability
+from pydantic_ai.capabilities.abstract import AgentNode, NodeResult
 from pydantic_ai.exceptions import (
     IncompleteToolCall,
     ModelAPIError,
     UnexpectedModelBehavior,
     UsageLimitExceeded,
 )
-from pydantic_ai.messages import ModelRequest, RetryPromptPart, ToolReturnPart
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    RetryPromptPart,
+    ToolCallPart,
+    ToolReturnPart,
+)
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.toolsets import FunctionToolset
@@ -55,19 +64,20 @@ from mam_bench.diagnostics import ExecutionFailure, failure_trace
 logger = logging.getLogger(__name__)
 
 
-class _ToolErrorLimitReached(Exception):
+class _CallErrorLimitReached(Exception):
     pass
 
 
-class _ToolErrorLimit[DepsT](AbstractCapability[DepsT]):
-    """Count failed calls across tools and successful intervening requests."""
+class _CallErrors[DepsT](AbstractCapability[DepsT]):
+    """Share one cumulative failure budget across tools and provider requests."""
 
     def __init__(self, history: Sequence[ModelMessage]) -> None:
-        self._seen = self._failures(history)
+        self._seen = self._tool_failures(history)
         self._count = 0
+        self._requests_before = 0
 
     @staticmethod
-    def _failures(messages: Sequence[ModelMessage]) -> set[tuple[datetime | None, str]]:
+    def _tool_failures(messages: Sequence[ModelMessage]) -> set[tuple[datetime | None, str]]:
         return {
             (message.timestamp, part.tool_call_id)
             for message in messages
@@ -84,14 +94,58 @@ class _ToolErrorLimit[DepsT](AbstractCapability[DepsT]):
     async def before_model_request(
         self, ctx: RunContext[DepsT], request_context: ModelRequestContext
     ) -> ModelRequestContext:
-        del ctx
-        # Tool batches have settled here, so all calls keep their matching replies.
-        failures = self._failures(request_context.messages)
+        # Settled tool batches retain all replies and accepted effects.
+        failures = self._tool_failures(request_context.messages)
         self._count += len(failures - self._seen)
         self._seen.update(failures)
         if self._count >= 3:
-            raise _ToolErrorLimitReached
+            raise _CallErrorLimitReached
+        self._requests_before = ctx.usage.requests
         return request_context
+
+    async def on_node_run_error(
+        self, ctx: RunContext[DepsT], *, node: AgentNode[DepsT], error: Exception
+    ) -> NodeResult[DepsT]:
+        # The node boundary also catches errors while consuming an open stream.
+        if not isinstance(node, ModelRequestNode) or not isinstance(
+            error, (APIError, ModelAPIError)
+        ):
+            raise error
+        status = getattr(error, "status_code", None)
+        body = getattr(error, "body", None)
+        if status is None and isinstance(body, dict):
+            status = cast(dict[str, object], body).get("code")
+        if isinstance(status, int) and 400 <= status < 500 and status not in (408, 409, 429):
+            raise error
+        # Native streaming increments only after the stream opens; failed opens count too.
+        if ctx.usage.requests == self._requests_before:
+            ctx.usage.requests += 1
+        self._count += 1
+        logger.warning(
+            "request.failed session=%s failures=%d exception=%s status=%s",
+            ctx.conversation_id,
+            self._count,
+            type(error).__name__,
+            status if isinstance(status, int) else None,
+        )
+        parts: list[ToolReturnPart | RetryPromptPart] = []
+        if ctx.messages and isinstance(last := ctx.messages[-1], ModelResponse):
+            # Partial streamed tool calls were never executed. Pair them before retrying.
+            parts.extend(
+                ToolReturnPart(
+                    tool_name=part.tool_name,
+                    tool_call_id=part.tool_call_id,
+                    content="Provider request failed; this tool call was not executed.",
+                )
+                for part in last.parts
+                if isinstance(part, ToolCallPart)
+            )
+        parts.append(RetryPromptPart(content="Provider request failed. Try again."))
+        request = ModelRequest(parts=parts)
+        if self._count >= 3:
+            ctx.messages.append(request)
+            raise _CallErrorLimitReached from error
+        return ModelRequestNode(request)
 
 
 class _Compaction[DepsT](FallbackCompaction[DepsT]):
@@ -236,7 +290,7 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                             usage=usage,
                             usage_limits=usage_limits or UsageLimits(request_limit=25),
                             capabilities=(
-                                _ToolErrorLimit[AgentDepsT](state.history),
+                                _CallErrors[AgentDepsT](state.history),
                                 *(
                                     (StepPersistence(store=self._archive, agent_name=session_id),)
                                     if self._archive is not None
@@ -248,8 +302,8 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                             ),
                             toolsets=[self._board_tools(session_id)],
                         )
-                except _ToolErrorLimitReached:
-                    outcome = "tool_error_limit"
+                except _CallErrorLimitReached:
+                    outcome = "call_error_limit"
                     logger.info("turn.stop session=%s reason=%s", session_id, outcome)
                     turn: Completed[OutputDataT] | Stopped = Stopped(outcome)
                 except UsageLimitExceeded:

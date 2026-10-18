@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import main
 import yaml
-from pydantic_ai.exceptions import ModelAPIError
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -84,7 +84,7 @@ class MainTests(unittest.TestCase):
     def test_failed_case_is_visible_but_never_prints_total_or_sensitive_body(self) -> None:
         async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             if any(tool.name == "act" for tool in info.output_tools):
-                raise ModelAPIError("offline", "SECRET-PROVIDER")
+                raise ModelHTTPError(400, "offline", "SECRET-PROVIDER")
             return await stay(messages, info)
 
         def runner(config: BenchmarkConfig) -> BenchmarkRunner:

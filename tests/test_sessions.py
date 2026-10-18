@@ -191,6 +191,79 @@ class StreamingAgent(Agent[None, str]):
 
 
 class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_three_tool_failures_accumulate_across_successes_and_reset_next_turn(
+        self,
+    ) -> None:
+        calls = 0
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal calls
+            del info
+            _assert_complete_tool_history(messages)
+            calls += 1
+            match (calls - 1) % 5:
+                case 0:
+                    part = ToolCallPart("post_message", {"text": ""}, "bad-post")
+                case 1 | 3:
+                    part = ToolCallPart("post_message", {"text": "kept"}, "post")
+                case 2:
+                    part = ToolCallPart("post_message", {"text": {"invalid": True}}, "bad-schema")
+                case _:
+                    part = ToolCallPart("delete_memory", {"file": "MEMORY.md"}, "bad-memory")
+            return _response(part)
+
+        sessions = AgentSessions(
+            Agent(FunctionModel(model), retries=10), context_window_tokens=260_000
+        )
+        for turn in range(2):
+            self.assertEqual(await sessions.run("a", "go", deps=None), Stopped("call_error_limit"))
+            self.assertEqual(calls, (turn + 1) * 5)
+            _assert_complete_tool_history(list(sessions.history("a")))
+        self.assertEqual(sessions.usage.requests, 10)
+        self.assertEqual((await sessions.board.read("b")).content.count("kept"), 4)
+
+    async def test_tool_failure_limit_counts_each_call_in_a_batch_and_isolates_sessions(
+        self,
+    ) -> None:
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            del info
+            _assert_complete_tool_history(messages)
+            return _response(*(ToolCallPart("missing_tool", {}, f"missing-{i}") for i in range(3)))
+
+        sessions = AgentSessions(
+            Agent(FunctionModel(model), retries=10), context_window_tokens=260_000
+        )
+        results = await asyncio.gather(
+            sessions.run("a", "go", deps=None), sessions.run("b", "go", deps=None)
+        )
+        self.assertEqual(results, [Stopped("call_error_limit"), Stopped("call_error_limit")])
+        self.assertEqual(sessions.usage.requests, 2)
+        for identity in ("a", "b"):
+            _assert_complete_tool_history(list(sessions.history(identity)))
+
+    async def test_two_tool_failures_still_allow_a_valid_terminal_action(self) -> None:
+        calls = 0
+
+        async def stay() -> str:
+            return "stayed"
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal calls
+            del messages, info
+            calls += 1
+            return _response(
+                ToolCallPart("post_message", {"text": ""}, f"bad-{calls}")
+                if calls <= 2
+                else ToolCallPart("stay", {})
+            )
+
+        sessions = AgentSessions(
+            Agent(FunctionModel(model), output_type=ToolOutput(stay, name="stay"), retries=5),
+            context_window_tokens=260_000,
+        )
+        self.assertEqual(await sessions.run("a", "go", deps=None), Completed("stayed"))
+        self.assertEqual(calls, 3)
+
     async def test_transient_errors_use_the_request_budget_and_reset_next_turn(self) -> None:
         errors = [
             ModelHTTPError(408, "scripted"),

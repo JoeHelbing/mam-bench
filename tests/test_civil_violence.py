@@ -974,6 +974,8 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
             fallbacks = records(resources.writer.directory / "turns.jsonl")
             self.assertEqual(len(fallbacks), 16)
             self.assertTrue(all(row["reason"] == "call_error_limit" for row in fallbacks))
+            assert sim.sessions is not None
+            self.assertEqual(sim.sessions.usage.requests, 3 * len(fallbacks))
 
     async def test_invalid_police_action_exhausts_then_falls_back(self) -> None:
         async def invalid(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:

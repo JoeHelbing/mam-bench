@@ -56,6 +56,10 @@ it. At the limit, `call_error_limit` ends only that turn with the simulation's
 normal fallback. Each new turn starts with a fresh failure budget. Accepted tool
 effects remain; incomplete streamed tool calls receive an explicit not-executed
 reply before retrying. Failed calls log their exception type and status code.
+Tool failures include argument validation, rejected actions, unknown tools, and
+reported failures across actions, messaging, and memory. Tool batches settle
+before the limit is checked, preserving matching replies and accepted effects.
+The limit prevents the next request and does not override an accepted terminal action.
 They do not cause an infrastructure failure or an extra scoring penalty.
 Permanent HTTP errors (including invalid credentials or request parameters),
 turn deadlines, persistence failures, and simulation defects still stop the

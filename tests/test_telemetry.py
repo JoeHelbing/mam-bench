@@ -9,7 +9,7 @@ from threading import Thread
 from unittest.mock import AsyncMock, patch
 
 from pydantic_ai import Agent, ModelMessagesTypeAdapter
-from pydantic_ai.exceptions import ModelAPIError
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ThinkingPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RequestUsage
@@ -147,7 +147,7 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                 return ModelResponse(
                     parts=[ToolCallPart("post_message", {"text": "retained post"})]
                 )
-            raise ModelAPIError("synthetic", "PRIVATE_PROVIDER_SENTINEL")
+            raise ModelHTTPError(400, "synthetic", "PRIVATE_PROVIDER_SENTINEL")
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -167,7 +167,7 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(b"retained prompt", history)
             saved = "\n".join(path.read_text() for path in root.rglob("*.json*"))
             self.assertNotIn("PRIVATE_PROVIDER_SENTINEL", saved)
-            self.assertIn("ModelAPIError", saved)
+            self.assertIn("ModelHTTPError", saved)
             spans = [
                 json.loads(line)
                 for line in (root / "telemetry/traces.jsonl").read_text().splitlines()

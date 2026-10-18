@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
-from pydantic_ai.exceptions import ModelAPIError
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -141,7 +141,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                     admitted.append(info.instructions or "")
                     if len(admitted) == 1:
                         await sibling_started.wait()
-                        raise ModelAPIError("offline", "SECRET-PROVIDER-BODY")
+                        raise ModelHTTPError(400, "offline", "SECRET-PROVIDER-BODY")
                     sibling_started.set()
                     try:
                         await asyncio.Event().wait()

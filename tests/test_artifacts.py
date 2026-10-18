@@ -234,7 +234,7 @@ class ArtifactTests(unittest.IsolatedAsyncioTestCase):
             for value in serialized:
                 self.assertTrue(ModelMessagesTypeAdapter.validate_json(value))
 
-    async def test_failed_run_keeps_tool_messages_and_board_without_exception_body(self) -> None:
+    async def test_failed_run_keeps_tool_messages_board_and_exception_body(self) -> None:
         calls = 0
 
         async def fail_after_post(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -276,9 +276,8 @@ class ArtifactTests(unittest.IsolatedAsyncioTestCase):
             history = ModelMessagesTypeAdapter.dump_json(snapshots[-1].messages)
             self.assertIn(b"tool-call", history)
             self.assertIn(b"tool-return", history)
-            for path in root.rglob("*"):
-                if path.is_file():
-                    self.assertNotIn("SECRET-PROVIDER-BODY", path.read_text())
+            failed = next(event for event in events if event.kind == "run_failed")
+            self.assertIn("SECRET-PROVIDER-BODY", failed.error or "")
 
     async def test_board_archive_preserves_concurrent_order_and_announcements(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

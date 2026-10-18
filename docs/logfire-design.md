@@ -131,19 +131,15 @@ The repetition adapter work remains separate from this dev-based branch.
 
 Record start/cancellation/failure events so interrupted runs are intelligible.
 Classify timeout scope: whole-turn deadline, HTTP request or internal operation.
-Retain safe exception types and stack locations as the existing policy does.
-
-Disabling native content capture alone does not prove provider exception bodies
-are protected: native SDK spans may record exception messages/stack traces.
-Production export must sanitize those fields before cloud delivery. Choose the
-SDK-supported export/scrubbing seam after inspecting the installed trial SDK;
-test with an exception containing a sentinel secret before enabling production
-instrumentation. No raw HTTP headers/bodies or `capture_all=True` baseline.
+Retain original exception messages, stack traces and provider error bodies.
+The October 18 diagnostic policy replaces the trial's blanket redaction, which
+discarded the cause of a streamed provider failure. Native SDK error bodies must
+remain readable even when the HTTP status is 200.
 
 Native instrumentation captures prompts, replies, reasoning, and tool
 arguments/results by default. Logfire receives that content when cloud delivery
 is configured; complete conversation histories also remain in Harness archives.
-Provider exception messages and stack traces are still omitted from exports.
+Exception messages and stack traces remain intact in local and configured cloud exports.
 
 ## Metrics
 
@@ -209,30 +205,28 @@ not initialize exporters. Run separate invocations in separate processes.
 `Agent.instrument_all()` supplies model/tool traces and native GenAI metrics,
 including nested summarizer agents. Parent usage has `gen_ai.aggregated_usage.*`
 names, distinct from request usage. The custom `_RequestLogging` capability and
-its imports were removed (80 fewer lines in sessions). Turn summaries and safe
+its imports were removed (80 fewer lines in sessions). Turn summaries and
 failure classification remain. No simulation logic, scoring, RNG, admission
 order or provider parameters change.
 
 `artifacts.py` already delegates history persistence to Harness `FileStepStore`.
-Its small archive adapter protects provider-error bodies and classifies write
+Its small archive adapter preserves provider-error details and classifies write
 failures. Its JSON writer retains atomic results and scientific checkpoints.
-`diagnostics.py` retains fixed failure categories, safe stack locations and
-stderr setup. Deleting these responsibilities would lose protections or move
-equivalent code into callers. No replacement history serializer was written.
+`diagnostics.py` retains failure categories, standard complete tracebacks and
+stderr setup. No replacement history serializer was written.
 The telemetry setup adds code overall while removing duplicate request/tool
 collection; this is a new observability capability, not a net line-count reduction.
 
-### Privacy issue found during integration
+### Historical redaction removed October 18
 
 An installed Logfire exception callback sanitized exception events but native
 OpenTelemetry subsequently repopulated span status descriptions with a synthetic
 provider-error sentinel. Disabling content capture also leaves exception events
 enabled. Logfire's default scrubbing excludes exception-message/stacktrace keys.
-The implementation therefore sanitizes public `ReadableSpan` records at the
-export seam, preserving exception types and status codes while removing bodies
-and status descriptions for both local and cloud delivery. Package logs retain
-safe stack locations. Native Harness failure events need their existing sanitizer.
-These are narrow policy adapters around maintained exporters, not custom transports.
+The trial introduced sanitizers around exported spans, logs and Harness failure
+events. They were removed after they erased the error needed to diagnose a Luna
+failure. Current code uses native exporters and keeps original failure details;
+see [artifacts and failures](artifacts-and-failures.md).
 
 ## Validation and staged rollout
 

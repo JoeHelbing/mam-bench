@@ -62,6 +62,6 @@ At run-directory creation, the CLI enters [telemetry.py](../src/mam_bench/teleme
 in the task that owns the benchmark. It configures native Pydantic AI
 instrumentation and OpenTelemetry providers/exporters for local traces, logs,
 and metrics, with optional Logfire delivery. Harness remains the full conversation
-archive; native call IDs connect exported traces to saved messages. The narrow
-export policy removes provider exception bodies without changing the native
-transport, usage accounting, or simulation execution.
+archive; native call IDs connect exported traces to saved messages. Native
+exception details are retained in traces and archives; package logs also retain
+provider error bodies, including streaming errors.

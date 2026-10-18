@@ -195,9 +195,12 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 json.loads((root / "failure.json").read_text())["status"], "incomplete"
             )
-            self.assertNotIn("SECRET-PROVIDER-BODY", "\n".join(logs.output))
-            for path in root.rglob("*.json*"):
-                self.assertNotIn("SECRET-PROVIDER-BODY", path.read_text())
+            self.assertIn("SECRET-PROVIDER-BODY", "\n".join(logs.output))
+            events = "\n".join(
+                path.read_text()
+                for path in (root / "cases/002/agent-messages").rglob("events.jsonl")
+            )
+            self.assertIn("SECRET-PROVIDER-BODY", events)
 
     async def test_storage_failure_retains_previous_steps_and_reports_failed_failure_write(
         self,
@@ -230,7 +233,8 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 await runner.run()
             self.assertEqual(failed.exception.kind, "artifact_write")
             self.assertIn("failure_record.failed", "\n".join(logs.output))
-            self.assertNotIn("SECRET", "\n".join(logs.output))
+            self.assertIn("SECRET-STORAGE", "\n".join(logs.output))
+            self.assertIn("SECRET-FAILURE-RECORD", "\n".join(logs.output))
             root = runner.output_directory
             assert root is not None
             self.assertEqual(len(records(root / "cases/001/controlled.jsonl")), 2)

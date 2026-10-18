@@ -290,7 +290,7 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                         self._failure = ExecutionFailure(
                             "provider", "model returned an unusable response"
                         )
-                        raise self._failure from None
+                        raise self._failure from error
                     logger.info("turn.stop session=%s reason=%s", session_id, outcome)
                     turn = Stopped(outcome)
                 except (APITimeoutError, TimeoutError) as error:
@@ -316,6 +316,12 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                     self._failure = ExecutionFailure("network", "model connection failed")
                     raise self._failure from error
                 except (APIError, ModelAPIError) as error:
+                    logger.error(
+                        "provider.failed session=%s error=%s body=%r",
+                        session_id,
+                        error,
+                        getattr(error, "body", None),
+                    )
                     self._failure = ExecutionFailure("provider", "model request failed")
                     raise self._failure from error
                 except (MemoryConflictError, MemoryOperationConflictError, OSError) as error:

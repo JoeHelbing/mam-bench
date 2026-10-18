@@ -1,8 +1,7 @@
 """Native OTel collection with conversation content and durable Harness histories."""
 
-import copy
 import logging
-from collections.abc import Generator, Sequence
+from collections.abc import Generator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
@@ -27,21 +26,17 @@ from opentelemetry.sdk.metrics.export import (
     PeriodicExportingMetricReader,
 )
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import Event, ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
     SimpleSpanProcessor,
-    SpanExporter,
-    SpanExportResult,
 )
-from opentelemetry.trace import Status, Tracer
+from opentelemetry.trace import Tracer
 from pydantic import SecretStr
 from pydantic_ai import Agent
 from pydantic_ai.models.instrumented import InstrumentationSettings
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-from mam_bench.diagnostics import failure_trace
 
 
 class _LogfireSettings(BaseSettings):
@@ -51,64 +46,6 @@ class _LogfireSettings(BaseSettings):
 
     token: SecretStr = SecretStr("")
     base_url: str = "https://logfire-us.pydantic.dev"
-
-
-class _SafeSpanExporter(SpanExporter):
-    """Preserve native records while excluding provider exception bodies."""
-
-    def __init__(self, exporter: SpanExporter) -> None:
-        self.exporter = exporter
-
-    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-        safe: list[ReadableSpan] = []
-        for span in spans:
-            events = [
-                Event(
-                    event.name,
-                    {
-                        key: "Exception details omitted."
-                        if key in {"exception.message", "exception.stacktrace"}
-                        else value
-                        for key, value in (event.attributes or {}).items()
-                    },
-                    event.timestamp,
-                )
-                for event in span.events
-            ]
-            safe.append(
-                ReadableSpan(
-                    name=span.name,
-                    context=span.context,
-                    parent=span.parent,
-                    resource=span.resource,
-                    attributes=span.attributes,
-                    events=events,
-                    links=span.links,
-                    kind=span.kind,
-                    status=Status(span.status.status_code),
-                    start_time=span.start_time,
-                    end_time=span.end_time,
-                    instrumentation_scope=span.instrumentation_scope,
-                )
-            )
-        return self.exporter.export(safe)
-
-    def shutdown(self) -> None:
-        self.exporter.shutdown()
-
-    def force_flush(self, timeout_millis: int = 30000) -> bool:
-        return self.exporter.force_flush(timeout_millis)
-
-
-class _SafeLoggingHandler(LoggingHandler):
-    def emit(self, record: logging.LogRecord) -> None:
-        error = record.exc_info[1] if record.exc_info is not None else None
-        if error is not None:
-            record = copy.copy(record)
-            record.__dict__["exception_type"] = type(error).__name__
-            record.__dict__["exception_trace"] = failure_trace(error)
-            record.exc_info = record.exc_text = None
-        super().emit(record)
 
 
 @contextmanager
@@ -143,10 +80,8 @@ def collect_telemetry(directory: Path, *, send_to_logfire: bool = False) -> Gene
         ]
         trace_provider.add_span_processor(
             SimpleSpanProcessor(
-                _SafeSpanExporter(
-                    ConsoleSpanExporter(
-                        out=traces, formatter=lambda span: span.to_json(indent=None) + "\n"
-                    )
+                ConsoleSpanExporter(
+                    out=traces, formatter=lambda span: span.to_json(indent=None) + "\n"
                 )
             )
         )
@@ -165,9 +100,7 @@ def collect_telemetry(directory: Path, *, send_to_logfire: bool = False) -> Gene
             headers = {"Authorization": token}
             trace_provider.add_span_processor(
                 BatchSpanProcessor(
-                    _SafeSpanExporter(
-                        OTLPSpanExporter(endpoint=f"{base}/v1/traces", headers=headers, timeout=3)
-                    )
+                    OTLPSpanExporter(endpoint=f"{base}/v1/traces", headers=headers, timeout=3)
                 )
             )
             log_provider.add_log_record_processor(
@@ -206,7 +139,7 @@ def collect_telemetry(directory: Path, *, send_to_logfire: bool = False) -> Gene
         if old_level == logging.NOTSET:
             logger.setLevel(logging.INFO)
         stack.callback(logger.setLevel, old_level)
-        handler = _SafeLoggingHandler(logger_provider=log_provider)
+        handler = LoggingHandler(logger_provider=log_provider)
         logger.addHandler(handler)
         stack.callback(handler.close)
         stack.callback(logger.removeHandler, handler)

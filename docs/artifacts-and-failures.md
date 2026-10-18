@@ -86,8 +86,9 @@ the original error. There is no resume or selective rerun support.
 INFO logging reports case progress; DEBUG adds session timing and usage.
 Native OpenTelemetry spans supply model request and tool timing, including
 nested summarizer requests. Set `MAM_BENCH_LOG_LEVEL` to override the YAML
-`log_level`. Logs and native failure events omit sensitive exception bodies.
-Conversation artifacts intentionally retain model content.
+`log_level`. Logs retain complete exception chains and provider error bodies,
+including errors received inside successful HTTP streaming responses. Native
+failure events and tool-effect records retain their original error details.
 
 The CLI collects all three telemetry signals locally using standard SDK JSON
 exporters. Native instrumentation includes prompts, replies, reasoning, and tool
@@ -141,11 +142,9 @@ from recorded data, rather than a maintained list of dated campaign names.
 See [Logfire dashboard variables](https://pydantic.dev/docs/logfire/observe/dashboards/#variables)
 and [native OTel resource labels](https://opentelemetry.io/docs/languages/sdk-configuration/general/#otel_resource_attributes).
 
-Prompt, completion, tool content and model request parameters are disabled in
-telemetry. The export adapter also removes exception-event bodies and span
-status descriptions, which native instrumentation can populate despite disabled
-content capture. Safe exception types and stack locations remain in package
-failure logs. Full local conversations remain sensitive artifacts.
+Native telemetry retains conversation content, exception messages, stacktraces
+and span status descriptions. Model request parameters and binary content are
+not captured. The same records go to Logfire when export is explicitly enabled.
 
 Library imports do not initialize telemetry. `collect_telemetry(directory)`
 owns one invocation's process-wide agent instrumentation and scoped package

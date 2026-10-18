@@ -1,4 +1,4 @@
-"""Package logging without model payloads or exception bodies."""
+"""Package logging and complete exception diagnostics."""
 
 import logging
 import os
@@ -6,7 +6,7 @@ import traceback
 
 
 class ExecutionFailure(RuntimeError):
-    """A classified execution failure with a safe, fixed description."""
+    """A classified execution failure retaining its original exception as the cause."""
 
     def __init__(self, kind: str, message: str) -> None:
         self.kind = kind
@@ -28,19 +28,5 @@ def configure_logging(default_level: str = "INFO") -> None:
 
 
 def failure_trace(error: BaseException) -> str:
-    """Preserve exception types and stack locations, never bodies or locals."""
-    chain: list[str] = []
-    seen: set[int] = set()
-    while id(error) not in seen:
-        seen.add(id(error))
-        frames = traceback.extract_tb(error.__traceback__)
-        chain.append(
-            type(error).__name__
-            + ": "
-            + " -> ".join(f"{frame.filename}:{frame.lineno} in {frame.name}" for frame in frames)
-        )
-        cause = error.__cause__ or error.__context__
-        if cause is None:
-            break
-        error = cause
-    return " | ".join(chain)
+    """Format the original exception chain, including messages and tracebacks."""
+    return "".join(traceback.format_exception(error)).rstrip()

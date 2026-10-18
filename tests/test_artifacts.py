@@ -9,7 +9,7 @@ from unittest.mock import patch
 import httpx2 as httpx
 from openai import AsyncOpenAI
 from pydantic_ai import Agent, ModelMessagesTypeAdapter, ToolOutput
-from pydantic_ai.exceptions import ModelAPIError
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ThinkingPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.providers.vllm import VLLMProvider
@@ -242,7 +242,7 @@ class ArtifactTests(unittest.IsolatedAsyncioTestCase):
             calls += 1
             if calls == 1:
                 return ModelResponse(parts=[ToolCallPart("post_message", {"text": "hello board"})])
-            raise ModelAPIError("offline", "SECRET-PROVIDER-BODY")
+            raise ModelHTTPError(400, "offline", "SECRET-PROVIDER-BODY")
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

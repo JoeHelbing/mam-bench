@@ -11,7 +11,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from mam_bench.config import AgentSettings
 from mam_bench.diagnostics import ExecutionFailure, configure_logging
-from mam_bench.sessions import AgentSessions, Completed
+from mam_bench.sessions import AgentSessions, Completed, Stopped
 
 
 class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
@@ -51,13 +51,13 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             raise APITimeoutError(request=httpx.Request("POST", "https://SECRET.invalid"))
 
         runtime = AgentSessions(Agent(FunctionModel(broken)), context_window_tokens=260_000)
-        with (
-            self.assertLogs("mam_bench", level="DEBUG") as captured,
-            self.assertRaises(ExecutionFailure),
-        ):
-            await runtime.run("actor", "SECRET PROMPT", deps=None)
+        with self.assertLogs("mam_bench", level="DEBUG") as captured:
+            self.assertEqual(
+                await runtime.run("actor", "SECRET PROMPT", deps=None), Stopped("call_error_limit")
+            )
+        self.assertEqual(runtime.usage.requests, 3)
         log = "\n".join(captured.output)
-        self.assertIn("scope=http_request", log)
+        self.assertIn("request.failed session=actor failures=3", log)
         self.assertIn("APITimeoutError", log)
         self.assertIn("Request timed out.", log)
 

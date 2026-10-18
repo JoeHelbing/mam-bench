@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
-from pydantic_ai.exceptions import ModelAPIError
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -146,7 +146,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                     admitted.append(info.instructions or "")
                     if len(admitted) == 1:
                         await sibling_started.wait()
-                        raise ModelAPIError("offline", "SECRET-PROVIDER-BODY")
+                        raise ModelHTTPError(400, "offline", "SECRET-PROVIDER-BODY")
                     sibling_started.set()
                     try:
                         await asyncio.Event().wait()
@@ -204,7 +204,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("SECRET-PROVIDER-BODY", events)
             for path in (root / "failure.json", root / "cases/002/failure.json"):
                 record = json.loads(path.read_text())
-                self.assertIn("ModelAPIError", record["traceback"])
+                self.assertIn("ModelHTTPError", record["traceback"])
                 self.assertIn("SECRET-PROVIDER-BODY", record["traceback"])
             self.assertIsInstance(failure.exception.__cause__, Exception)
 

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 import httpx2 as httpx
 from openai import AsyncOpenAI
 from pydantic_ai import Agent, ModelMessagesTypeAdapter
-from pydantic_ai.exceptions import ModelAPIError
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ThinkingPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.openrouter import OpenRouterModel
@@ -23,7 +23,7 @@ from mam_bench.config import AgentSettings, BenchmarkConfig
 from mam_bench.diagnostics import ExecutionFailure
 from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunner
-from mam_bench.sessions import AgentSessions, Completed
+from mam_bench.sessions import AgentSessions, Completed, Stopped
 from mam_bench.telemetry import collect_telemetry
 from support import civil, schelling, selection, stay, streaming_model
 
@@ -152,7 +152,7 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                 return ModelResponse(
                     parts=[ToolCallPart("post_message", {"text": "retained post"})]
                 )
-            raise ModelAPIError("synthetic", "PRIVATE_PROVIDER_SENTINEL")
+            raise ModelHTTPError(400, "synthetic", "PRIVATE_PROVIDER_SENTINEL")
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -173,7 +173,7 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
             for name in ("traces", "logs"):
                 saved = (root / "telemetry" / f"{name}.jsonl").read_text()
                 self.assertIn("PRIVATE_PROVIDER_SENTINEL", saved)
-                self.assertIn("ModelAPIError", saved)
+                self.assertIn("ModelHTTPError", saved)
             spans = [
                 json.loads(line)
                 for line in (root / "telemetry/traces.jsonl").read_text().splitlines()
@@ -201,8 +201,12 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                 sessions = AgentSessions(
                     Agent(model), context_window_tokens=260_000, artifact_directory=root
                 )
-                with collect_telemetry(root), self.assertRaises(ExecutionFailure):
-                    await sessions.run("stream-error", "Respond.", deps=None)
+                with collect_telemetry(root):
+                    self.assertEqual(
+                        await sessions.run("stream-error", "Respond.", deps=None),
+                        Stopped("call_error_limit"),
+                    )
+                self.assertEqual(sessions.usage.requests, 3)
                 logs = (root / "telemetry/logs.jsonl").read_text()
                 self.assertIn("UPSTREAM_STREAM_FAILURE", logs)
                 self.assertIn("502", logs)

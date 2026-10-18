@@ -48,9 +48,18 @@ are not separate artifacts.
 
 Invalid actions receive bounded retry feedback. Exhausted request, tool, output,
 or retry budgets select a simulation fallback and retain a diagnostic reason.
+Transient API errors, including streamed provider errors, connection failures,
+request timeouts, HTTP 408/409/429, and server errors, retry within the same turn.
+Failed API requests count toward the request allowance. API errors and failed
+tool calls share a cumulative three-failure limit; successful calls do not reset
+it. At the limit, `call_error_limit` ends only that turn with the simulation's
+normal fallback. Each new turn starts with a fresh failure budget. Accepted tool
+effects remain; incomplete streamed tool calls receive an explicit not-executed
+reply before retrying. Failed calls log their exception type and status code.
 They do not cause an infrastructure failure or an extra scoring penalty.
-Provider/network/timeouts, persistence failures, and simulation defects stop
-the invocation and cancel outstanding turns. Completed records remain available.
+Permanent HTTP errors (including invalid credentials or request parameters),
+turn deadlines, persistence failures, and simulation defects still stop the
+invocation and cancel outstanding turns. Completed records remain available.
 Native compaction runs before requests; a server-rejected context overflow
 follows normal provider-failure handling.
 Failure records are best effort; failure to write one is logged without masking

@@ -1,12 +1,20 @@
 import asyncio
+import json
+import tempfile
 import unittest
+from collections.abc import AsyncIterable
 from decimal import Decimal
+from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-from pydantic_ai import Agent, ModelMessage, ToolOutput, UsageLimits
-from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior
+import httpx2 as httpx
+from openai import APIConnectionError, APIError, AsyncOpenAI
+from pydantic_ai import Agent, ModelMessage, RunContext, ToolOutput, UsageLimits
+from pydantic_ai.agent import EventStreamHandler
+from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior
 from pydantic_ai.messages import (
+    AgentStreamEvent,
     ModelRequest,
     ModelResponse,
     RetryPromptPart,
@@ -19,6 +27,8 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.usage import RequestUsage
 from pydantic_ai_harness.memory import InMemoryStore, MemoryFile
 
@@ -169,7 +179,218 @@ class CompactionModel:
         return _response(TextPart(f"normal-{self.normal_requests}"), cost=self.normal_cost)
 
 
+async def _drain_events(ctx: RunContext[None], events: AsyncIterable[AgentStreamEvent]) -> None:
+    async for _ in events:
+        pass
+
+
+class StreamingAgent(Agent[None, str]):
+    @property
+    def event_stream_handler(self) -> EventStreamHandler[None]:
+        return _drain_events
+
+
 class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transient_errors_use_the_request_budget_and_reset_next_turn(self) -> None:
+        errors = [
+            ModelHTTPError(408, "scripted"),
+            ModelHTTPError(409, "scripted"),
+            ModelHTTPError(429, "scripted"),
+            ModelHTTPError(503, "scripted"),
+            APIConnectionError(request=httpx.Request("POST", "https://provider.example.test/v1")),
+        ]
+        for error in errors:
+            for limit in (1, 25):
+                with self.subTest(error=error, limit=limit):
+                    calls = 0
+
+                    async def model(
+                        messages: list[ModelMessage],
+                        info: AgentInfo,
+                        failure: Exception = error,
+                        max_failures: int = min(limit, 3),
+                    ) -> ModelResponse:
+                        nonlocal calls
+                        calls += 1
+                        if calls <= max_failures:
+                            raise failure
+                        return _response(TextPart("recovered"))
+
+                    runtime = AgentSessions(
+                        Agent(FunctionModel(model)), context_window_tokens=260_000
+                    )
+                    self.assertEqual(
+                        await runtime.run(
+                            "a", "go", deps=None, usage_limits=UsageLimits(request_limit=limit)
+                        ),
+                        Stopped("usage_limit" if limit == 1 else "call_error_limit"),
+                    )
+                    self.assertEqual(calls, min(limit, 3))
+                    self.assertEqual(runtime.usage.requests, calls)
+                    self.assertEqual(
+                        await runtime.run("a", "next", deps=None), Completed("recovered")
+                    )
+
+    async def test_stream_errors_are_bounded_and_partial_calls_are_not_executed(self) -> None:
+        for failures in (1, 3):
+            for partial in (False, True):
+                with self.subTest(failures=failures, partial=partial):
+                    calls = 0
+                    directory = tempfile.TemporaryDirectory()
+                    self.addCleanup(directory.cleanup)
+
+                    def respond(
+                        request: httpx.Request, failures: int = failures, partial: bool = partial
+                    ) -> httpx.Response:
+                        nonlocal calls
+                        calls += 1
+                        choice: dict[str, object] = {
+                            "index": 0,
+                            "delta": {"content": "recovered"},
+                            "finish_reason": "stop",
+                        }
+                        if calls <= failures:
+                            choice = {
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": f"partial-{calls}",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "post_message",
+                                                "arguments": '{"text":"unexecuted"}',
+                                            },
+                                        }
+                                    ],
+                                },
+                                "finish_reason": None,
+                            }
+                        chunk = {
+                            "id": f"response-{calls}",
+                            "object": "chat.completion.chunk",
+                            "created": 1,
+                            "model": "scripted",
+                            "choices": [choice],
+                        }
+                        content = "data: " + json.dumps(chunk) + "\n\n"
+                        if calls <= failures:
+                            content = (
+                                content if partial else ""
+                            ) + 'data: {"error":{"message":"upstream unavailable","code":503}}\n\n'
+                        else:
+                            content += "data: [DONE]\n\n"
+                        return httpx.Response(
+                            200, headers={"content-type": "text/event-stream"}, content=content
+                        )
+
+                    async with AsyncOpenAI(
+                        api_key="offline-test",
+                        base_url="https://provider.example.test/v1",
+                        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+                        max_retries=0,
+                    ) as client:
+                        runtime = AgentSessions(
+                            StreamingAgent(
+                                OpenAIChatModel(
+                                    "scripted", provider=OpenAIProvider(openai_client=client)
+                                ),
+                                deps_type=type(None),
+                            ),
+                            context_window_tokens=260_000,
+                            artifact_directory=Path(directory.name),
+                        )
+                        result = await runtime.run("a", "go", deps=None)
+                        self.assertEqual(
+                            result,
+                            Stopped("call_error_limit")
+                            if failures == 3
+                            else Completed("recovered"),
+                        )
+                        self.assertEqual(calls, 3 if failures == 3 else 2)
+                        self.assertEqual(runtime.usage.requests, calls)
+                        self.assertEqual((await runtime.board.read("b")).content, "")
+                        _assert_complete_tool_history(list(runtime.history("a")))
+                        self.assertEqual(
+                            await runtime.run("a", "next", deps=None), Completed("recovered")
+                        )
+                        self.assertEqual(
+                            await runtime.run("b", "other", deps=None), Completed("recovered")
+                        )
+
+    async def test_api_and_tool_failures_share_a_budget_across_successes(self) -> None:
+        calls = 0
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal calls
+            calls += 1
+            _assert_complete_tool_history(messages)
+            match calls:
+                case 1 | 5:
+                    return _response(ToolCallPart("post_message", {"text": ""}, f"bad-{calls}"))
+                case 2:
+                    return _response(ToolCallPart("post_message", {"text": "saved"}, "post"))
+                case 3:
+                    raise ModelAPIError("scripted", "unavailable")
+                case 4:
+                    return _response(ToolCallPart("read_messages", {}, "read"))
+                case _:
+                    return _response(TextPart("recovered"))
+
+        runtime = AgentSessions(
+            Agent(FunctionModel(model), retries=5), context_window_tokens=260_000
+        )
+        self.assertEqual(await runtime.run("a", "go", deps=None), Stopped("call_error_limit"))
+        self.assertEqual(calls, 5)
+        self.assertEqual(runtime.usage.requests, 5)
+        _assert_complete_tool_history(list(runtime.history("a")))
+        self.assertEqual((await runtime.board.read("b")).content.count("saved"), 1)
+        self.assertEqual(await runtime.run("a", "next", deps=None), Completed("recovered"))
+
+    async def test_permanent_http_errors_still_abort_without_retry(self) -> None:
+        for status in (400, 401, 403, 404, 422):
+            with self.subTest(status=status):
+                calls = 0
+
+                async def model(
+                    messages: list[ModelMessage], info: AgentInfo, status: int = status
+                ) -> ModelResponse:
+                    nonlocal calls
+                    calls += 1
+                    raise ModelHTTPError(status, "scripted", {"message": "invalid setup"})
+
+                runtime = AgentSessions(Agent(FunctionModel(model)), context_window_tokens=260_000)
+                for identity in ("a", "b"):
+                    with self.assertRaises(ExecutionFailure):
+                        await runtime.run(identity, "go", deps=None)
+                self.assertEqual(calls, 1)
+
+    async def test_failed_api_call_retries_without_repeating_completed_tools(self) -> None:
+        calls = 0
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal calls
+            del info
+            _assert_complete_tool_history(messages)
+            calls += 1
+            if calls == 1:
+                return _response(ToolCallPart("post_message", {"text": "saved"}, "post"))
+            if calls == 2:
+                raise APIError(
+                    "stream unavailable",
+                    request=httpx.Request("POST", "https://provider.example.test/v1"),
+                    body={"code": 503},
+                )
+            return _response(TextPart("recovered"))
+
+        runtime = AgentSessions(Agent(FunctionModel(model)), context_window_tokens=260_000)
+        self.assertEqual(await runtime.run("a", "go", deps=None), Completed("recovered"))
+        self.assertEqual(calls, 3)
+        self.assertEqual(runtime.usage.requests, 3)
+        self.assertEqual((await runtime.board.read("b")).content.count("saved"), 1)
+        self.assertEqual(await runtime.run("a", "next", deps=None), Completed("recovered"))
+
     async def test_truncated_tool_call_ends_turn_and_preserves_valid_history(self) -> None:
         calls = 0
         truncate = True

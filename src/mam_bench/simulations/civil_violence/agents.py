@@ -93,7 +93,8 @@ and movement destination (null to stay). Movement is validated first, then the
 whole action is reserved only if valid. An invalid action
 returns retry feedback without reserving any part. A valid act ends the turn;
 other calls in the same response are skipped. Each turn allows up to 25 model
-requests and five retries for invalid actions.
+requests. Three failed tool or transient API calls end the turn; successful calls
+do not reset this failure count.
 """.strip()
 
 

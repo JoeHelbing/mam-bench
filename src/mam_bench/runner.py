@@ -38,7 +38,7 @@ class BenchmarkResult(BaseModel):
 
 
 class BenchmarkRunFailure(RuntimeError):
-    """Safe failure information; completed case results remain on the runner."""
+    """Classified run failure with its original exception retained as the cause."""
 
     def __init__(self, case_index: int | None, kind: str) -> None:
         self.case_index, self.kind = case_index, kind
@@ -117,14 +117,15 @@ class BenchmarkRunner:
                 if isinstance(error, ExecutionFailure)
                 else ("artifact_write" if isinstance(error, OSError) else type(error).__name__)
             )
-            logger.error(
-                "benchmark.failed case=%s kind=%s trace=%s", case_index, kind, failure_trace(error)
-            )
+            trace = failure_trace(error)
+            logger.error("benchmark.failed case=%s kind=%s trace=%s", case_index, kind, trace)
             failure: dict[str, object] = {
                 "status": "incomplete",
                 "case": None if case_index is None else case_index + 1,
                 "kind": kind,
                 "completed_cases": len(self.results),
+                "error": str(error),
+                "traceback": trace,
             }
             for target in (case_writer, writer):
                 if target is not None:
@@ -136,4 +137,4 @@ class BenchmarkRunner:
                         )
             if not isinstance(error, Exception):
                 raise
-            raise BenchmarkRunFailure(case_index, kind) from None
+            raise BenchmarkRunFailure(case_index, kind) from error

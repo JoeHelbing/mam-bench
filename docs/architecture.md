@@ -19,8 +19,11 @@ Native profiles retain their tool-choice and reasoning safeguards. The runtime
 enables native OpenRouter cache controls without a separate cache policy.
 Model requests receive no automatic sampling seed; simulation random streams
 remain addressed by the case seed. [kludge.py](../src/mam_bench/kludge.py) collects
-the vLLM repetition-stop adapter, explicit thinking settings, and raw streamed
-provider capture. Each workaround records its evidence and removal condition.
+temporary client workarounds: vLLM repetition stops, stream capture, explicit
+thinking settings, and OpenAI's fixed-array schema encoding. Each documents its
+cause and removal condition there. Server-side Qwen, Gemma and Bolt corrections
+are explained in the [vLLM serving guide](vllm-serving-workarounds.md), for
+operators to apply to their own serving installation.
 An explicit `tool_choice: auto` opts out of forcing; otherwise native output
 selection decides when forcing is supported. Session history is repaired by
 PydanticAI before requests, rather than rewritten after stopped turns.
@@ -59,6 +62,6 @@ At run-directory creation, the CLI enters [telemetry.py](../src/mam_bench/teleme
 in the task that owns the benchmark. It configures native Pydantic AI
 instrumentation and OpenTelemetry providers/exporters for local traces, logs,
 and metrics, with optional Logfire delivery. Harness remains the full conversation
-archive; native call IDs connect exported traces to saved messages. The narrow
-export policy removes provider exception bodies without changing the native
-transport, usage accounting, or simulation execution.
+archive; native call IDs connect exported traces to saved messages. Native
+exception details are retained in traces and archives; package logs also retain
+provider error bodies, including streaming errors.

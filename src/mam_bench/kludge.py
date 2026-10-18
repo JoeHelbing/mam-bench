@@ -4,19 +4,9 @@ Keep normal provider construction in runtime.py. Changes here should identify
 the broken upstream behavior, retain its evidence, and say when to remove them.
 No simulation rules or output-schema relaxation belongs here.
 
-Bolt also needs a serving-side ultra_v3 parser correction: pinned vLLM renders
-reasoning_effort='none' as enable_thinking=False without updating the request
-seen by NVIDIA's parser. That Python 3.12 plugin lives with the isolated PGX
-recipe, outside this Python 3.14 package. Its original and regression probe are
-under .scratch/model-runs/pgx-nemotron35-bolt-20261015/. Remove that correction
-when NVIDIA's parser honors reasoning_effort or receives resolved render kwargs.
-
-Qwen's strict, zero-argument XML tool grammar can emit unlimited whitespace
-(vLLM #50989, XGrammar #802). The Python 3.12 serving plugin and matcher
-regression live in serving/qwen_empty_tool_kludge.py and its adjacent test.
-It replaces only closed empty argument sections, preserving native schemas,
-tool extraction and request settings. Remove when the pinned serving image
-passes that matcher regression without the plugin (upstream XGrammar #837).
+Only MAM-Bench client workarounds belong here. Server-side grammar and parser
+corrections are documented in docs/vllm-serving-workarounds.md for operators
+to apply in their own vLLM environment.
 """
 
 from collections.abc import AsyncGenerator, AsyncIterator
@@ -27,6 +17,7 @@ from typing import Literal, cast
 
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from pydantic_ai import RunContext
+from pydantic_ai._json_schema import JsonSchema
 from pydantic_ai.messages import FinishReason, ModelMessage, ModelResponse
 from pydantic_ai.models import ModelRequestParameters, StreamedResponse
 from pydantic_ai.models.openai import (
@@ -34,11 +25,40 @@ from pydantic_ai.models.openai import (
     OpenAIChatModelSettings,
     OpenAIStreamedResponse,
 )
+from pydantic_ai.profiles.openai import OpenAIJsonSchemaTransformer
 from pydantic_ai.settings import ModelSettings
 
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import VLLMModel
 from mam_bench.diagnostics import ExecutionFailure
+
+
+class OpenAIFixedArrayTransformer(OpenAIJsonSchemaTransformer):
+    """Encode fixed homogeneous tuples using OpenAI's accepted array subset.
+
+    Pydantic's prefixItems is valid JSON Schema, but OpenAI rejects the move
+    coordinate tool with 'array schema missing items'. Equal positional schemas
+    and an exact length have an equivalent items encoding. Keep heterogeneous
+    tuples and all other schemas native; validation and simulation types stay
+    unchanged. Evidence: large-four-model-20261016/luna6-addition/diagnostic-http
+    and schema-verification.json under .scratch/model-runs/.
+    Remove when the native transformer or endpoint supports this tuple form.
+    """
+
+    def transform(self, schema: JsonSchema) -> JsonSchema:
+        value = schema.get("prefixItems")
+        prefix = cast(list[object], value) if isinstance(value, list) else []
+        if (
+            schema.get("type") == "array"
+            and prefix
+            and schema.get("minItems") == schema.get("maxItems") == len(prefix)
+            and all(item == prefix[0] for item in prefix)
+            and "items" not in schema
+        ):
+            schema["items"] = prefix[0]
+            schema.pop("prefixItems")
+        return super().transform(schema)
+
 
 # Task-local: concurrent sessions share a model, but never a capture directory.
 vllm_stream_writer: ContextVar[ArtifactWriter | None] = ContextVar(

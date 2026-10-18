@@ -8,10 +8,14 @@ from pathlib import Path
 from threading import Thread
 from unittest.mock import AsyncMock, patch
 
+import httpx2 as httpx
+from openai import AsyncOpenAI
 from pydantic_ai import Agent, ModelMessagesTypeAdapter
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ThinkingPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.openrouter import OpenRouterModel
+from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.usage import RequestUsage
 from pydantic_ai_harness.step_persistence import FileStepStore
 
@@ -19,7 +23,7 @@ from mam_bench.config import AgentSettings, BenchmarkConfig
 from mam_bench.diagnostics import ExecutionFailure
 from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunner
-from mam_bench.sessions import AgentSessions, Completed
+from mam_bench.sessions import AgentSessions, Completed, Stopped
 from mam_bench.telemetry import collect_telemetry
 from support import civil, schelling, selection, stay, streaming_model
 
@@ -136,7 +140,7 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                 sum(span["attributes"]["gen_ai.usage.input_tokens"] for span in requests), 15
             )
 
-    async def test_provider_failure_keeps_partial_history_without_exporting_error_body(
+    async def test_provider_failure_keeps_partial_history_and_error_details(
         self,
     ) -> None:
         calls = 0
@@ -166,14 +170,56 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
             history = ModelMessagesTypeAdapter.dump_json(snapshots[-1].messages)
             self.assertIn(b"retained post", history)
             self.assertIn(b"retained prompt", history)
-            saved = "\n".join(path.read_text() for path in root.rglob("*.json*"))
-            self.assertNotIn("PRIVATE_PROVIDER_SENTINEL", saved)
-            self.assertIn("ModelHTTPError", saved)
+            for name in ("traces", "logs"):
+                saved = (root / "telemetry" / f"{name}.jsonl").read_text()
+                self.assertIn("PRIVATE_PROVIDER_SENTINEL", saved)
+                self.assertIn("ModelHTTPError", saved)
             spans = [
                 json.loads(line)
                 for line in (root / "telemetry/traces.jsonl").read_text().splitlines()
             ]
             self.assertTrue(any(span["status"]["status_code"] == "ERROR" for span in spans))
+
+    async def test_streamed_provider_error_keeps_message_body_and_traceback(self) -> None:
+        def respond(request: httpx.Request) -> httpx.Response:
+            self.assertIs(json.loads(request.content)["stream"], True)
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                text='data: {"error": {"message": "Provider returned error", "code": 502, '
+                '"metadata": {"raw": "UPSTREAM_STREAM_FAILURE"}}}\n\n',
+            )
+
+        async with AsyncOpenAI(
+            api_key="offline", http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        ) as client:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                model = OpenRouterModel(
+                    "openai/gpt-6-luna", provider=OpenRouterProvider(openai_client=client)
+                )
+                sessions = AgentSessions(
+                    Agent(model), context_window_tokens=260_000, artifact_directory=root
+                )
+                with collect_telemetry(root):
+                    self.assertEqual(
+                        await sessions.run("stream-error", "Respond.", deps=None),
+                        Stopped("call_error_limit"),
+                    )
+                self.assertEqual(sessions.usage.requests, 3)
+                logs = (root / "telemetry/logs.jsonl").read_text()
+                self.assertIn("UPSTREAM_STREAM_FAILURE", logs)
+                self.assertIn("502", logs)
+                self.assertIn("Provider returned error", logs)
+                traces = (root / "telemetry/traces.jsonl").read_text()
+                self.assertIn("Provider returned error", traces)
+                self.assertIn("openai.APIError", traces)
+                self.assertIn("Traceback", traces)
+                store = FileStepStore(root / "agent-messages", media_store=None)
+                (run,) = await store.list_runs(conversation_id="stream-error")
+                events = await store.list_events(run_id=run.run_id)
+                failed = next(event for event in events if event.kind == "run_failed")
+                self.assertIn("Provider returned error", failed.error or "")
 
     async def test_collection_preserves_paired_benchmark_results_and_trajectories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

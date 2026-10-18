@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock, patch
 import httpx2 as httpx
 from openai import AsyncOpenAI, AsyncStream, omit
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
-from pydantic_ai import Agent
+from pydantic import StrictInt
+from pydantic_ai import Agent, ToolOutput
 from pydantic_ai.messages import (
     ModelRequest,
     SystemPromptPart,
@@ -95,6 +96,51 @@ def streamed_request(client: AsyncOpenAI, *, tool_name: str, tool_args: str) -> 
     },
 )
 class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_openai_sessions_send_equivalent_fixed_integer_arrays(self) -> None:
+        async def move(destination: tuple[StrictInt, StrictInt] | None) -> str:
+            return str(destination)
+
+        for model_name in ("openai/gpt-6-luna", "vendor/test-model"):
+            with self.subTest(model=model_name):
+                settings = AgentSettings(timeout_seconds=3)
+                model = create_model(
+                    OpenRouterSelection(
+                        runtime="openrouter", model=model_name, provider="openai", settings=settings
+                    )
+                )
+                assert isinstance(model, OpenRouterModel)
+                self.addAsyncCleanup(model.client.close)
+                agent: Agent[None, str] = Agent(model, output_type=ToolOutput(move, name="move"))
+                sessions = AgentSessions(agent, context_window_tokens=262144, settings=settings)
+                request = AsyncMock(
+                    return_value=completion(
+                        tool_call=True, tool_name="move", tool_args='{"destination": [2, 3]}'
+                    )
+                )
+                with patch.object(model.client.chat.completions, "create", request):
+                    result = await sessions.run("probe", "Move.", deps=None)
+                self.assertEqual(result, Completed("(2, 3)"))
+                schema = next(
+                    tool["function"]["parameters"]
+                    for tool in request.call_args.kwargs["tools"]
+                    if tool["function"]["name"] == "move"
+                )
+                alternatives = schema["properties"]["destination"]["anyOf"]
+                self.assertEqual(alternatives[1], {"type": "null"})
+                self.assertEqual(
+                    alternatives[0],
+                    {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 2,
+                        **(
+                            {"items": {"type": "integer"}}
+                            if model_name.startswith("openai/")
+                            else {"prefixItems": [{"type": "integer"}, {"type": "integer"}]}
+                        ),
+                    },
+                )
+
     def router_model(self) -> OpenRouterModel:
         model = create_model(
             OpenRouterSelection(

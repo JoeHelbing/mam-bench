@@ -120,7 +120,7 @@ CaseSettings = Annotated[
 class BenchmarkConfig(BaseModel):
     """One explicit model and an ordered, fully specified suite."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
     model: ModelSelection
     cases: tuple[CaseSettings, ...] = Field(min_length=1)
     output_directory: Path

@@ -46,7 +46,7 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("CancelledError", log)
         self.assertNotIn("PRIVATE PROMPT", log)
 
-    async def test_http_timeout_is_distinct_and_does_not_log_request(self) -> None:
+    async def test_http_timeout_is_distinct_and_keeps_original_message(self) -> None:
         async def broken(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             raise APITimeoutError(request=httpx.Request("POST", "https://SECRET.invalid"))
 
@@ -59,7 +59,7 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         log = "\n".join(captured.output)
         self.assertIn("scope=http_request", log)
         self.assertIn("APITimeoutError", log)
-        self.assertNotIn("SECRET", log)
+        self.assertIn("Request timed out.", log)
 
     async def test_turn_summary_logs_usage_without_content(self) -> None:
         count = 0

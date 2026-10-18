@@ -83,7 +83,7 @@ class MainTests(unittest.TestCase):
             for signal in ("traces", "logs", "metrics"):
                 self.assertTrue((run / "telemetry" / f"{signal}.jsonl").read_text())
 
-    def test_failed_case_is_visible_but_never_prints_total_or_sensitive_body(self) -> None:
+    def test_failed_case_keeps_error_details_and_never_prints_total(self) -> None:
         async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             if any(tool.name == "act" for tool in info.output_tools):
                 raise ModelAPIError("offline", "SECRET-PROVIDER")
@@ -109,9 +109,10 @@ class MainTests(unittest.TestCase):
             self.assertIn("Case 1:", output.getvalue())
             self.assertNotIn("Combined Benchmark Score:", output.getvalue())
             self.assertIn("Failed case:", errors.getvalue())
-            self.assertNotIn("SECRET-PROVIDER", errors.getvalue())
-            for record in (Path(directory) / "results").rglob("*.json*"):
-                self.assertNotIn("SECRET-PROVIDER", record.read_text())
+            records = "\n".join(
+                record.read_text() for record in (Path(directory) / "results").rglob("*.json*")
+            )
+            self.assertIn("SECRET-PROVIDER", records)
 
     def test_invalid_model_with_default_suite_does_not_claim_suite_is_deferred(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -123,6 +124,7 @@ class MainTests(unittest.TestCase):
                 self.assertEqual(main.main(["--model", str(model)]), 2)
                 runner.assert_not_called()
             self.assertIn("model", errors.getvalue())
+            self.assertIn("input_value=", errors.getvalue())
             self.assertNotIn("deferred", errors.getvalue())
 
     def test_last_case_validation_prevents_runner_construction(self) -> None:

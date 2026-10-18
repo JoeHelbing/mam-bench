@@ -1,8 +1,7 @@
-"""Native agent archives with the package's error-content protections."""
+"""Native agent archives with classified persistence failures."""
 
 import json
 from collections.abc import Awaitable
-from dataclasses import replace
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -41,7 +40,7 @@ class ArtifactWriter:
 
 
 class AgentMessageArchive(FileStepStore):
-    """Keep native snapshots intact without persisting provider exception bodies."""
+    """Keep native snapshots, events and tool effects intact."""
 
     async def _persist(self, operation: Awaitable[None]) -> None:
         try:
@@ -56,11 +55,7 @@ class AgentMessageArchive(FileStepStore):
         await self._persist(super().save_snapshot(snapshot))
 
     async def append_event(self, event: StepEvent) -> None:
-        if event.error is not None:
-            event = replace(event, error="Exception details omitted; see diagnostic log for types.")
         await self._persist(super().append_event(event))
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
-        if record.status == "failed":
-            record = replace(record, effect_summary="Exception details omitted.")
         await self._persist(super().record_tool_effect(record))

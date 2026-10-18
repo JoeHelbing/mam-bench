@@ -7,6 +7,7 @@ import re
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from time import monotonic
 
@@ -21,13 +22,15 @@ from pydantic_ai import (
     UserContent,
     capture_run_messages,
 )
-from pydantic_ai.capabilities import AgentCapability
+from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 from pydantic_ai.exceptions import (
     IncompleteToolCall,
     ModelAPIError,
     UnexpectedModelBehavior,
     UsageLimitExceeded,
 )
+from pydantic_ai.messages import ModelRequest, RetryPromptPart, ToolReturnPart
+from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai_harness import (
@@ -50,6 +53,45 @@ from mam_bench.config import AgentSettings
 from mam_bench.diagnostics import ExecutionFailure, failure_trace
 
 logger = logging.getLogger(__name__)
+
+
+class _ToolErrorLimitReached(Exception):
+    pass
+
+
+class _ToolErrorLimit[DepsT](AbstractCapability[DepsT]):
+    """Count failed calls across tools and successful intervening requests."""
+
+    def __init__(self, history: Sequence[ModelMessage]) -> None:
+        self._seen = self._failures(history)
+        self._count = 0
+
+    @staticmethod
+    def _failures(messages: Sequence[ModelMessage]) -> set[tuple[datetime | None, str]]:
+        return {
+            (message.timestamp, part.tool_call_id)
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if (
+                isinstance(part, RetryPromptPart)
+                and part.tool_name is not None
+                or isinstance(part, ToolReturnPart)
+                and part.outcome == "failed"
+            )
+        }
+
+    async def before_model_request(
+        self, ctx: RunContext[DepsT], request_context: ModelRequestContext
+    ) -> ModelRequestContext:
+        del ctx
+        # Tool batches have settled here, so all calls keep their matching replies.
+        failures = self._failures(request_context.messages)
+        self._count += len(failures - self._seen)
+        self._seen.update(failures)
+        if self._count >= 3:
+            raise _ToolErrorLimitReached
+        return request_context
 
 
 class _Compaction[DepsT](FallbackCompaction[DepsT]):
@@ -194,6 +236,7 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                             usage=usage,
                             usage_limits=usage_limits or UsageLimits(request_limit=25),
                             capabilities=(
+                                _ToolErrorLimit[AgentDepsT](state.history),
                                 *(
                                     (StepPersistence(store=self._archive, agent_name=session_id),)
                                     if self._archive is not None
@@ -205,10 +248,14 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                             ),
                             toolsets=[self._board_tools(session_id)],
                         )
+                except _ToolErrorLimitReached:
+                    outcome = "tool_error_limit"
+                    logger.info("turn.stop session=%s reason=%s", session_id, outcome)
+                    turn: Completed[OutputDataT] | Stopped = Stopped(outcome)
                 except UsageLimitExceeded:
                     outcome = "usage_limit"
                     logger.info("turn.stop session=%s reason=usage_limit", session_id)
-                    turn: Completed[OutputDataT] | Stopped = Stopped(outcome)
+                    turn = Stopped(outcome)
 
                 except IncompleteToolCall:
                     outcome = "output_token_limit"

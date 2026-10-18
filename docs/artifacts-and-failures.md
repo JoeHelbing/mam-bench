@@ -48,6 +48,13 @@ are not separate artifacts.
 
 Invalid actions receive bounded retry feedback. Exhausted request, tool, output,
 or retry budgets select a simulation fallback and retain a diagnostic reason.
+Three failed tool calls in one Agent Turn stop it with `tool_error_limit` and
+select the same simulation fallback. Argument validation failures, rejected
+actions, unknown tools, and reported tool failures count across all tools;
+successful calls do not reset the count. Each new turn has a fresh budget.
+Tool batches settle before the limit is checked, preserving their results and
+accepted effects. The limit prevents the next model request; it does not
+interrupt a response still being generated or override an accepted terminal action.
 They do not cause an infrastructure failure or an extra scoring penalty.
 Provider/network/timeouts, persistence failures, and simulation defects stop
 the invocation and cancel outstanding turns. Completed records remain available.

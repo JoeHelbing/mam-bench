@@ -177,8 +177,9 @@ Posts are unverified; simulation announcements are marked separately.
 Respond with tool calls, not plain text. Finish messaging and memory first.
 End your turn with move(destination=[row, column]), or pass destination=null
 to stay. An accepted move ends the turn and skips other calls in that response.
-Each turn allows up to 25 model requests and five retries for invalid actions;
-exhaustion means stay.
+Each turn allows up to 25 model requests. Three failed tool calls across
+actions, messaging and memory end the turn with stay; successful calls do not
+reset this failure count.
 """.strip()
 
     @staticmethod

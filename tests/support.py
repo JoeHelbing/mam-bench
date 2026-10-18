@@ -1,6 +1,7 @@
 """Explicit development fixtures and scripted provider responses; no suite calibration."""
 
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import cast
 
@@ -9,10 +10,19 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     TextContent,
+    TextPart,
+    ThinkingPart,
     ToolCallPart,
     UserPromptPart,
 )
-from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.function import (
+    AgentInfo,
+    DeltaThinkingCalls,
+    DeltaThinkingPart,
+    DeltaToolCall,
+    DeltaToolCalls,
+    FunctionModel,
+)
 
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, VLLMModel
@@ -129,9 +139,32 @@ async def stay(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     return ModelResponse(parts=[part])
 
 
+def streaming_model(model: FunctionModel) -> FunctionModel:
+    """Expose scripted replies as native chunks for archived simulation turns."""
+
+    async def stream(
+        messages: list[ModelMessage], info: AgentInfo
+    ) -> AsyncIterator[str | DeltaToolCalls | DeltaThinkingCalls]:
+        response = await model.request(messages, info.model_settings, info.model_request_parameters)
+        for index, part in enumerate(response.parts):
+            if isinstance(part, TextPart):
+                yield part.content
+            elif isinstance(part, ThinkingPart):
+                yield {index: DeltaThinkingPart(content=part.content)}
+            elif isinstance(part, ToolCallPart):
+                yield {
+                    index: DeltaToolCall(
+                        part.tool_name, part.args_as_json_str(), tool_call_id=part.tool_call_id
+                    )
+                }
+
+    model.stream_function = stream
+    return model
+
+
 def runtime(path: Path, model: FunctionModel | None = None, **settings: object) -> CaseRuntime:
     return CaseRuntime(
-        model or FunctionModel(stay),
+        streaming_model(model or FunctionModel(stay)),
         AgentSettings.model_validate({"concurrency": 2, "timeout_seconds": 5, **settings}),
         ArtifactWriter(path),
         context_window_tokens=260_000,

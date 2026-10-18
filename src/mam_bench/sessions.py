@@ -4,16 +4,17 @@ import asyncio
 import hashlib
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import AsyncIterable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 from typing import cast
 
 from anyio import Lock
 from openai import APIConnectionError, APIError, APITimeoutError
+from pydantic import TypeAdapter
 from pydantic_ai import (
     Agent,
     ModelMessage,
@@ -33,6 +34,7 @@ from pydantic_ai.exceptions import (
     UsageLimitExceeded,
 )
 from pydantic_ai.messages import (
+    AgentStreamEvent,
     ModelRequest,
     ModelResponse,
     RetryPromptPart,
@@ -56,12 +58,14 @@ from pydantic_ai_harness.memory import (
 )
 from pydantic_ai_harness.step_persistence import StepPersistence
 
-from mam_bench.artifacts import AgentMessageArchive
+from mam_bench.artifacts import AgentMessageArchive, ArtifactWriter
 from mam_bench.communication import MessageBoard, MessagePage
 from mam_bench.config import AgentSettings
 from mam_bench.diagnostics import ExecutionFailure, failure_trace
+from mam_bench.kludge import vllm_stream_writer
 
 logger = logging.getLogger(__name__)
+_stream_event_adapter: TypeAdapter[AgentStreamEvent] = TypeAdapter(AgentStreamEvent)
 
 
 class _CallErrorLimitReached(Exception):
@@ -205,11 +209,15 @@ class AgentSessions[AgentDepsT, OutputDataT]:
         self._failure: BaseException | None = None
         self._usage = RunUsage()
         self._archive = None
+        self._stream_writer = None
+        self._provider_stream_writer = None
         if artifact_directory is not None:
             artifact_directory.mkdir(parents=True, exist_ok=True)
             self._archive = AgentMessageArchive(
                 artifact_directory / "agent-messages", media_store=None
             )
+            self._stream_writer = ArtifactWriter(artifact_directory / "agent-streams")
+            self._provider_stream_writer = ArtifactWriter(artifact_directory / "provider-streams")
         self.board = MessageBoard(
             archive_path=artifact_directory / "message-board.jsonl" if artifact_directory else None
         )
@@ -278,7 +286,10 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                 self._settings.timeout_seconds,
                 len(state.history),
             )
-            with capture_run_messages() as messages:
+            with (
+                vllm_stream_writer.set(self._provider_stream_writer),
+                capture_run_messages() as messages,
+            ):
                 try:
                     async with deadline:
                         result = await self._agent.run(
@@ -301,6 +312,7 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                                 *capabilities,
                             ),
                             toolsets=[self._board_tools(session_id)],
+                            event_stream_handler=self._record_stream if self._archive else None,
                         )
                 except _CallErrorLimitReached:
                     outcome = "call_error_limit"
@@ -392,6 +404,24 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                 state.history = list(messages)
                 return turn
 
+    async def _record_stream(
+        self, ctx: RunContext[object], events: AsyncIterable[AgentStreamEvent]
+    ) -> None:
+        assert self._stream_writer is not None
+        async for event in events:
+            try:
+                self._stream_writer.append(
+                    f"{ctx.run_id}.jsonl",
+                    {
+                        "timestamp": datetime.now(UTC).isoformat(),
+                        "conversation_id": ctx.conversation_id,
+                        "run_step": ctx.run_step,
+                        "event": _stream_event_adapter.dump_python(event, mode="json"),
+                    },
+                )
+            except OSError as error:
+                raise ExecutionFailure("artifact_write", "agent stream write failed") from error
+
     def _state(self, session_id: str) -> _SessionState:
         if not session_id:
             raise ValueError("session_id must not be empty")
@@ -418,6 +448,7 @@ class AgentSessions[AgentDepsT, OutputDataT]:
             raise ExecutionFailure("compaction", "Session runtime requires an Agent with a model")
         summarizer: SummarizingCompaction[AgentDepsT] = SummarizingCompaction(
             model=model,
+            event_stream_handler=self._record_stream if self._archive else None,
             max_tokens=1,
             keep_tokens=settings.compaction_tail(self._context_window_tokens),
             incremental=True,

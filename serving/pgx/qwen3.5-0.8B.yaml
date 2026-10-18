@@ -1,0 +1,24 @@
+model: Zerul/Qwen3.5-0.8B-W4A16-AutoRound-AWQ
+revision: 805343842af7b9c4410905524644fc5a19bd6fb9
+served-model-name: qwen3.5-0.8B
+host: 172.30.250.2
+port: 30000
+dtype: bfloat16
+kv-cache-dtype: auto
+max-model-len: 262144
+max-num-seqs: 16
+max-num-batched-tokens: 8192
+gpu-memory-utilization: 0.55
+attention-backend: FLASHINFER
+enable-prefix-caching: true
+mamba-cache-mode: align
+enable-chunked-prefill: true
+async-scheduling: true
+reasoning-parser: qwen3
+enable-auto-tool-choice: true
+tool-parser-plugin: /grammar-kludge/qwen_empty_tool_kludge.py
+tool-call-parser: qwen3_coder_empty_tool_kludge
+chat-template: /recipes/qwen35-08b-chat-template.jinja
+limit-mm-per-prompt:
+  image: 0
+  video: 0

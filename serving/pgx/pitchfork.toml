@@ -1,0 +1,36 @@
+namespace = "pgx-qwen35-main-20261015"
+
+[daemons."qwen-0.8B"]
+run = "exec docker run --rm --name pgx-qwen35-08b --gpus all --user 1000:1000 --network sr-bench-isolated --ip 172.30.250.2 -p 127.0.0.1:30000:30000 --shm-size 4g --memory 85g --memory-swap 85g -v /home/joehe/git/jh-sparkruns/grammar-kludge:/grammar-kludge:ro -v /home/joehe/.cache/huggingface:/models -v /home/joehe/git/jh-sparkruns/.scratch/pgx-qwen35-main-20261015:/recipes:ro -v /home/joehe/git/jh-sparkruns/.scratch/pgx-qwen35-main-20261015/runtime-cache:/runtime-cache -e HF_HOME=/models -e HF_HUB_OFFLINE=1 -e HOME=/tmp -e VLLM_CACHE_ROOT=/runtime-cache/vllm -e TRITON_CACHE_DIR=/runtime-cache/triton -e TORCHINDUCTOR_CACHE_DIR=/runtime-cache/inductor -e CUDA_CACHE_PATH=/runtime-cache/cuda -e VLLM_MARLIN_USE_ATOMIC_ADD=1 -e VLLM_USE_TRITON_AWQ=1 --entrypoint vllm ghcr.io/spark-arena/dgx-vllm-eugr-nightly@sha256:5896e833d11a848e76aacd66d7ebedd45fd7f3a81c1887626eb797bbfe3d2424 serve --config /recipes/qwen3.5-0.8B.yaml"
+ready_http = { url = "http://127.0.0.1:30000/health", timeout = "20m" }
+retry = 0
+boot_start = false
+stop_signal = { signal = "SIGINT", timeout = "90s" }
+
+[daemons."qwen-2B"]
+run = "exec docker run --rm --name pgx-qwen35-2b --gpus all --user 1000:1000 --network sr-bench-isolated --ip 172.30.250.2 -p 127.0.0.1:30000:30000 --shm-size 4g --memory 85g --memory-swap 85g -v /home/joehe/git/jh-sparkruns/grammar-kludge:/grammar-kludge:ro -v /home/joehe/.cache/huggingface:/models -v /home/joehe/git/jh-sparkruns/.scratch/pgx-qwen35-main-20261015:/recipes:ro -v /home/joehe/git/jh-sparkruns/.scratch/pgx-qwen35-main-20261015/runtime-cache:/runtime-cache -e HF_HOME=/models -e HF_HUB_OFFLINE=1 -e HOME=/tmp -e VLLM_CACHE_ROOT=/runtime-cache/vllm -e TRITON_CACHE_DIR=/runtime-cache/triton -e TORCHINDUCTOR_CACHE_DIR=/runtime-cache/inductor -e CUDA_CACHE_PATH=/runtime-cache/cuda -e VLLM_MARLIN_USE_ATOMIC_ADD=1 --entrypoint vllm ghcr.io/spark-arena/dgx-vllm-eugr-nightly@sha256:5896e833d11a848e76aacd66d7ebedd45fd7f3a81c1887626eb797bbfe3d2424 serve --config /recipes/qwen3.5-2B.yaml"
+ready_http = { url = "http://127.0.0.1:30000/health", timeout = "20m" }
+retry = 0
+boot_start = false
+stop_signal = { signal = "SIGINT", timeout = "90s" }
+
+[daemons."qwen-4B"]
+run = "exec docker run --rm --name pgx-qwen35-4b --gpus all --user 1000:1000 --network sr-bench-isolated --ip 172.30.250.2 -p 127.0.0.1:30000:30000 --shm-size 4g --memory 85g --memory-swap 85g -v /home/joehe/git/jh-sparkruns/grammar-kludge:/grammar-kludge:ro -v /home/joehe/.cache/huggingface:/models -v /home/joehe/git/jh-sparkruns/.scratch/pgx-qwen35-main-20261015:/recipes:ro -v /home/joehe/git/jh-sparkruns/.scratch/pgx-qwen35-main-20261015/runtime-cache:/runtime-cache -e HF_HOME=/models -e HF_HUB_OFFLINE=1 -e HOME=/tmp -e VLLM_CACHE_ROOT=/runtime-cache/vllm -e TRITON_CACHE_DIR=/runtime-cache/triton -e TORCHINDUCTOR_CACHE_DIR=/runtime-cache/inductor -e CUDA_CACHE_PATH=/runtime-cache/cuda -e VLLM_MARLIN_USE_ATOMIC_ADD=1 --entrypoint vllm ghcr.io/spark-arena/dgx-vllm-eugr-nightly@sha256:5896e833d11a848e76aacd66d7ebedd45fd7f3a81c1887626eb797bbfe3d2424 serve --config /recipes/qwen3.5-4B.yaml"
+ready_http = { url = "http://127.0.0.1:30000/health", timeout = "20m" }
+retry = 0
+boot_start = false
+stop_signal = { signal = "SIGINT", timeout = "90s" }
+
+[daemons."qwen-9B"]
+run = "exec sh -c 'until test -f /home/joehe/.cache/huggingface/hub/models--QuantTrio--Qwen3.5-9B-AWQ/snapshots/938f8e3ef86c9d1e9bec3705e149694c172592f1/tokenizer.json && test -f /home/joehe/.cache/huggingface/hub/models--QuantTrio--Qwen3.5-9B-AWQ/snapshots/938f8e3ef86c9d1e9bec3705e149694c172592f1/tokenizer_config.json && test -f /home/joehe/.cache/huggingface/hub/models--QuantTrio--Qwen3.5-9B-AWQ/snapshots/938f8e3ef86c9d1e9bec3705e149694c172592f1/model.safetensors.index.json && test -f /home/joehe/.cache/huggingface/hub/models--QuantTrio--Qwen3.5-9B-AWQ/snapshots/938f8e3ef86c9d1e9bec3705e149694c172592f1/model-00001-of-00005.safetensors && test -f /home/joehe/.cache/huggingface/hub/models--QuantTrio--Qwen3.5-9B-AWQ/snapshots/938f8e3ef86c9d1e9bec3705e149694c172592f1/model-00002-of-00005.safetensors && test -f /home/joehe/.cache/huggingface/hub/models--QuantTrio--Qwen3.5-9B-AWQ/snapshots/938f8e3ef86c9d1e9bec3705e149694c172592f1/model-00003-of-00005.safetensors && test -f /home/joehe/.cache/huggingface/hub/models--QuantTrio--Qwen3.5-9B-AWQ/snapshots/938f8e3ef86c9d1e9bec3705e149694c172592f1/model-00004-of-00005.safetensors && test -f /home/joehe/.cache/huggingface/hub/models--QuantTrio--Qwen3.5-9B-AWQ/snapshots/938f8e3ef86c9d1e9bec3705e149694c172592f1/model-00005-of-00005.safetensors; do sleep 2; done; exec docker run --rm --name pgx-qwen35-9b --gpus all --user 1000:1000 --network sr-bench-isolated --ip 172.30.250.2 -p 127.0.0.1:30000:30000 --shm-size 4g --memory 85g --memory-swap 85g -v /home/joehe/git/jh-sparkruns/grammar-kludge:/grammar-kludge:ro -v /home/joehe/.cache/huggingface:/models -v /home/joehe/git/jh-sparkruns/.scratch/pgx-qwen35-main-20261015:/recipes:ro -v /home/joehe/git/jh-sparkruns/.scratch/pgx-qwen35-main-20261015/runtime-cache:/runtime-cache -e HF_HOME=/models -e HF_HUB_OFFLINE=1 -e HOME=/tmp -e VLLM_CACHE_ROOT=/runtime-cache/vllm -e TRITON_CACHE_DIR=/runtime-cache/triton -e TORCHINDUCTOR_CACHE_DIR=/runtime-cache/inductor -e CUDA_CACHE_PATH=/runtime-cache/cuda -e VLLM_MARLIN_USE_ATOMIC_ADD=1 --entrypoint vllm ghcr.io/spark-arena/dgx-vllm-eugr-nightly@sha256:5896e833d11a848e76aacd66d7ebedd45fd7f3a81c1887626eb797bbfe3d2424 serve --config /recipes/qwen3.5-9B.yaml'"
+ready_http = { url = "http://127.0.0.1:30000/health", timeout = "20m" }
+retry = 0
+boot_start = false
+stop_signal = { signal = "SIGINT", timeout = "90s" }
+
+[daemons.download]
+run = "exec docker run --rm --name pgx-qwen35-download --user 1000:1000 -v /home/joehe/git/jh-sparkruns/grammar-kludge:/grammar-kludge:ro -v /home/joehe/.cache/huggingface:/models -v /home/joehe/git/jh-sparkruns/.scratch/pgx-qwen35-main-20261015:/recipes:ro -e HF_HOME=/models -e HOME=/tmp -e UV_CACHE_DIR=/tmp/uv-cache --entrypoint uv ghcr.io/spark-arena/dgx-vllm-eugr-nightly@sha256:5896e833d11a848e76aacd66d7ebedd45fd7f3a81c1887626eb797bbfe3d2424 run --no-project python3 -u /recipes/download.py"
+retry = 0
+boot_start = false
+ready_delay = 2
+stop_signal = { signal = "SIGINT", timeout = "30s" }

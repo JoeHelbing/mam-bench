@@ -1,0 +1,23 @@
+model: QuantTrio/Qwen3.5-9B-AWQ
+revision: 938f8e3ef86c9d1e9bec3705e149694c172592f1
+served-model-name: qwen3.5-9B
+host: 172.30.250.2
+port: 30000
+dtype: bfloat16
+kv-cache-dtype: auto
+max-model-len: 262144
+max-num-seqs: 16
+max-num-batched-tokens: 8192
+gpu-memory-utilization: 0.55
+attention-backend: FLASHINFER
+enable-prefix-caching: true
+mamba-cache-mode: align
+enable-chunked-prefill: true
+async-scheduling: true
+reasoning-parser: qwen3
+enable-auto-tool-choice: true
+tool-parser-plugin: /grammar-kludge/qwen_empty_tool_kludge.py
+tool-call-parser: qwen3_coder_empty_tool_kludge
+limit-mm-per-prompt:
+  image: 0
+  video: 0

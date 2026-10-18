@@ -19,7 +19,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, ModelSelection, VLLMModel
-from mam_bench.kludge import VLLMChatModel, vllm_settings
+from mam_bench.kludge import OpenAIFixedArrayTransformer, VLLMChatModel, vllm_settings
 
 
 @dataclass(frozen=True)
@@ -85,6 +85,8 @@ def create_model(selection: ModelSelection) -> Model:
         )
     else:
         settings = OpenRouterSettings()  # pyright: ignore[reportCallIssue]
+        if selection.model.startswith("openai/"):
+            profile["json_schema_transformer"] = OpenAIFixedArrayTransformer
         if selection.required_tool_choice_supported is False:
             profile["openai_supports_tool_choice_required"] = False
         router_settings = OpenRouterModelSettings(

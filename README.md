@@ -195,6 +195,7 @@ dependencies.
 
 ## Reference
 
+- [Native OpenAI setup](docs/native-openai.md) - direct provider configuration and live cache probe.
 - [Rules and scoring](docs/rules-and-scoring.md) - world mechanics, goals, formulas,
   and comparability limits.
 - [Artifacts and failures](docs/artifacts-and-failures.md) - trajectories,

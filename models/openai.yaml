@@ -1,0 +1,6 @@
+runtime: openai
+model: gpt-4.1-mini
+settings:
+  max_completion_tokens: 1024
+  summary_completion_tokens: 1024
+  timeout_seconds: 60

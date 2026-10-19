@@ -105,8 +105,18 @@ class VLLMModel(BaseModel):
     repetition_detection: RepetitionDetection | None = None
 
 
+class OpenAIModel(BaseModel):
+    """One model through PydanticAI's native OpenAI Responses adapter."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    runtime: Literal["openai"]
+    model: str = Field(min_length=1)
+    settings: AgentSettings = AgentSettings()
+
+
 ModelSelection = Annotated[
-    OpenRouterModel | VLLMModel,
+    OpenRouterModel | VLLMModel | OpenAIModel,
     Field(discriminator="runtime"),
 ]
 

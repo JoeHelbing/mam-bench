@@ -14,7 +14,7 @@ from pydantic_ai import Agent, ToolOutput
 from pydantic_ai.models.openai import OpenAIResponsesModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
-from mam_bench.config import AgentSettings, OpenAIModel, load_benchmark_config
+from mam_bench.config import AgentSettings, ModelSelection, load_benchmark_config
 from mam_bench.model_setup import resolve_model_setup
 from mam_bench.runtime import create_model
 from mam_bench.sessions import AgentSessions, Completed
@@ -91,21 +91,20 @@ def streamed_answer() -> str:
 class NativeOpenAITests(unittest.IsolatedAsyncioTestCase):
     async def test_yaml_setup_uses_native_context_and_preserves_defaults(self) -> None:
         config = load_benchmark_config(Path("models/openai.yaml"), output_directory=Path("results"))
-        self.assertIsInstance(config.model, OpenAIModel)
         setup = await resolve_model_setup(config.model)
         self.assertEqual(setup.context_window_tokens, 1000000)
         self.assertEqual(setup.selection.settings, config.model.settings)
         self.assertEqual(setup.metadata["source"], "pydantic_ai_model_profile")
         defaults = await resolve_model_setup(
-            OpenAIModel(runtime="openai", model=config.model.model)
+            ModelSelection(runtime="openai", model=config.model.model)
         )
         self.assertIsNone(defaults.selection.settings.max_completion_tokens)
         self.assertIsNone(defaults.selection.settings.summary_completion_tokens)
         with self.assertRaisesRegex(ValueError, "context metadata"):
-            await resolve_model_setup(OpenAIModel(runtime="openai", model="unknown-model"))
+            await resolve_model_setup(ModelSelection(runtime="openai", model="unknown-model"))
         with self.assertRaisesRegex(ValueError, "exceeds"):
             await resolve_model_setup(
-                OpenAIModel(
+                ModelSelection(
                     runtime="openai",
                     model=config.model.model,
                     settings=AgentSettings(max_completion_tokens=1000001),
@@ -130,7 +129,7 @@ class NativeOpenAITests(unittest.IsolatedAsyncioTestCase):
                 "mam_bench.runtime.OpenAIProvider",
                 return_value=OpenAIProvider(openai_client=client),
             ):
-                selection = OpenAIModel(
+                selection = ModelSelection(
                     runtime="openai",
                     model="gpt-4.1-mini",
                     settings=AgentSettings(max_completion_tokens=1024),

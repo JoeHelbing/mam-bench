@@ -63,9 +63,10 @@ mechanics.
 
 ## Quickstart
 
-You need [uv](https://docs.astral.sh/uv/) and an OpenAI-compatible endpoint
-that supports tool calls. Bring your own model and endpoint: the repo does not
-ship either, and compatibility varies by server. Python 3.14 is required.
+You need [uv](https://docs.astral.sh/uv/), Python 3.14, and access to a model
+service that supports tool calls. For direct OpenAI API access, follow the
+[OpenAI benchmark guide](docs/native-openai.md). The quickstart below uses
+vLLM; an OpenRouter example follows it. Bring your own model and endpoint.
 
 ```bash
 git clone https://github.com/JoeHelbing/mam-bench.git
@@ -195,7 +196,7 @@ dependencies.
 
 ## Reference
 
-- [Native OpenAI setup](docs/native-openai.md) - direct provider configuration and live cache probe.
+- [OpenAI benchmark guide](docs/native-openai.md) - configure a model and run the full suite.
 - [Rules and scoring](docs/rules-and-scoring.md) - world mechanics, goals, formulas,
   and comparability limits.
 - [Artifacts and failures](docs/artifacts-and-failures.md) - trajectories,

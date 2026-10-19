@@ -25,7 +25,7 @@ from pydantic_ai.models.function import (
 )
 
 from mam_bench.artifacts import ArtifactWriter
-from mam_bench.config import AgentSettings, VLLMModel
+from mam_bench.config import AgentSettings, ModelSelection
 from mam_bench.runtime import CaseRuntime
 from mam_bench.simulations.civil_violence.settings import CivilViolenceSettings
 from mam_bench.simulations.schelling.settings import SchellingSettings
@@ -70,8 +70,8 @@ def civil(**updates: object) -> CivilViolenceSettings:
     )
 
 
-def selection() -> VLLMModel:
-    return VLLMModel(
+def selection() -> ModelSelection:
+    return ModelSelection(
         runtime="vllm",
         model="scripted",
         base_url="http://127.0.0.1:1/v1",

@@ -20,7 +20,7 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from mam_bench.artifacts import ArtifactWriter
-from mam_bench.config import AgentSettings, ModelSelection, OpenAIModel, VLLMModel
+from mam_bench.config import AgentSettings, ModelSelection
 from mam_bench.kludge import OpenAIFixedArrayTransformer, VLLMChatModel, vllm_settings
 
 
@@ -70,7 +70,7 @@ def create_model(selection: ModelSelection) -> Model:
     if agent_settings.top_k is not None:
         request_settings["extra_body"] = {"top_k": agent_settings.top_k}
 
-    if isinstance(selection, OpenAIModel):
+    if selection.runtime == "openai":
         if agent_settings.top_k is not None:
             raise ValueError("OpenAI does not support settings.top_k")
         profile["json_schema_transformer"] = OpenAIFixedArrayTransformer
@@ -85,7 +85,8 @@ def create_model(selection: ModelSelection) -> Model:
             ),
         )
 
-    if isinstance(selection, VLLMModel):
+    if selection.runtime == "vllm":
+        assert selection.api_key_env is not None
         if selection.repetition_detection is not None:
             request_settings["extra_body"] = {
                 **cast(dict[str, object], request_settings.get("extra_body") or {}),
@@ -101,6 +102,7 @@ def create_model(selection: ModelSelection) -> Model:
             settings=vllm_settings(selection, request_settings),
         )
     else:
+        assert selection.provider is not None
         settings = OpenRouterSettings()  # pyright: ignore[reportCallIssue]
         if selection.model.startswith("openai/"):
             profile["json_schema_transformer"] = OpenAIFixedArrayTransformer

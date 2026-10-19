@@ -24,8 +24,7 @@ from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.tools import ToolDefinition
 
 from mam_bench.artifacts import ArtifactWriter
-from mam_bench.config import AgentSettings, VLLMModel
-from mam_bench.config import OpenRouterModel as OpenRouterSelection
+from mam_bench.config import AgentSettings, ModelSelection
 from mam_bench.runtime import CaseRuntime, create_model
 from mam_bench.sessions import AgentSessions, Completed
 from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
@@ -104,7 +103,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(model=model_name):
                 settings = AgentSettings(timeout_seconds=3)
                 model = create_model(
-                    OpenRouterSelection(
+                    ModelSelection(
                         runtime="openrouter", model=model_name, provider="openai", settings=settings
                     )
                 )
@@ -143,7 +142,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
 
     def router_model(self) -> OpenRouterModel:
         model = create_model(
-            OpenRouterSelection(
+            ModelSelection(
                 runtime="openrouter",
                 model="vendor/test-model",
                 provider="selected-provider",
@@ -228,7 +227,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                     "mam_bench.model_setup._fetch_endpoints", AsyncMock(return_value=payload)
                 ):
                     setup = await resolve_model_setup(
-                        OpenRouterSelection(
+                        ModelSelection(
                             runtime="openrouter",
                             model="openai/gpt-4.1",
                             provider="azure",
@@ -280,7 +279,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_unconfigured_request_leaves_parameters_unset(self) -> None:
-        selected = OpenRouterSelection(
+        selected = ModelSelection(
             runtime="openrouter", model="vendor/test-model", provider="selected-provider"
         )
         model = create_model(selected)
@@ -306,7 +305,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_explicit_cache_adds_native_breakpoints_to_claude_requests(self) -> None:
-        selected = OpenRouterSelection(
+        selected = ModelSelection(
             runtime="openrouter",
             model="anthropic/claude-sonnet-4",
             provider="anthropic",
@@ -333,7 +332,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_vllm_uses_native_profile_and_request_format(self) -> None:
         model = create_model(
-            VLLMModel(
+            ModelSelection(
                 runtime="vllm",
                 model="google/gemma-4-27b-it",
                 base_url="https://compatible.example.test/v1",
@@ -387,7 +386,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(effort=effort):
                 settings = AgentSettings(reasoning_effort=effort)
                 model = create_model(
-                    VLLMModel(
+                    ModelSelection(
                         runtime="vllm",
                         model="nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB",
                         base_url="https://compatible.example.test/v1",
@@ -415,7 +414,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                     reasoning_effort=cast(Literal["none", "medium"], effort), top_k=10
                 )
                 model = create_model(
-                    VLLMModel(
+                    ModelSelection(
                         runtime="vllm",
                         model="nvidia/Qwen3.8-27B-NVFP4",
                         base_url="https://compatible.example.test/v1",
@@ -451,7 +450,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                         strict_parameterless_tools=strict,
                     )
                     model = create_model(
-                        VLLMModel(
+                        ModelSelection(
                             runtime="vllm",
                             model="google/gemma-4-27b-it",
                             base_url="https://compatible.example.test/v1",
@@ -499,7 +498,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_vllm_repetition_stop_retains_cause_without_provider_failure(self) -> None:
         model = create_model(
-            VLLMModel.model_validate(
+            ModelSelection.model_validate(
                 {
                     "runtime": "vllm",
                     "model": "test-model",
@@ -541,16 +540,16 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_profiles_keep_tool_forcing_exceptions(self) -> None:
         for selected in (
-            VLLMModel(
+            ModelSelection(
                 runtime="vllm",
                 model="openai/gpt-oss-120b",
                 base_url="https://vllm.example.test/v1",
                 api_key_env="COMPAT_TEST_API_KEY",
             ),
-            OpenRouterSelection(
+            ModelSelection(
                 runtime="openrouter", model="qwen/qwen-3-coder", provider="selected-provider"
             ),
-            OpenRouterSelection(
+            ModelSelection(
                 runtime="openrouter",
                 model="anthropic/claude-sonnet-4",
                 provider="anthropic",
@@ -586,7 +585,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(model=name):
                 model = create_model(
-                    OpenRouterSelection(
+                    ModelSelection(
                         runtime="openrouter",
                         model=name,
                         provider="selected-provider",
@@ -615,7 +614,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(strict=strict), tempfile.TemporaryDirectory() as directory:
                 settings = AgentSettings(strict_parameterless_tools=strict)
                 model = create_model(
-                    VLLMModel(
+                    ModelSelection(
                         runtime="vllm",
                         model="google/gemma-4-27b-it",
                         base_url="https://compatible.example.test/v1",
@@ -665,7 +664,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
             memory_injection_tokens=100,
         )
         model = create_model(
-            OpenRouterSelection(
+            ModelSelection(
                 runtime="openrouter",
                 model="vendor/test-model",
                 provider="selected-provider",

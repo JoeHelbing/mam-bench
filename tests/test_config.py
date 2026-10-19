@@ -17,6 +17,36 @@ from support import civil, schelling, selection
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_model_yaml_keeps_connections_specific_to_the_selected_service(self) -> None:
+        valid = (
+            {"runtime": "anthropic", "model": "example"},
+            {"runtime": "openrouter", "model": "vendor/model", "provider": "provider"},
+            selection().model_dump(),
+        )
+        for model in valid:
+            config = BenchmarkConfig.model_validate(
+                {"model": model, "cases": [schelling()], "output_directory": "unused"}
+            )
+            dumped = config.model.model_dump()
+            self.assertEqual(dumped, {**model, "settings": config.model.settings.model_dump()})
+            unexpected = {"base_url", "api_key_env", "provider", "repetition_detection"} - set(
+                model
+            )
+            if model["runtime"] == "vllm":
+                unexpected.discard("repetition_detection")
+            for field in unexpected:
+                with (
+                    self.subTest(runtime=model["runtime"], field=field),
+                    self.assertRaises(ValidationError),
+                ):
+                    BenchmarkConfig.model_validate(
+                        {
+                            "model": {**model, field: None},
+                            "cases": [schelling()],
+                            "output_directory": "unused",
+                        }
+                    )
+
     def test_repetition_detection_rejects_invalid_pattern_limits(self) -> None:
         for values in (
             {"min_pattern_size": 0},
@@ -179,10 +209,10 @@ class ConfigurationTests(unittest.TestCase):
                 self.assertEqual(schelling(vacancy_fraction=fraction).vacancy_count, 16)
 
     def test_openrouter_requires_provider_and_has_no_custom_cache_policy(self) -> None:
-        from mam_bench.config import OpenRouterModel
+        from mam_bench.config import ModelSelection
 
         base = {"runtime": "openrouter", "model": "vendor/model", "provider": "provider"}
-        OpenRouterModel.model_validate(base)
+        ModelSelection.model_validate(base)
         for updates in (
             {"provider": ""},
             {"provider": " "},
@@ -191,10 +221,10 @@ class ConfigurationTests(unittest.TestCase):
             {"model": "no-vendor"},
         ):
             with self.subTest(updates=updates), self.assertRaises(ValidationError):
-                OpenRouterModel.model_validate({**base, **updates})
+                ModelSelection.model_validate({**base, **updates})
         with self.assertRaises(ValidationError):
-            OpenRouterModel.model_validate({"runtime": "openrouter", "model": "vendor/model"})
-        selected = OpenRouterModel.model_validate({**base, "settings": {"temperature": 1.0}})
+            ModelSelection.model_validate({"runtime": "openrouter", "model": "vendor/model"})
+        selected = ModelSelection.model_validate({**base, "settings": {"temperature": 1.0}})
         self.assertEqual(selected.settings.model_fields_set, {"temperature"})
 
     def test_agent_budget_and_sampling_settings_validate(self) -> None:

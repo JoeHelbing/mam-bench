@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from pydantic_ai import Agent, ToolOutput
 from pydantic_ai.models.anthropic import AnthropicModel as NativeAnthropicModel
 
-from mam_bench.config import AgentSettings, AnthropicModel, load_benchmark_config
+from mam_bench.config import AgentSettings, ModelSelection, load_benchmark_config
 from mam_bench.model_setup import resolve_model_setup
 from mam_bench.runtime import create_model
 from mam_bench.sessions import AgentSessions, Completed
@@ -82,21 +82,20 @@ class NativeAnthropicTests(unittest.IsolatedAsyncioTestCase):
         config = load_benchmark_config(
             Path("models/anthropic.yaml"), output_directory=Path("results")
         )
-        self.assertIsInstance(config.model, AnthropicModel)
         setup = await resolve_model_setup(config.model)
         self.assertEqual(setup.context_window_tokens, 200000)
         self.assertEqual(setup.selection.settings, config.model.settings)
         self.assertEqual(setup.metadata["source"], "pydantic_ai_model_profile")
         defaults = await resolve_model_setup(
-            AnthropicModel(runtime="anthropic", model=config.model.model)
+            ModelSelection(runtime="anthropic", model=config.model.model)
         )
         self.assertIsNone(defaults.selection.settings.max_completion_tokens)
         self.assertIsNone(defaults.selection.settings.summary_completion_tokens)
         with self.assertRaisesRegex(ValueError, "context metadata"):
-            await resolve_model_setup(AnthropicModel(runtime="anthropic", model="unknown-model"))
+            await resolve_model_setup(ModelSelection(runtime="anthropic", model="unknown-model"))
         with self.assertRaisesRegex(ValueError, "exceeds"):
             await resolve_model_setup(
-                AnthropicModel(
+                ModelSelection(
                     runtime="anthropic",
                     model=config.model.model,
                     settings=AgentSettings(max_completion_tokens=200001),
@@ -118,7 +117,7 @@ class NativeAnthropicTests(unittest.IsolatedAsyncioTestCase):
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
         ) as client:
             with patch("pydantic_ai.providers.anthropic.AsyncAnthropic", return_value=client):
-                selection = AnthropicModel(
+                selection = ModelSelection(
                     runtime="anthropic",
                     model="claude-haiku-4-5",
                     settings=AgentSettings(max_completion_tokens=1024),

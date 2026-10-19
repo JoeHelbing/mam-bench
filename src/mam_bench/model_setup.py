@@ -9,7 +9,7 @@ from urllib.parse import quote
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
-from mam_bench.config import AgentSettings, AnthropicModel, ModelSelection, VLLMModel
+from mam_bench.config import AgentSettings, ModelSelection
 from mam_bench.runtime import OpenRouterSettings, create_model
 
 
@@ -67,7 +67,8 @@ async def _fetch_endpoints(model: str) -> EndpointResponse:
         return EndpointResponse.model_validate(payload)
 
 
-async def _fetch_vllm_model(selection: VLLMModel) -> VLLMModelMetadata:
+async def _fetch_vllm_model(selection: ModelSelection) -> VLLMModelMetadata:
+    assert selection.api_key_env is not None
     async with AsyncOpenAI(
         base_url=selection.base_url,
         api_key=os.environ[selection.api_key_env],
@@ -112,7 +113,7 @@ def _resolve_limits(
 
 async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
     """Discover serving limits and default output caps to a quarter of context."""
-    if isinstance(selection, AnthropicModel):
+    if selection.runtime == "anthropic":
         context = create_model(selection).context_window
         if context is None:
             raise ValueError("Selected Anthropic model has no PydanticAI context metadata")
@@ -134,7 +135,7 @@ async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
             },
         )
 
-    if isinstance(selection, VLLMModel):
+    if selection.runtime == "vllm":
         model = await _fetch_vllm_model(selection)
         if model.max_model_len is None:
             raise ValueError("Selected vLLM model does not report its serving context limit")
@@ -152,11 +153,13 @@ async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
             },
         )
 
+    requested_provider = selection.provider
+    assert requested_provider is not None
     response = await _fetch_endpoints(selection.model)
     endpoints = [
         endpoint
         for endpoint in response.data.endpoints
-        if _matches_provider(endpoint, selection.provider) and endpoint.status == 0
+        if _matches_provider(endpoint, requested_provider) and endpoint.status == 0
     ]
     if not endpoints:
         raise ValueError(f"No active endpoints for selected provider {selection.provider!r}")
@@ -219,7 +222,7 @@ async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
         raise ValueError("Explicit tool_choice is unsupported by selected endpoints")
     effective = selection.with_setup(completion_parameter, required_support)
     # Provider routing takes slugs; metadata may also match a display name.
-    if selection.provider.casefold() == endpoints[0].provider_name.casefold():
+    if requested_provider.casefold() == endpoints[0].provider_name.casefold():
         matching_tags = {endpoint.tag.split("/", 1)[0] for endpoint in endpoints}
         if len(matching_tags) != 1:
             raise ValueError("Provider display name matches multiple slugs; choose a provider tag")

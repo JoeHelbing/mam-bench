@@ -9,8 +9,8 @@ from urllib.parse import quote
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
-from mam_bench.config import AgentSettings, ModelSelection, VLLMModel
-from mam_bench.runtime import OpenRouterSettings
+from mam_bench.config import AgentSettings, AnthropicModel, ModelSelection, VLLMModel
+from mam_bench.runtime import OpenRouterSettings, create_model
 
 
 class EndpointMetadata(BaseModel):
@@ -112,6 +112,28 @@ def _resolve_limits(
 
 async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
     """Discover serving limits and default output caps to a quarter of context."""
+    if isinstance(selection, AnthropicModel):
+        context = create_model(selection).context_window
+        if context is None:
+            raise ValueError("Selected Anthropic model has no PydanticAI context metadata")
+        selection.settings.compaction_tail(context)
+        for cap in (
+            selection.settings.max_completion_tokens,
+            selection.settings.summary_completion_tokens,
+        ):
+            if cap is not None and cap > context:
+                raise ValueError("Completion token limit exceeds the selected model context")
+        return ResolvedModelSetup(
+            selection,
+            context,
+            {
+                "source": "pydantic_ai_model_profile",
+                "model": selection.model,
+                "context_window_tokens": context,
+                "output_limit_policy": "Omitted caps use native provider defaults",
+            },
+        )
+
     if isinstance(selection, VLLMModel):
         model = await _fetch_vllm_model(selection)
         if model.max_model_len is None:

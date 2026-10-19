@@ -105,8 +105,18 @@ class VLLMModel(BaseModel):
     repetition_detection: RepetitionDetection | None = None
 
 
+class AnthropicModel(BaseModel):
+    """One model through PydanticAI's native Anthropic Messages adapter."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    runtime: Literal["anthropic"]
+    model: str = Field(min_length=1)
+    settings: AgentSettings = AgentSettings()
+
+
 ModelSelection = Annotated[
-    OpenRouterModel | VLLMModel,
+    OpenRouterModel | VLLMModel | AnthropicModel,
     Field(discriminator="runtime"),
 ]
 

@@ -15,19 +15,22 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, BenchmarkConfig, CaseSettings, ModelSelection
-from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunFailure, BenchmarkRunner
-from support import civil, observation, records, schelling, selection, stay, streaming_model
+from support import (
+    civil,
+    observation,
+    records,
+    schelling,
+    selection,
+    served_model,
+    stay,
+    streaming_model,
+)
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        discovery = patch(
-            "mam_bench.model_setup._fetch_vllm_model",
-            AsyncMock(return_value=VLLMModelMetadata(id="scripted", max_model_len=260_000)),
-        )
-        discovery.start()
-        self.addCleanup(discovery.stop)
+        self.enterContext(served_model())
 
     async def test_complete_suite_order_fresh_case_state_and_saved_total(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

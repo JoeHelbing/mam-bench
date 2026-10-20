@@ -62,7 +62,7 @@ class ModelSelection(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    runtime: Literal["openrouter", "vllm", "anthropic"]
+    runtime: Literal["openrouter", "vllm", "openai", "anthropic"]
     model: str = Field(min_length=1)
     settings: AgentSettings = AgentSettings()
     provider: str | None = Field(

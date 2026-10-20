@@ -113,10 +113,11 @@ def _resolve_limits(
 
 async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
     """Discover serving limits and default output caps to a quarter of context."""
-    if selection.runtime == "anthropic":
+    if selection.runtime in ("openai", "anthropic"):
         context = create_model(selection).context_window
         if context is None:
-            raise ValueError("Selected Anthropic model has no PydanticAI context metadata")
+            service = "OpenAI" if selection.runtime == "openai" else "Anthropic"
+            raise ValueError(f"Selected {service} model has no PydanticAI context metadata")
         selection.settings.compaction_tail(context)
         for cap in (
             selection.settings.max_completion_tokens,

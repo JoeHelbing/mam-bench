@@ -64,7 +64,8 @@ mechanics.
 ## Quickstart
 
 You need [uv](https://docs.astral.sh/uv/), Python 3.14, and access to a model
-service that supports tool calls. For direct Anthropic API access, follow the
+service that supports tool calls. For direct API access, follow the
+[OpenAI benchmark guide](docs/native-openai.md) or
 [Anthropic benchmark guide](docs/native-anthropic.md). The quickstart below uses
 vLLM; an OpenRouter example follows it. Bring your own model and endpoint.
 
@@ -197,6 +198,7 @@ dependencies.
 ## Reference
 
 - [Anthropic benchmark guide](docs/native-anthropic.md) - configure a model and run the full suite.
+- [OpenAI benchmark guide](docs/native-openai.md) - configure a model and run the full suite.
 - [Rules and scoring](docs/rules-and-scoring.md) - world mechanics, goals, formulas,
   and comparability limits.
 - [Artifacts and failures](docs/artifacts-and-failures.md) - trajectories,

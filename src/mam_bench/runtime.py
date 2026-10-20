@@ -8,12 +8,14 @@ from openai import AsyncOpenAI
 from pydantic import Field, SecretStr
 from pydantic_ai.models import Model
 from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
+from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
 from pydantic_ai.models.openrouter import (
     OpenRouterModel,
     OpenRouterModelSettings,
 )
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.anthropic import AnthropicProvider
+from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.providers.vllm import VLLMProvider
 from pydantic_ai.settings import ModelSettings
@@ -84,6 +86,21 @@ def create_model(selection: ModelSelection) -> Model:
                 anthropic_cache=True,
                 anthropic_cache_instructions=True,
                 anthropic_cache_tool_definitions=True,
+            ),
+        )
+
+    if selection.runtime == "openai":
+        if agent_settings.top_k is not None:
+            raise ValueError("OpenAI does not support settings.top_k")
+        profile["json_schema_transformer"] = OpenAIFixedArrayTransformer
+        return OpenAIResponsesModel(
+            selection.model,
+            provider=OpenAIProvider(),
+            profile=profile,
+            settings=OpenAIResponsesModelSettings(
+                **request_settings,
+                openai_store=False,
+                openai_prompt_cache_key=f"mam-bench:{selection.model}",
             ),
         )
 

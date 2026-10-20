@@ -79,9 +79,10 @@ def streamed_answer() -> str:
 @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "offline-test-key"})
 class NativeAnthropicTests(unittest.IsolatedAsyncioTestCase):
     async def test_yaml_setup_uses_native_context_and_preserves_defaults(self) -> None:
-        config = load_benchmark_config(
-            Path("models/anthropic.yaml"), output_directory=Path("results")
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            model_path = Path(directory) / "model.yaml"
+            model_path.write_text("runtime: anthropic\nmodel: claude-haiku-4-5\n", encoding="utf-8")
+            config = load_benchmark_config(model_path, output_directory=Path("results"))
         setup = await resolve_model_setup(config.model)
         self.assertEqual(setup.context_window_tokens, 200000)
         self.assertEqual(setup.selection.settings, config.model.settings)

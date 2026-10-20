@@ -5,15 +5,15 @@ six-case benchmark suite.
 
 ## Configure the model
 
-Put `ANTHROPIC_API_KEY` in your Git-ignored `.env` file. Select the model in
-`models/anthropic.yaml`:
+Put `ANTHROPIC_API_KEY` in your Git-ignored `.env` file. Create your own model YAML
+file with the model you want to evaluate:
 
 ```yaml
 runtime: anthropic
 model: claude-haiku-4-5
 ```
 
-Replace `model` with the exact model ID you want to evaluate. The example uses
+Replace `model` with the exact model ID you want to evaluate. This configuration uses
 provider defaults for generation and the standard benchmark session settings.
 
 ## Run the full suite
@@ -23,10 +23,11 @@ Run these Bash commands from the repository checkout:
 ```bash
 uv sync --frozen
 uv run --no-sync --env-file .env python main.py \
-  --model models/anthropic.yaml --output results/anthropic
+  --model path/to/your-model.yaml --output results/anthropic
 ```
 
-This runs all six shipped cases with real API calls: Schelling integration and
+Replace `path/to/your-model.yaml` with the file you created. This runs all six
+shipped cases with real API calls: Schelling integration and
 segregation, plus increasing and decreasing Civil Violence participation under
 citizen and police control. A completed run prints the Combined Benchmark Score.
 

@@ -19,6 +19,7 @@ from support import civil, schelling, selection
 class ConfigurationTests(unittest.TestCase):
     def test_model_yaml_keeps_connections_specific_to_the_selected_service(self) -> None:
         valid = (
+            {"runtime": "anthropic", "model": "example"},
             {"runtime": "openai", "model": "example"},
             {"runtime": "openrouter", "model": "vendor/model", "provider": "provider"},
             selection().model_dump(),

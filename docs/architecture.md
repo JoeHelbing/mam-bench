@@ -5,11 +5,11 @@ and suite, then [config.py](../src/mam_bench/config.py) validates the complete n
 configuration with one model-YAML record, rather than separate provider-selection
 classes. [model_setup.py](../src/mam_bench/model_setup.py) discovers serving
 constraints from vLLM or OpenRouter, or context from PydanticAI's native model
-profile for OpenAI, before any case. It validates YAML overrides against known
-constraints. For vLLM and OpenRouter, action and summary output caps default to
-one quarter of served context, bounded by reported output limits. The direct
-OpenAI adapter leaves omitted output caps unset. Omitted sampling and reasoning
-settings use endpoint defaults. The runner records the input
+profiles for OpenAI and Anthropic, before any case. It validates YAML overrides
+against known constraints. For vLLM and OpenRouter, action and summary output caps
+default to one quarter of served context, bounded by reported output limits. The
+direct OpenAI and Anthropic adapters leave omitted output caps unset. Omitted
+sampling and reasoning settings use endpoint defaults. The runner records the input
 config and effective setup, then creates one provider, one fresh `CaseRuntime`
 and writer per case with discovered context passed separately from YAML settings,
 constructs the selected simulation, and awaits

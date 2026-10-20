@@ -11,7 +11,7 @@ dependencies = [
     "opentelemetry-sdk>=1.44.0",
     "pydantic>=2.13.5",
     "pydantic-ai-harness>=0.29,<0.30",
-    "pydantic-ai-slim[openai]>=2.38.0",
+    "pydantic-ai-slim[anthropic,openai]>=2.38.0",
     "pydantic-settings>=2.15.0",
     "pyyaml>=6.0.3",
 ]

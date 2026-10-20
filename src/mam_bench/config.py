@@ -27,7 +27,7 @@ class AgentSettings(BaseModel):
     compaction_trigger_fraction: float = Field(default=0.7, gt=0, lt=1)
     compaction_tail_tokens: int | None = Field(default=None, ge=0)
     summary_completion_tokens: int | None = Field(default=None, gt=0)
-    memory_injection_tokens: int = Field(default=4_000, gt=0)
+    sandbox_timeout_seconds: int = Field(default=43_200, ge=10, le=86_400, strict=True)
 
     def compaction_tail(self, context_window_tokens: int) -> int:
         """Resolve the retained history against the actual serving context."""
@@ -100,7 +100,6 @@ class VLLMModel(BaseModel):
     runtime: Literal["vllm"]
     model: str
     base_url: str
-    api_key_env: str
     settings: AgentSettings = AgentSettings()
     repetition_detection: RepetitionDetection | None = None
 

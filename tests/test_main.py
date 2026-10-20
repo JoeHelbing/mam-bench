@@ -4,7 +4,6 @@ import contextlib
 import io
 import os
 import tempfile
-import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -17,11 +16,12 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from mam_bench.config import BenchmarkConfig
 from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunner
-from support import civil, schelling, selection, stay, streaming_model
+from support import SandboxTestCase, civil, schelling, selection, stay, streaming_model
 
 
-class MainTests(unittest.TestCase):
+class MainTests(SandboxTestCase):
     def setUp(self) -> None:
+        super().setUp()
         # Local credentials must never enable remote export in offline CLI tests.
         environment = patch.dict(os.environ, {"LOGFIRE_TOKEN": ""})
         environment.start()
@@ -82,6 +82,11 @@ class MainTests(unittest.TestCase):
             run = next((Path(directory) / "results").iterdir())
             for signal in ("traces", "logs", "metrics"):
                 self.assertTrue((run / "telemetry" / f"{signal}.jsonl").read_text())
+            for case in (run / "cases").iterdir():
+                self.assertFalse(
+                    {"agent-messages", "agent-streams", "provider-streams", "message-board.jsonl"}
+                    & {path.name for path in case.iterdir()}
+                )
 
     def test_failed_case_keeps_error_details_and_never_prints_total(self) -> None:
         async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:

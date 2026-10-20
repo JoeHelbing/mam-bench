@@ -9,17 +9,11 @@ corrections are documented in docs/vllm-serving-workarounds.md for operators
 to apply in their own vLLM environment.
 """
 
-from collections.abc import AsyncGenerator, AsyncIterator
-from contextlib import asynccontextmanager
-from contextvars import ContextVar
-from datetime import UTC, datetime
 from typing import Literal, cast
 
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
-from pydantic_ai import RunContext
 from pydantic_ai._json_schema import JsonSchema
-from pydantic_ai.messages import FinishReason, ModelMessage, ModelResponse
-from pydantic_ai.models import ModelRequestParameters, StreamedResponse
+from pydantic_ai.messages import FinishReason, ModelResponse
 from pydantic_ai.models.openai import (
     OpenAIChatModel,
     OpenAIChatModelSettings,
@@ -28,9 +22,24 @@ from pydantic_ai.models.openai import (
 from pydantic_ai.profiles.openai import OpenAIJsonSchemaTransformer
 from pydantic_ai.settings import ModelSettings
 
-from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import VLLMModel
-from mam_bench.diagnostics import ExecutionFailure
+
+
+def modal_filesystem_error_workaround() -> None:
+    """Avoid masking Modal failures with an absent SDK exception name.
+
+    Harness 0.55 references FilesystemExecutionError, absent from stable Modal
+    1.6.1 and 1.6.2. The live sandbox startup probe and the session startup-error
+    test reproduce the resulting AttributeError. The nonexistent subclass cannot
+    occur with these SDKs; aliasing its parent preserves their error mapping.
+    Remove when Harness stops requiring the name or Modal supplies it.
+    """
+    from modal import exception
+
+    if not hasattr(exception, "FilesystemExecutionError"):
+        exception.FilesystemExecutionError = (  # pyright: ignore[reportAttributeAccessIssue]
+            exception.ExecutionError
+        )
 
 
 class OpenAIFixedArrayTransformer(OpenAIJsonSchemaTransformer):
@@ -60,36 +69,7 @@ class OpenAIFixedArrayTransformer(OpenAIJsonSchemaTransformer):
         return super().transform(schema)
 
 
-# Task-local: concurrent sessions share a model, but never a capture directory.
-vllm_stream_writer: ContextVar[ArtifactWriter | None] = ContextVar(
-    "vllm_stream_writer", default=None
-)
-
-
 class _VLLMStreamedResponse(OpenAIStreamedResponse):
-    capture_writer: ArtifactWriter | None = None
-    capture_context: RunContext[object] | None = None
-
-    async def _validate_response(self) -> AsyncIterator[ChatCompletionChunk]:
-        async for chunk in super()._validate_response():
-            if self.capture_writer is not None and self.capture_context is not None:
-                ctx = self.capture_context
-                try:
-                    self.capture_writer.append(
-                        f"{ctx.run_id}.jsonl",
-                        {
-                            "timestamp": datetime.now(UTC).isoformat(),
-                            "conversation_id": ctx.conversation_id,
-                            "run_step": ctx.run_step,
-                            "chunk": chunk.model_dump(mode="json", exclude_unset=True),
-                        },
-                    )
-                except OSError as error:
-                    raise ExecutionFailure(
-                        "artifact_write", "provider stream write failed"
-                    ) from error
-            yield chunk
-
     def _map_finish_reason(
         self, key: Literal["stop", "length", "tool_calls", "content_filter", "function_call"]
     ) -> FinishReason | None:
@@ -110,41 +90,11 @@ class VLLMChatModel(OpenAIChatModel):
     provider_details. Keep strict validation for every other finish reason.
     Evidence: docs/research-issue-log.md, R12; original fix 1716471.
     Remove when the native adapter accepts and preserves vLLM repetition stops.
-
-    Archived runs also retain SDK chunks before native event mapping, including
-    token IDs emitted while the server parser buffers text. Remove this capture
-    hook when native events preserve those provider fields themselves.
     """
 
     @property
     def _streamed_response_cls(self) -> type[OpenAIStreamedResponse]:
         return _VLLMStreamedResponse
-
-    @asynccontextmanager
-    async def request_stream(
-        self,
-        messages: list[ModelMessage],
-        model_settings: ModelSettings | None,
-        model_request_parameters: ModelRequestParameters,
-        run_context: RunContext[object] | None = None,
-    ) -> AsyncGenerator[StreamedResponse]:
-        writer = vllm_stream_writer.get()
-        if writer is not None:
-            # Merge model defaults as well as per-call settings (e.g. summary caps).
-            settings = {**(self.settings or {}), **(model_settings or {})}
-            settings["extra_body"] = {
-                **cast(dict[str, object], settings.get("extra_body") or {}),
-                "return_token_ids": True,
-                "include_reasoning": True,
-            }
-            model_settings = cast(ModelSettings, settings)
-        async with super().request_stream(
-            messages, model_settings, model_request_parameters, run_context
-        ) as response:
-            captured = cast(_VLLMStreamedResponse, response)
-            captured.capture_writer = writer
-            captured.capture_context = run_context
-            yield response
 
     def _process_response(self, response: ChatCompletion | str) -> ModelResponse:
         repetition = isinstance(response, ChatCompletion) and any(

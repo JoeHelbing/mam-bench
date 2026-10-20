@@ -1,6 +1,5 @@
 """Discover serving constraints before running cases; YAML owns request choices."""
 
-import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
@@ -10,7 +9,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
 from mam_bench.config import AgentSettings, ModelSelection, VLLMModel
-from mam_bench.runtime import OpenRouterSettings
+from mam_bench.runtime import OpenRouterSettings, VLLMSettings
 
 
 class EndpointMetadata(BaseModel):
@@ -70,7 +69,7 @@ async def _fetch_endpoints(model: str) -> EndpointResponse:
 async def _fetch_vllm_model(selection: VLLMModel) -> VLLMModelMetadata:
     async with AsyncOpenAI(
         base_url=selection.base_url,
-        api_key=os.environ[selection.api_key_env],
+        api_key=VLLMSettings().api_key.get_secret_value(),
         max_retries=0,
         timeout=30,
     ) as client:

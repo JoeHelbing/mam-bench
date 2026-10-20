@@ -1,8 +1,8 @@
+import gzip
 import json
 import os
 import tempfile
-import unittest
-from contextlib import ExitStack, chdir
+from contextlib import ExitStack, chdir, nullcontext
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Thread
@@ -10,26 +10,27 @@ from unittest.mock import AsyncMock, patch
 
 import httpx2 as httpx
 from openai import AsyncOpenAI
-from pydantic_ai import Agent, ModelMessagesTypeAdapter
+from pydantic_ai import Agent
+from pydantic_ai.capabilities import ProcessEventStream
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ThinkingPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.usage import RequestUsage
-from pydantic_ai_harness.step_persistence import FileStepStore
 
 from mam_bench.config import AgentSettings, BenchmarkConfig
 from mam_bench.diagnostics import ExecutionFailure
 from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunner
-from mam_bench.sessions import AgentSessions, Completed, Stopped
+from mam_bench.sessions import AgentSessions, Completed, Stopped, stream_responses
 from mam_bench.telemetry import collect_telemetry
-from support import civil, schelling, selection, stay, streaming_model
+from support import SandboxTestCase, civil, schelling, selection, stay, streaming_model
 
 
-class TelemetryTests(unittest.IsolatedAsyncioTestCase):
+class TelemetryTests(SandboxTestCase):
     def setUp(self) -> None:
+        super().setUp()
         discovery = patch(
             "mam_bench.model_setup._fetch_vllm_model",
             AsyncMock(return_value=VLLMModelMetadata(id="scripted", max_model_len=260_000)),
@@ -61,20 +62,16 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
             root = Path(directory)
             with self.assertLogs("mam_bench", level="DEBUG"), collect_telemetry(root):
                 sessions = AgentSessions(
-                    Agent(streaming_model(FunctionModel(respond))),
+                    Agent(
+                        streaming_model(FunctionModel(respond)),
+                        capabilities=[ProcessEventStream(stream_responses)],
+                    ),
                     context_window_tokens=260_000,
-                    artifact_directory=root,
                 )
                 outcome = await sessions.run("agent-a", "PRIVATE PROMPT", deps=None)
             self.assertEqual(outcome, Completed("PRIVATE ANSWER"))
             self.assertEqual(sessions.usage.requests, 2)
-            store = FileStepStore(root / "agent-messages", media_store=None)
-            runs = await store.list_runs(conversation_id="agent-a")
-            snapshots = await store.list_snapshots(run_id=runs[0].run_id)
-            history = ModelMessagesTypeAdapter.dump_json(snapshots[-1].messages)
             contents = ("PRIVATE PROMPT", "PRIVATE POST", "PRIVATE REASONING", "PRIVATE ANSWER")
-            for content in contents:
-                self.assertIn(content.encode(), history)
             exported = {
                 name: [
                     json.loads(line)
@@ -93,7 +90,7 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(requests), 2)
             self.assertEqual(
                 {span["attributes"]["gen_ai.agent.call.id"] for span in requests},
-                {message.run_id for message in snapshots[-1].messages},
+                {message.run_id for message in sessions.history("agent-a")},
             )
             self.assertEqual(
                 sum(span["attributes"]["gen_ai.usage.input_tokens"] for span in requests),
@@ -104,6 +101,7 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(record["trace_id"] for record in exported["logs"]))
             for records in exported.values():
                 self.assertIn('"mam_bench.campaign": "synthetic-campaign"', json.dumps(records))
+            self.assertEqual(sorted(path.name for path in root.iterdir()), ["telemetry"])
 
     async def test_nested_compaction_requests_are_collected_once(self) -> None:
         async def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -122,7 +120,6 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                         compaction_trigger_fraction=0.5,
                         compaction_tail_tokens=20,
                         summary_completion_tokens=16,
-                        memory_injection_tokens=100,
                     ),
                 )
                 await sessions.run("agent", "A" * 600, deps=None)
@@ -159,17 +156,10 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
             sessions = AgentSessions(
                 Agent(streaming_model(FunctionModel(respond))),
                 context_window_tokens=260_000,
-                artifact_directory=root,
             )
             with collect_telemetry(root), self.assertRaises(ExecutionFailure) as failure:
                 await sessions.run("agent-a", "retained prompt", deps=None)
             self.assertEqual(failure.exception.kind, "provider")
-            store = FileStepStore(root / "agent-messages", media_store=None)
-            runs = await store.list_runs(conversation_id="agent-a")
-            snapshots = await store.list_snapshots(run_id=runs[0].run_id)
-            history = ModelMessagesTypeAdapter.dump_json(snapshots[-1].messages)
-            self.assertIn(b"retained post", history)
-            self.assertIn(b"retained prompt", history)
             for name in ("traces", "logs"):
                 saved = (root / "telemetry" / f"{name}.jsonl").read_text()
                 self.assertIn("PRIVATE_PROVIDER_SENTINEL", saved)
@@ -179,6 +169,8 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                 for line in (root / "telemetry/traces.jsonl").read_text().splitlines()
             ]
             self.assertTrue(any(span["status"]["status_code"] == "ERROR" for span in spans))
+            self.assertIn("retained post", json.dumps(spans))
+            self.assertIn("retained prompt", json.dumps(spans))
 
     async def test_streamed_provider_error_keeps_message_body_and_traceback(self) -> None:
         def respond(request: httpx.Request) -> httpx.Response:
@@ -199,7 +191,8 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                     "openai/gpt-6-luna", provider=OpenRouterProvider(openai_client=client)
                 )
                 sessions = AgentSessions(
-                    Agent(model), context_window_tokens=260_000, artifact_directory=root
+                    Agent(model, capabilities=[ProcessEventStream(stream_responses)]),
+                    context_window_tokens=260_000,
                 )
                 with collect_telemetry(root):
                     self.assertEqual(
@@ -215,11 +208,6 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Provider returned error", traces)
                 self.assertIn("openai.APIError", traces)
                 self.assertIn("Traceback", traces)
-                store = FileStepStore(root / "agent-messages", media_store=None)
-                (run,) = await store.list_runs(conversation_id="stream-error")
-                events = await store.list_events(run_id=run.run_id)
-                failed = next(event for event in events if event.kind == "run_failed")
-                self.assertIn("Provider returned error", failed.error or "")
 
     async def test_collection_preserves_paired_benchmark_results_and_trajectories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -254,63 +242,96 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
                     )
 
     async def test_dotenv_export_and_environment_override_preserve_local_signals(self) -> None:
-        received: list[str] = []
+        received: list[tuple[str, bytes, str | None]] = []
+        status = 200
 
-        class Reject(BaseHTTPRequestHandler):
+        class Receiver(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
-                self.rfile.read(int(self.headers["Content-Length"]))
-                received.append(self.path)
-                self.send_response(400)
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                if self.headers.get("Content-Encoding") == "gzip":
+                    body = gzip.decompress(body)
+                received.append((self.path, body, self.headers.get("Authorization")))
+                self.send_response(status)
                 self.end_headers()
 
             def log_message(self, format: str, *args: object) -> None:
                 pass
 
-        with HTTPServer(("127.0.0.1", 0), Reject) as server:
+        with HTTPServer(("127.0.0.1", 0), Receiver) as server:
             worker = Thread(target=server.serve_forever, daemon=True)
             worker.start()
             try:
-                with (
-                    tempfile.TemporaryDirectory() as directory,
-                    patch.dict(
-                        os.environ,
-                        {
-                            "LOGFIRE_BASE_URL": f"http://127.0.0.1:{server.server_port}",
-                        },
-                        clear=True,
-                    ),
-                ):
-                    root = Path(directory)
-                    (root / ".env").write_text(
-                        "LOGFIRE_TOKEN=synthetic-dotenv-token\n"
-                        "LOGFIRE_BASE_URL=http://127.0.0.1:1\n"
-                    )
-
-                    async def respond(
-                        messages: list[ModelMessage], info: AgentInfo
-                    ) -> ModelResponse:
-                        return ModelResponse(
-                            parts=[TextPart("done")],
-                            usage=RequestUsage(input_tokens=10, output_tokens=2),
-                        )
-
+                for status in (200, 400):
+                    received.clear()
                     with (
-                        self.assertLogs("opentelemetry", level="ERROR"),
-                        self.assertLogs("mam_bench", level="DEBUG"),
-                        chdir(root),
-                        collect_telemetry(root, send_to_logfire=True),
+                        tempfile.TemporaryDirectory() as directory,
+                        patch.dict(
+                            os.environ,
+                            {
+                                "LOGFIRE_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+                                "MODAL_TOKEN_ID": "offline-id",
+                                "MODAL_TOKEN_SECRET": "offline-secret",
+                            },
+                            clear=True,
+                        ),
                     ):
-                        sessions = AgentSessions(
-                            Agent(streaming_model(FunctionModel(respond))),
-                            context_window_tokens=260_000,
-                            artifact_directory=root,
+                        root = Path(directory)
+                        calls = 0
+                        (root / ".env").write_text(
+                            "LOGFIRE_TOKEN=synthetic-dotenv-token\n"
+                            "LOGFIRE_BASE_URL=http://127.0.0.1:1\n"
                         )
-                        outcome = await sessions.run("agent", "synthetic input", deps=None)
-                    self.assertEqual(outcome, Completed("done"))
-                    self.assertEqual(set(received), {"/v1/traces", "/v1/logs", "/v1/metrics"})
-                    for signal in ("traces", "logs", "metrics"):
-                        self.assertTrue((root / "telemetry" / f"{signal}.jsonl").read_text())
-                    self.assertTrue(sessions.history("agent"))
+
+                        async def respond(
+                            messages: list[ModelMessage], info: AgentInfo
+                        ) -> ModelResponse:
+                            nonlocal calls
+                            calls += 1
+                            return ModelResponse(
+                                parts=[ToolCallPart("post_message", {"text": "synthetic post"})]
+                                if calls == 1
+                                else [ThinkingPart("synthetic reasoning"), TextPart("done")],
+                                usage=RequestUsage(input_tokens=10, output_tokens=2),
+                            )
+
+                        with (
+                            (
+                                self.assertLogs("opentelemetry", level="ERROR")
+                                if status == 400
+                                else nullcontext()
+                            ),
+                            self.assertLogs("mam_bench", level="DEBUG"),
+                            chdir(root),
+                            collect_telemetry(root, send_to_logfire=True),
+                        ):
+                            sessions = AgentSessions(
+                                Agent(streaming_model(FunctionModel(respond))),
+                                context_window_tokens=260_000,
+                            )
+                            outcome = await sessions.run("agent", "synthetic input", deps=None)
+                        self.assertEqual(outcome, Completed("done"))
+                        self.assertEqual(
+                            {path for path, _, _ in received},
+                            {"/v1/traces", "/v1/logs", "/v1/metrics"},
+                        )
+                        for signal in ("traces", "logs", "metrics"):
+                            self.assertTrue((root / "telemetry" / f"{signal}.jsonl").read_text())
+                        self.assertTrue(sessions.history("agent"))
+                        traces = b"".join(
+                            body for path, body, _ in received if path == "/v1/traces"
+                        )
+                        local = (root / "telemetry/traces.jsonl").read_text()
+                        for content in (
+                            "synthetic input",
+                            "synthetic post",
+                            "synthetic reasoning",
+                            "done",
+                        ):
+                            self.assertIn(content.encode(), traces)
+                            self.assertIn(content, local)
+                        self.assertTrue(
+                            all(token == "synthetic-dotenv-token" for _, _, token in received)
+                        )
             finally:
                 server.shutdown()
                 worker.join()

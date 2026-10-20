@@ -1,19 +1,9 @@
-"""Native agent archives with classified persistence failures."""
+"""Simulation-owned records and atomic result files."""
 
 import json
-from collections.abc import Awaitable
 from pathlib import Path
 
 from pydantic import BaseModel
-from pydantic_ai_harness.step_persistence import (
-    ContinuableSnapshot,
-    FileStepStore,
-    RunRecord,
-    StepEvent,
-    ToolEffectRecord,
-)
-
-from mam_bench.diagnostics import ExecutionFailure
 
 
 class ArtifactWriter:
@@ -37,25 +27,3 @@ class ArtifactWriter:
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(text + "\n", encoding="utf-8")
         temporary.replace(path)
-
-
-class AgentMessageArchive(FileStepStore):
-    """Keep native snapshots, events and tool effects intact."""
-
-    async def _persist(self, operation: Awaitable[None]) -> None:
-        try:
-            await operation
-        except OSError as error:
-            raise ExecutionFailure("artifact_write", "agent archive write failed") from error
-
-    async def register_run(self, record: RunRecord) -> None:
-        await self._persist(super().register_run(record))
-
-    async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
-        await self._persist(super().save_snapshot(snapshot))
-
-    async def append_event(self, event: StepEvent) -> None:
-        await self._persist(super().append_event(event))
-
-    async def record_tool_effect(self, record: ToolEffectRecord) -> None:
-        await self._persist(super().record_tool_effect(record))

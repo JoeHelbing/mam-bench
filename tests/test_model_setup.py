@@ -251,7 +251,7 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
             )
 
         selected = selection()
-        with patch.dict(os.environ, {selected.api_key_env: "offline-test-key"}):
+        with patch.dict(os.environ, {"VLLM_API_KEY": "offline-test-key"}):
             for name in ("scripted", "not-served"):
                 async with AsyncOpenAI(
                     api_key="offline-test-key",

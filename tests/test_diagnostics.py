@@ -1,6 +1,5 @@
 import asyncio
 import os
-import unittest
 from unittest.mock import patch
 
 import httpx2 as httpx
@@ -12,9 +11,10 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from mam_bench.config import AgentSettings
 from mam_bench.diagnostics import ExecutionFailure, configure_logging
 from mam_bench.sessions import AgentSessions, Completed, Stopped
+from support import SandboxTestCase
 
 
-class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+class DiagnosticsTests(SandboxTestCase):
     def test_environment_log_level_overrides_config(self) -> None:
         with patch("mam_bench.diagnostics.logging.getLogger") as get_logger:
             with patch.dict(os.environ, {}, clear=True):

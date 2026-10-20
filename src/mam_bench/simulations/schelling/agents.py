@@ -8,8 +8,9 @@ from numpy.typing import NDArray
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from pydantic_ai import Agent as ModelInterface
 from pydantic_ai import ModelRetry, RunContext, ToolOutput
+from pydantic_ai.capabilities import ProcessEventStream
 
-from mam_bench.sessions import Stopped
+from mam_bench.sessions import Stopped, stream_responses
 
 if TYPE_CHECKING:
     from mam_bench.runtime import CaseRuntime
@@ -171,14 +172,9 @@ Distance is the larger of the wrapped row and column distances. Predictions
 count only destination neighbors visible from the current location and exclude
 the agent's origin. No known occupied neighbors predicts a share of one.
 
-Tools
-Use read_messages, post_message and private notebook tools to coordinate.
-Posts are unverified; simulation announcements are marked separately.
-Respond with tool calls, not plain text. Finish messaging and memory first.
+Actions
 End your turn with move(destination=[row, column]), or pass destination=null
-to stay. An accepted move ends the turn and skips other calls in that response.
-Each turn allows up to 25 model requests. Three failed tool or transient API calls
-end the turn; successful calls do not reset this failure count. Exhaustion means stay.
+to stay. Exhaustion means stay.
 """.strip()
 
     @staticmethod
@@ -190,6 +186,7 @@ end the turn; successful calls do not reset this failure count. Exhaustion means
             instructions=ModelControlledAgent.INSTRUCTIONS,
             retries=5,
             end_strategy="early",
+            capabilities=[ProcessEventStream(stream_responses)],
         )
         interface.instructions(_identity)
         return interface
@@ -258,10 +255,12 @@ end the turn; successful calls do not reset this failure count. Exhaustion means
         # cannot shift another agent's draws, even after the paired states diverge.
         sessions, runtime = simulation.sessions, simulation.runtime
         assert sessions is not None and runtime is not None
+        view = self.observation()
         turn = await sessions.run(
             str(self.agent_id),
-            json.dumps(self.observation()),
+            json.dumps(view),
             deps=self,
+            observation=view,
         )
         if isinstance(turn, Stopped):
             runtime.writer.append(

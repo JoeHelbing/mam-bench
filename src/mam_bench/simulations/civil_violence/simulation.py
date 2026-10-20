@@ -79,7 +79,6 @@ class CivilViolenceSim:
                 model_agent.model_interface(runtime),
                 settings=runtime.settings,
                 context_window_tokens=runtime.context_window_tokens,
-                artifact_directory=runtime.writer.directory,
             )
             if runtime
             else None
@@ -336,23 +335,25 @@ class CivilViolenceSim:
         if self.steps or self.termination is not None or self.runtime is not None:
             raise RuntimeError("evaluation requires a fresh ordinary world")
         controlled = CivilViolenceSim(self.settings, runtime=runtime)
-        runtime.writer.write(
-            "config.json",
-            {
-                "settings": self.settings.model_dump(mode="json"),
-                "controlled_agent_ids": self.replacement_ids,
-                "scored_agent_ids": self.scored_agent_ids,
-            },
-        )
-        reference_outcome = await self.run(runtime.writer, "ordinary")
+        assert controlled.sessions is not None
+        async with controlled.sessions:
+            runtime.writer.write(
+                "config.json",
+                {
+                    "settings": self.settings.model_dump(mode="json"),
+                    "controlled_agent_ids": self.replacement_ids,
+                    "scored_agent_ids": self.scored_agent_ids,
+                },
+            )
+            reference_outcome = await self.run(runtime.writer, "ordinary")
 
-        controlled_outcome = await controlled.run(runtime.writer, "controlled")
-        result = EvaluationResult(
-            config=self.settings,
-            controlled_agent_ids=self.replacement_ids,
-            scored_agent_ids=self.scored_agent_ids,
-            reference=reference_outcome,
-            controlled=controlled_outcome,
-        )
-        runtime.writer.write("result.json", result)
-        return result
+            controlled_outcome = await controlled.run(runtime.writer, "controlled")
+            result = EvaluationResult(
+                config=self.settings,
+                controlled_agent_ids=self.replacement_ids,
+                scored_agent_ids=self.scored_agent_ids,
+                reference=reference_outcome,
+                controlled=controlled_outcome,
+            )
+            runtime.writer.write("result.json", result)
+            return result

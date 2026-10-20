@@ -1,9 +1,13 @@
 """Explicit development fixtures and scripted provider responses; no suite calibration."""
 
 import json
+import os
+import tempfile
+import unittest
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 from pydantic_ai.messages import (
     ModelMessage,
@@ -23,12 +27,59 @@ from pydantic_ai.models.function import (
     DeltaToolCalls,
     FunctionModel,
 )
+from pydantic_ai.workspaces import LocalWorkspaceBackend, WorkspaceRef
 
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, VLLMModel
 from mam_bench.runtime import CaseRuntime
 from mam_bench.simulations.civil_violence.settings import CivilViolenceSettings
 from mam_bench.simulations.schelling.settings import SchellingSettings
+
+
+class OfflineSandbox(LocalWorkspaceBackend):
+    """Exercise real file/command tools without contacting the Modal service."""
+
+    def __init__(self, root: Path, options: dict[str, object]) -> None:
+        super().__init__(root)
+        self.options = options
+        self.closed = False
+
+    @property
+    def ref(self) -> WorkspaceRef:
+        return WorkspaceRef(provider="modal", id=str(self._working_dir))
+
+    async def get_sandbox(self) -> None:
+        pass
+
+
+class SandboxTestCase(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        scratch = Path(".scratch/test-sandboxes")
+        scratch.mkdir(parents=True, exist_ok=True)
+        directory = tempfile.TemporaryDirectory(dir=scratch)
+        self.addCleanup(directory.cleanup)
+        self.sandboxes: list[OfflineSandbox] = []
+
+        def backend(**options: object) -> OfflineSandbox:
+            root = Path(directory.name).resolve() / str(len(self.sandboxes))
+            root.mkdir()
+            value = OfflineSandbox(root, options)
+            self.sandboxes.append(value)
+            return value
+
+        async def destroy(_capability: object, ref: WorkspaceRef) -> None:
+            next(value for value in self.sandboxes if value.ref == ref).closed = True
+
+        for replacement in (
+            patch("pydantic_ai_harness.modal_sandbox.ModalSandboxBackend", backend),
+            patch("pydantic_ai_harness.modal_sandbox.ModalSandbox.destroy", destroy),
+            patch.dict(
+                os.environ, MODAL_TOKEN_ID="offline-id", MODAL_TOKEN_SECRET="offline-secret"
+            ),
+        ):
+            replacement.start()
+            self.addCleanup(replacement.stop)
 
 
 def schelling(**updates: object) -> SchellingSettings:
@@ -75,7 +126,6 @@ def selection() -> VLLMModel:
         runtime="vllm",
         model="scripted",
         base_url="http://127.0.0.1:1/v1",
-        api_key_env="UNUSED_OFFLINE_TEST_KEY",
     )
 
 
@@ -140,7 +190,7 @@ async def stay(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
 
 
 def streaming_model(model: FunctionModel) -> FunctionModel:
-    """Expose scripted replies as native chunks for archived simulation turns."""
+    """Expose scripted replies as native chunks for streaming simulation turns."""
 
     async def stream(
         messages: list[ModelMessage], info: AgentInfo

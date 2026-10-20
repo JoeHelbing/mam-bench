@@ -3,7 +3,6 @@
 import asyncio
 import json
 import tempfile
-import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -17,11 +16,21 @@ from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, BenchmarkConfig, CaseSettings, ModelSelection
 from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunFailure, BenchmarkRunner
-from support import civil, observation, records, schelling, selection, stay, streaming_model
+from support import (
+    SandboxTestCase,
+    civil,
+    observation,
+    records,
+    schelling,
+    selection,
+    stay,
+    streaming_model,
+)
 
 
-class RunnerTests(unittest.IsolatedAsyncioTestCase):
+class RunnerTests(SandboxTestCase):
     def setUp(self) -> None:
+        super().setUp()
         discovery = patch(
             "mam_bench.model_setup._fetch_vllm_model",
             AsyncMock(return_value=VLLMModelMetadata(id="scripted", max_model_len=260_000)),
@@ -192,16 +201,10 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 failed_case.controlled_agent_count,
             )
-            self.assertTrue((root / "cases/002/agent-messages").is_dir())
             self.assertEqual(
                 json.loads((root / "failure.json").read_text())["status"], "incomplete"
             )
             self.assertIn("SECRET-PROVIDER-BODY", "\n".join(logs.output))
-            events = "\n".join(
-                path.read_text()
-                for path in (root / "cases/002/agent-messages").rglob("events.jsonl")
-            )
-            self.assertIn("SECRET-PROVIDER-BODY", events)
             for path in (root / "failure.json", root / "cases/002/failure.json"):
                 record = json.loads(path.read_text())
                 self.assertIn("ModelHTTPError", record["traceback"])

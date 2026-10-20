@@ -1,4 +1,4 @@
-"""Native OTel collection with conversation content and durable Harness histories."""
+"""Native agent telemetry saved locally and optionally delivered to Logfire."""
 
 import logging
 from collections.abc import Generator

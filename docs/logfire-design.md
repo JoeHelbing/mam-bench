@@ -138,7 +138,8 @@ remain readable even when the HTTP status is 200.
 
 Native instrumentation captures prompts, replies, reasoning, and tool
 arguments/results by default. Logfire receives that content when cloud delivery
-is configured; complete conversation histories also remain in Harness archives.
+is configured. Agent data is saved only through `Agent.instrument_all()` and
+native exporters; separate Harness archives and stream recorders have been removed.
 Exception messages and stack traces remain intact in local and configured cloud exports.
 
 ## Metrics
@@ -209,11 +210,13 @@ its imports were removed (80 fewer lines in sessions). Turn summaries and
 failure classification remain. No simulation logic, scoring, RNG, admission
 order or provider parameters change.
 
-`artifacts.py` already delegates history persistence to Harness `FileStepStore`.
-Its small archive adapter preserves provider-error details and classifies write
-failures. Its JSON writer retains atomic results and scientific checkpoints.
+`artifacts.py` retains the JSON writer for atomic results and scientific
+checkpoints. Agent conversations, reasoning, tools, usage, and errors come from
+`Agent.instrument_all()`, with native SDK exporters writing local telemetry and
+optionally delivering it to Logfire. Sessions retain histories and the board in
+memory for execution. There is no separate agent-history serializer or stream capture.
 `diagnostics.py` retains failure categories, standard complete tracebacks and
-stderr setup. No replacement history serializer was written.
+stderr setup.
 The telemetry setup adds code overall while removing duplicate request/tool
 collection; this is a new observability capability, not a net line-count reduction.
 
@@ -234,14 +237,14 @@ see [artifacts and failures](artifacts-and-failures.md).
    uses separate OTLP traces, logs and metrics exporters; cloud verification is
    recorded below when complete.
 2. Public-interface tests verify complete reasoning/tool histories, partial
-   histories on provider failure, native request counts/tokens and sentinel
-   exclusion, including trace-to-archive native call IDs. Nested compaction adds
+   content on provider failure, native request counts/tokens and error details,
+   including native call and conversation IDs. Nested compaction adds
    one request span without duplicating usage. A loopback receiver rejects all
    three signals without preventing
    agent completion or local evidence preservation.
 3. Paired deterministic benchmark runs produce identical scores and saved
-   ordinary/controlled trajectories with telemetry on/off. Existing archive,
-   compaction, cancellation and scheduler tests retain their coverage.
+   ordinary/controlled trajectories with telemetry on/off. Compaction,
+   cancellation and scheduler tests retain their coverage.
 4. A bounded workload measures instrumentation overhead and emitted record count.
 5. Passive collection validates cumulative counters, restarts, missing samples,
    metric temporality and PGX counter availability.

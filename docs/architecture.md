@@ -2,19 +2,22 @@
 
 For either simulation, start at [main.py](../main.py): parse an explicit model file
 and suite, then [config.py](../src/mam_bench/config.py) validates the complete nested
-configuration. [model_setup.py](../src/mam_bench/model_setup.py) discovers the
-served context and available capabilities from vLLM or OpenRouter once before
-any case, and validates YAML request overrides against known constraints. It
-defaults action and summary output caps to one quarter of served context, bounded
-by known provider output limits. Omitted sampling and reasoning settings use
-endpoint defaults. The runner records the input
+configuration with one model-YAML record, rather than separate provider-selection
+classes. [model_setup.py](../src/mam_bench/model_setup.py) discovers serving
+constraints from vLLM or OpenRouter, or context from PydanticAI's native model
+profile for OpenAI, before any case. It validates YAML overrides against known
+constraints. For vLLM and OpenRouter, action and summary output caps default to
+one quarter of served context, bounded by reported output limits. The direct
+OpenAI adapter leaves omitted output caps unset. Omitted sampling and reasoning
+settings use endpoint defaults. The runner records the input
 config and effective setup, then creates one provider, one fresh `CaseRuntime`
 and writer per case with discovered context passed separately from YAML settings,
 constructs the selected simulation, and awaits
 `evaluate(runtime)`. It never steps a world.
 
-[runtime.py](../src/mam_bench/runtime.py) selects native `VLLMProvider` or
-`OpenRouterProvider` profiles and applies configured request settings.
+[runtime.py](../src/mam_bench/runtime.py) constructs native PydanticAI model and
+provider instances and applies configured request settings. The model-YAML
+record is configuration only; it does not wrap the native model or its requests.
 Native profiles retain their tool-choice and reasoning safeguards. The runtime
 enables native OpenRouter cache controls without a separate cache policy.
 Model requests receive no automatic sampling seed; simulation random streams

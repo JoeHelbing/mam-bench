@@ -9,7 +9,7 @@ import httpx2 as httpx
 from openai import AsyncOpenAI
 from pydantic import ValidationError
 
-from mam_bench.config import AgentSettings, OpenRouterModel
+from mam_bench.config import AgentSettings, ModelSelection
 from mam_bench.model_setup import EndpointResponse, VLLMModelMetadata, resolve_model_setup
 from support import selection
 
@@ -29,8 +29,8 @@ def endpoint(**updates: object) -> dict[str, object]:
     }
 
 
-def router(**settings: object) -> OpenRouterModel:
-    return OpenRouterModel(
+def router(**settings: object) -> ModelSelection:
+    return ModelSelection(
         runtime="openrouter",
         model="vendor/model",
         provider="provider",
@@ -158,10 +158,8 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
             endpoint(supported_parameters=["tools", "tool_choice", "max_completion_tokens"])
         )
         requested = await resolve_model_setup(router(max_completion_tokens=1000))
-        assert isinstance(requested.selection, OpenRouterModel)
         self.assertEqual(requested.selection.completion_token_parameter, "max_completion_tokens")
         defaults = await resolve_model_setup(router())
-        assert isinstance(defaults.selection, OpenRouterModel)
         self.assertEqual(defaults.selection.settings.max_completion_tokens, 32000)
         self.assertEqual(defaults.selection.completion_token_parameter, "max_completion_tokens")
         self.metadata(endpoint(supported_parameters=["tools", "tool_choice"]))
@@ -172,7 +170,6 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
     async def test_tool_variants_are_facts_not_rewritten_yaml(self) -> None:
         self.metadata(endpoint(supports_tool_choice={"auto": True, "required": False}))
         defaults = await resolve_model_setup(router())
-        assert isinstance(defaults.selection, OpenRouterModel)
         self.assertIsNone(defaults.selection.settings.tool_choice)
         self.assertFalse(defaults.selection.required_tool_choice_supported)
         await resolve_model_setup(router(tool_choice="auto"))
@@ -183,7 +180,6 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
             await resolve_model_setup(router(tool_choice="auto"))
         self.metadata(endpoint(supports_tool_choice=None))
         unknown = await resolve_model_setup(router(tool_choice="required"))
-        assert isinstance(unknown.selection, OpenRouterModel)
         self.assertIsNone(unknown.selection.required_tool_choice_supported)
         self.metadata(endpoint(supports_tool_choice={"auto": False, "required": False}))
         with self.assertRaisesRegex(ValueError, "tool_choice"):
@@ -193,7 +189,6 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
         self.metadata(endpoint(tag="provider-slug", provider_name="Provider Display"))
         selected = router().model_copy(update={"provider": "Provider Display"})
         result = await resolve_model_setup(selected)
-        assert isinstance(result.selection, OpenRouterModel)
         self.assertEqual(result.selection.provider, "provider-slug")
 
     async def test_vllm_uses_served_context_and_preserves_request_overrides(self) -> None:

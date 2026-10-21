@@ -6,7 +6,7 @@ from contextlib import ExitStack, chdir
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Thread
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import httpx2 as httpx
 from openai import AsyncOpenAI
@@ -21,21 +21,15 @@ from pydantic_ai_harness.step_persistence import FileStepStore
 
 from mam_bench.config import AgentSettings, BenchmarkConfig
 from mam_bench.diagnostics import ExecutionFailure
-from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunner
 from mam_bench.sessions import AgentSessions, Completed, Stopped
 from mam_bench.telemetry import collect_telemetry
-from support import civil, schelling, selection, stay, streaming_model
+from support import civil, schelling, selection, served_model, stay, streaming_model
 
 
 class TelemetryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        discovery = patch(
-            "mam_bench.model_setup._fetch_vllm_model",
-            AsyncMock(return_value=VLLMModelMetadata(id="scripted", max_model_len=260_000)),
-        )
-        discovery.start()
-        self.addCleanup(discovery.stop)
+        self.enterContext(served_model())
 
     async def test_native_collection_keeps_full_history_and_exports_three_signals(self) -> None:
         calls = 0

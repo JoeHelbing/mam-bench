@@ -1,16 +1,16 @@
-"""Serving discovery and request validation without inference calls."""
+"""Serving preflight through real discovery responses, without inference calls."""
 
 import json
 import os
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import httpx2 as httpx
 from openai import AsyncOpenAI
 from pydantic import ValidationError
 
 from mam_bench.config import AgentSettings, ModelSelection
-from mam_bench.model_setup import EndpointResponse, VLLMModelMetadata, resolve_model_setup
+from mam_bench.model_setup import ResolvedModelSetup, resolve_model_setup
 from support import selection
 
 PARAMETERS = ["tools", "tool_choice", "max_tokens", "temperature", "top_p", "top_k", "reasoning"]
@@ -38,42 +38,248 @@ def router(**settings: object) -> ModelSelection:
     )
 
 
+@patch.dict(
+    os.environ,
+    {"OPENROUTER_API_KEY": "offline-test-key", "UNUSED_OFFLINE_TEST_KEY": "offline-test-key"},
+)
 class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
-    def metadata(self, *endpoints: dict[str, object]) -> AsyncMock:
-        fetch = AsyncMock(
-            return_value=EndpointResponse.model_validate(
-                {"data": {"endpoints": endpoints or (endpoint(),)}}
+    async def discover(self, selected: ModelSelection, payload: object) -> ResolvedModelSetup:
+        # Exercise SDK HTTP serialization and application response parsing.
+        def respond(request: httpx.Request) -> httpx.Response:
+            expected = (
+                "/v1/models" if selected.runtime == "vllm" else "/v1/models/vendor/model/endpoints"
             )
-        )
-        patcher = patch("mam_bench.model_setup._fetch_endpoints", fetch)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        return fetch
+            self.assertEqual((request.method, request.url.path), ("GET", expected))
+            return httpx.Response(200, json=payload)
 
-    async def test_discovers_once_and_defaults_output_to_quarter_context(self) -> None:
-        fetch = self.metadata(
-            endpoint(),
-            endpoint(tag="provider/region", context_length=64000, max_prompt_tokens=48000),
-            endpoint(tag="other", provider_name="Other", context_length=1000),
-        )
+        async with AsyncOpenAI(
+            api_key="offline-test-key",
+            base_url="https://provider.example.test/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        ) as client:
+            with patch("mam_bench.model_setup.AsyncOpenAI", return_value=client):
+                return await resolve_model_setup(selected)
+
+    async def test_router_selects_regional_limits_without_changing_requested_defaults(self) -> None:
         selected = router()
-        result = await resolve_model_setup(selected)
-        fetch.assert_awaited_once_with("vendor/model")
-        self.assertEqual(result.context_window_tokens, 48000)
-        self.assertEqual(result.metadata["context_length"], 64000)
-        self.assertEqual(result.selection.settings.max_completion_tokens, 16000)
-        self.assertEqual(result.selection.settings.summary_completion_tokens, 16000)
+        original = selected.model_dump()
+        setup = await self.discover(
+            selected,
+            {
+                "data": {
+                    "endpoints": [
+                        endpoint(),
+                        endpoint(
+                            tag="provider/region", context_length=64000, max_prompt_tokens=48000
+                        ),
+                        endpoint(tag="other", provider_name="Other", context_length=1000),
+                    ]
+                }
+            },
+        )
+        self.assertEqual(setup.context_window_tokens, 48000)
+        self.assertEqual(setup.metadata["context_length"], 64000)
+        self.assertEqual(setup.selection.settings.max_completion_tokens, 16000)
+        self.assertEqual(setup.selection.settings.summary_completion_tokens, 16000)
+        self.assertEqual(setup.selection.settings.compaction_tail(48000), 8400)
+        self.assertEqual(selected.model_dump(), original)
+        self.assertIsNone(setup.selection.settings.temperature)
+        self.assertIsNone(setup.selection.settings.reasoning_effort)
         self.assertIsNone(selected.settings.max_completion_tokens)
         self.assertIsNone(selected.settings.summary_completion_tokens)
-        self.assertIsNone(result.selection.settings.temperature)
-        self.assertIsNone(result.selection.settings.reasoning_effort)
-        self.assertEqual(result.selection.settings.compaction_tail(48000), 8400)
-        self.assertNotIn("context_window_tokens", result.selection.settings.model_dump())
-        json.dumps(result.metadata)
+        self.assertNotIn("context_window_tokens", setup.selection.settings.model_dump())
+        json.dumps(setup.metadata)
 
-    async def test_only_explicit_unsupported_parameters_fail(self) -> None:
-        self.metadata(endpoint(supported_parameters=["tools", "tool_choice", "max_tokens"]))
-        await resolve_model_setup(router())
+    async def test_router_keeps_explicit_caps_separate_from_prompt_and_output_ceilings(
+        self,
+    ) -> None:
+        for name, facts, settings, context, caps in (
+            (
+                "explicit limits",
+                endpoint(context_length=16000, max_completion_tokens=2000),
+                AgentSettings(
+                    max_completion_tokens=2000, summary_completion_tokens=1000, temperature=0.5
+                ),
+                16000,
+                (2000, 1000),
+            ),
+            (
+                "output ceiling",
+                endpoint(context_length=16000, max_completion_tokens=2000),
+                AgentSettings(),
+                16000,
+                (2000, 2000),
+            ),
+            (
+                "prompt ceiling",
+                endpoint(max_prompt_tokens=4000, max_completion_tokens=16000),
+                AgentSettings(max_completion_tokens=8000),
+                4000,
+                (8000, 16000),
+            ),
+        ):
+            with self.subTest(scenario=name):
+                selected = router().model_copy(update={"settings": settings})
+                setup = await self.discover(selected, {"data": {"endpoints": [facts]}})
+                self.assertEqual(setup.context_window_tokens, context)
+                self.assertEqual(
+                    (
+                        setup.selection.settings.max_completion_tokens,
+                        setup.selection.settings.summary_completion_tokens,
+                    ),
+                    caps,
+                )
+                self.assertEqual(setup.selection.settings.temperature, settings.temperature)
+                self.assertEqual(selected.settings, settings)
+
+    async def test_router_uses_known_capabilities_and_leaves_unknown_requests_unchanged(
+        self,
+    ) -> None:
+        selected = router(
+            temperature=0.5, max_completion_tokens=1000, summary_completion_tokens=2000
+        )
+        for facts in (
+            [endpoint(supported_parameters=None, max_completion_tokens=None)],
+            [endpoint(), endpoint(tag="provider/region", supported_parameters=None)],
+        ):
+            with self.subTest(endpoints=facts):
+                setup = await self.discover(selected, {"data": {"endpoints": facts}})
+                self.assertEqual(setup.selection.settings, selected.settings)
+                self.assertFalse(setup.metadata["parameter_metadata_complete"])
+        self.assertIsNone(
+            (
+                await self.discover(
+                    selected, {"data": {"endpoints": [endpoint(supported_parameters=None)]}}
+                )
+            ).metadata["supported_parameters"]
+        )
+        for cap, expected in ((None, 32000), (1000, 1000)):
+            with self.subTest(completion_cap=cap):
+                setup = await self.discover(
+                    router(max_completion_tokens=cap),
+                    {
+                        "data": {
+                            "endpoints": [
+                                endpoint(
+                                    supported_parameters=[
+                                        "tools",
+                                        "tool_choice",
+                                        "max_completion_tokens",
+                                    ]
+                                )
+                            ]
+                        }
+                    },
+                )
+                self.assertEqual(
+                    setup.selection.completion_token_parameter, "max_completion_tokens"
+                )
+                self.assertEqual(setup.selection.settings.max_completion_tokens, expected)
+        for requested in (None, "auto"):
+            with self.subTest(tool_choice=requested):
+                setup = await self.discover(
+                    router(tool_choice=requested),
+                    {
+                        "data": {
+                            "endpoints": [
+                                endpoint(supports_tool_choice={"auto": True, "required": False})
+                            ]
+                        }
+                    },
+                )
+                self.assertEqual(setup.selection.settings.tool_choice, requested)
+                self.assertFalse(setup.selection.required_tool_choice_supported)
+        setup = await self.discover(
+            router(tool_choice="required"),
+            {"data": {"endpoints": [endpoint(supports_tool_choice=None)]}},
+        )
+        self.assertIsNone(setup.selection.required_tool_choice_supported)
+
+    async def test_router_normalizes_a_display_name_for_provider_routing(self) -> None:
+        selected = router().model_copy(update={"provider": "Provider Display"})
+        setup = await self.discover(
+            selected,
+            {
+                "data": {
+                    "endpoints": [endpoint(tag="provider-slug", provider_name="Provider Display")]
+                }
+            },
+        )
+        self.assertEqual(setup.selection.provider, "provider-slug")
+        self.assertEqual(selected.provider, "Provider Display")
+
+    async def test_router_preflight_rejects_unusable_or_incompatible_serving_facts(self) -> None:
+        scenarios = [
+            ("missing context", [endpoint(context_length=None)], router(), "context"),
+            (
+                "wrong provider",
+                [endpoint(tag="other", provider_name="Other")],
+                router(),
+                "active endpoints",
+            ),
+            ("unavailable", [endpoint(status=-1)], router(), "active endpoints"),
+            ("no tools", [endpoint(supported_parameters=["max_tokens"])], router(), "tools"),
+            (
+                "no tool choice",
+                [endpoint(supported_parameters=["tools", "max_tokens"])],
+                router(),
+                "tool_choice",
+            ),
+            (
+                "action too large",
+                [endpoint(context_length=16000, max_completion_tokens=2000)],
+                router(max_completion_tokens=3000),
+                "limit",
+            ),
+            (
+                "summary too large",
+                [endpoint(context_length=16000, max_completion_tokens=2000)],
+                router(summary_completion_tokens=3000),
+                "limit",
+            ),
+            (
+                "tail too large",
+                [endpoint(context_length=16000)],
+                router(compaction_tail_tokens=12000),
+                "compaction",
+            ),
+            (
+                "partial knowledge still rejects",
+                [
+                    endpoint(supported_parameters=["tools", "tool_choice", "max_tokens"]),
+                    endpoint(tag="provider/region", supported_parameters=None),
+                ],
+                router(temperature=0.5),
+                "temperature",
+            ),
+            (
+                "required unsupported",
+                [endpoint(supports_tool_choice={"auto": True, "required": False})],
+                router(tool_choice="required"),
+                "tool_choice",
+            ),
+            (
+                "auto unsupported",
+                [endpoint(supports_tool_choice={"auto": False, "required": True})],
+                router(tool_choice="auto"),
+                "tool_choice",
+            ),
+            (
+                "no usable mode",
+                [endpoint(supports_tool_choice={"auto": False, "required": False})],
+                router(),
+                "tool_choice",
+            ),
+        ]
+        for settings in ({}, {"max_completion_tokens": 1000}, {"summary_completion_tokens": 1000}):
+            scenarios.append(
+                (
+                    f"missing completion parameter {settings}",
+                    [endpoint(supported_parameters=["tools", "tool_choice"])],
+                    router(**settings),
+                    "completion",
+                )
+            )
         for settings in (
             {"temperature": 1.0},
             {"top_p": 0.95},
@@ -81,201 +287,61 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
             {"reasoning_effort": "medium"},
             {"reasoning_effort": "none"},
         ):
-            with (
-                self.subTest(settings=settings),
-                self.assertRaisesRegex(ValueError, "unsupported|completion"),
-            ):
-                await resolve_model_setup(router(**settings))
-
-    async def test_missing_context_and_metadata_failure_have_no_yaml_fallback(self) -> None:
-        self.metadata(endpoint(context_length=None))
-        with self.assertRaisesRegex(ValueError, "context"):
-            await resolve_model_setup(router())
-        error = ValidationError.from_exception_data("malformed metadata", [])
-        with (
-            patch("mam_bench.model_setup._fetch_endpoints", AsyncMock(side_effect=error)),
-            self.assertRaises(ValidationError),
-        ):
-            await resolve_model_setup(router())
-
-    async def test_known_limits_validate_requests_without_changing_them(self) -> None:
-        self.metadata(endpoint(context_length=16000, max_completion_tokens=2000))
-        defaults = await resolve_model_setup(router())
-        self.assertEqual(defaults.selection.settings.max_completion_tokens, 2000)
-        self.assertEqual(defaults.selection.settings.summary_completion_tokens, 2000)
-        for settings in (
-            {"max_completion_tokens": 3000},
-            {"summary_completion_tokens": 3000},
-            {"compaction_tail_tokens": 12000},
-        ):
-            with self.subTest(settings=settings), self.assertRaises(ValueError):
-                await resolve_model_setup(router(**settings))
-        selected = router(
-            max_completion_tokens=2000, summary_completion_tokens=1000, temperature=0.5
-        )
-        result = await resolve_model_setup(selected)
-        self.assertEqual(result.selection.settings, selected.settings)
-
-    async def test_prompt_ceiling_is_distinct_from_generation_ceiling(self) -> None:
-        self.metadata(endpoint(max_prompt_tokens=4000, max_completion_tokens=16000))
-        result = await resolve_model_setup(router(max_completion_tokens=8000))
-        self.assertEqual(result.context_window_tokens, 4000)
-        self.assertEqual(result.selection.settings.max_completion_tokens, 8000)
-
-    async def test_wrong_provider_unavailable_and_known_missing_tools_fail(self) -> None:
-        for candidate in (
-            endpoint(tag="other", provider_name="Other"),
-            endpoint(status=-1),
-            endpoint(supported_parameters=["max_tokens"]),
-            endpoint(supported_parameters=["tools", "max_tokens"]),
-        ):
-            with self.subTest(endpoint=candidate):
-                self.metadata(candidate)
-                with self.assertRaises(ValueError):
-                    await resolve_model_setup(router())
-
-    async def test_unknown_capabilities_do_not_prevent_explicit_requests(self) -> None:
-        self.metadata(endpoint(supported_parameters=None, max_completion_tokens=None))
-        selected = router(
-            temperature=0.5, max_completion_tokens=1000, summary_completion_tokens=2000
-        )
-        result = await resolve_model_setup(selected)
-        self.assertEqual(result.selection.settings, selected.settings)
-        self.assertIsNone(result.metadata["supported_parameters"])
-        self.assertFalse(result.metadata["parameter_metadata_complete"])
-        # An unknown region does not erase a known incompatibility in another.
-        self.metadata(endpoint(), endpoint(tag="provider/region", supported_parameters=None))
-        await resolve_model_setup(selected)
-        self.metadata(
-            endpoint(supported_parameters=["tools", "tool_choice"]),
-            endpoint(tag="provider/region", supported_parameters=None),
-        )
-        with self.assertRaisesRegex(ValueError, "temperature"):
-            await resolve_model_setup(selected)
-
-    async def test_completion_parameter_supports_default_and_explicit_caps(self) -> None:
-        self.metadata(
-            endpoint(supported_parameters=["tools", "tool_choice", "max_completion_tokens"])
-        )
-        requested = await resolve_model_setup(router(max_completion_tokens=1000))
-        self.assertEqual(requested.selection.completion_token_parameter, "max_completion_tokens")
-        defaults = await resolve_model_setup(router())
-        self.assertEqual(defaults.selection.settings.max_completion_tokens, 32000)
-        self.assertEqual(defaults.selection.completion_token_parameter, "max_completion_tokens")
-        self.metadata(endpoint(supported_parameters=["tools", "tool_choice"]))
-        for settings in ({}, {"max_completion_tokens": 1000}, {"summary_completion_tokens": 1000}):
-            with self.subTest(settings=settings), self.assertRaisesRegex(ValueError, "completion"):
-                await resolve_model_setup(router(**settings))
-
-    async def test_tool_variants_are_facts_not_rewritten_yaml(self) -> None:
-        self.metadata(endpoint(supports_tool_choice={"auto": True, "required": False}))
-        defaults = await resolve_model_setup(router())
-        self.assertIsNone(defaults.selection.settings.tool_choice)
-        self.assertFalse(defaults.selection.required_tool_choice_supported)
-        await resolve_model_setup(router(tool_choice="auto"))
-        with self.assertRaisesRegex(ValueError, "tool_choice"):
-            await resolve_model_setup(router(tool_choice="required"))
-        self.metadata(endpoint(supports_tool_choice={"auto": False, "required": True}))
-        with self.assertRaisesRegex(ValueError, "tool_choice"):
-            await resolve_model_setup(router(tool_choice="auto"))
-        self.metadata(endpoint(supports_tool_choice=None))
-        unknown = await resolve_model_setup(router(tool_choice="required"))
-        self.assertIsNone(unknown.selection.required_tool_choice_supported)
-        self.metadata(endpoint(supports_tool_choice={"auto": False, "required": False}))
-        with self.assertRaisesRegex(ValueError, "tool_choice"):
-            await resolve_model_setup(router())
-
-    async def test_display_provider_normalizes_to_routing_slug(self) -> None:
-        self.metadata(endpoint(tag="provider-slug", provider_name="Provider Display"))
-        selected = router().model_copy(update={"provider": "Provider Display"})
-        result = await resolve_model_setup(selected)
-        self.assertEqual(result.selection.provider, "provider-slug")
-
-    async def test_vllm_uses_served_context_and_preserves_request_overrides(self) -> None:
-        selected = selection().model_copy(
-            update={
-                "settings": AgentSettings(
-                    max_completion_tokens=6000, summary_completion_tokens=1000
+            scenarios.append(
+                (
+                    f"unsupported explicit setting {settings}",
+                    [endpoint(supported_parameters=["tools", "tool_choice", "max_tokens"])],
+                    router(**settings),
+                    "unsupported",
                 )
-            }
-        )
-        fetch = AsyncMock(return_value=VLLMModelMetadata(id="scripted", max_model_len=16000))
-        with patch("mam_bench.model_setup._fetch_vllm_model", fetch):
-            result = await resolve_model_setup(selected)
-            self.assertEqual(result.selection.settings, selected.settings)
-            self.assertEqual(result.context_window_tokens, 16000)
-            self.assertEqual(result.metadata["source"], "vllm_models")
-            fetch.assert_awaited_once_with(selected)
-            with self.assertRaises(ValueError):
-                await resolve_model_setup(
-                    selected.model_copy(
-                        update={"settings": AgentSettings(max_completion_tokens=20000)}
-                    )
-                )
-        with (
-            patch(
-                "mam_bench.model_setup._fetch_vllm_model",
-                AsyncMock(return_value=VLLMModelMetadata(id="scripted")),
-            ),
-            self.assertRaisesRegex(ValueError, "context"),
-        ):
-            await resolve_model_setup(selected)
-        for bad in (0, -1, True, "16000"):
-            with self.subTest(value=bad), self.assertRaises(ValidationError):
-                VLLMModelMetadata.model_validate({"id": "scripted", "max_model_len": bad})
-
-    async def test_vllm_discovery_uses_models_route_and_checks_selected_identity(self) -> None:
-        requests: list[httpx.Request] = []
-
-        def respond(request: httpx.Request) -> httpx.Response:
-            requests.append(request)
-            return httpx.Response(
-                200,
-                json={
-                    "object": "list",
-                    "data": [
-                        {
-                            "id": "scripted",
-                            "object": "model",
-                            "created": 0,
-                            "owned_by": "vllm",
-                            "max_model_len": 65536,
-                        }
-                    ],
-                },
             )
+        for name, endpoints, selected, error in scenarios:
+            with self.subTest(scenario=name), self.assertRaisesRegex(ValueError, error):
+                await self.discover(selected, {"data": {"endpoints": endpoints}})
+        with self.assertRaises(ValidationError):
+            await self.discover(router(), {"data": {"endpoints": [{"tag": "provider"}]}})
 
-        selected = selection()
-        with patch.dict(os.environ, {selected.api_key_env: "offline-test-key"}):
-            for name in ("scripted", "not-served"):
-                async with AsyncOpenAI(
-                    api_key="offline-test-key",
-                    base_url=selected.base_url,
-                    http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
-                ) as client:
-                    with patch("mam_bench.model_setup.AsyncOpenAI", return_value=client):
-                        if name == "scripted":
-                            result = await resolve_model_setup(selected)
-                            self.assertEqual(result.context_window_tokens, 65536)
-                            self.assertEqual(result.selection.settings.max_completion_tokens, 16384)
-                            self.assertEqual(
-                                result.selection.settings.summary_completion_tokens, 16384
-                            )
-                            self.assertIsNone(selected.settings.max_completion_tokens)
-                            json.dumps(result.metadata)
-                        else:
-                            with self.assertRaisesRegex(ValueError, "not served"):
-                                await resolve_model_setup(
-                                    selected.model_copy(update={"model": name})
-                                )
-        self.assertEqual(
-            [(r.method, r.url.path) for r in requests],
-            [
-                ("GET", "/v1/models"),
-                ("GET", "/v1/models"),
-            ],
+    async def test_vllm_preflight_checks_identity_context_and_generation_budgets(self) -> None:
+        scenarios = (
+            ("defaults", "scripted", 65536, AgentSettings(), 16384, 16384, None),
+            (
+                "explicit caps",
+                "scripted",
+                16000,
+                AgentSettings(max_completion_tokens=6000, summary_completion_tokens=1000),
+                6000,
+                1000,
+                None,
+            ),
+            ("wrong model", "not-served", 16000, AgentSettings(), None, None, "not served"),
+            ("missing context", "scripted", None, AgentSettings(), None, None, "context"),
+            (
+                "oversized output",
+                "scripted",
+                16000,
+                AgentSettings(max_completion_tokens=20000),
+                None,
+                None,
+                "limit",
+            ),
         )
-
-
-if __name__ == "__main__":
-    unittest.main()
+        for name, model_id, context, settings, action_cap, summary_cap, error in scenarios:
+            with self.subTest(scenario=name):
+                selected = selection().model_copy(update={"settings": settings})
+                payload = {"data": [{"id": model_id, "max_model_len": context}]}
+                if error:
+                    with self.assertRaisesRegex(ValueError, error):
+                        await self.discover(selected, payload)
+                    continue
+                setup = await self.discover(selected, payload)
+                self.assertEqual(setup.context_window_tokens, context)
+                self.assertEqual(setup.selection.settings.max_completion_tokens, action_cap)
+                self.assertEqual(setup.selection.settings.summary_completion_tokens, summary_cap)
+                self.assertEqual(selected.settings, settings)
+                self.assertEqual(setup.metadata["source"], "vllm_models")
+                json.dumps(setup.metadata)
+        for bad in (0, -1, True, "16000"):
+            with self.subTest(context=bad), self.assertRaises(ValidationError):
+                await self.discover(
+                    selection(), {"data": [{"id": "scripted", "max_model_len": bad}]}
+                )

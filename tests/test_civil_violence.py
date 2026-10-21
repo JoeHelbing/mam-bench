@@ -3,7 +3,6 @@
 import asyncio
 import json
 import tempfile
-import unittest
 from copy import deepcopy
 from pathlib import Path
 from typing import cast
@@ -24,10 +23,10 @@ from mam_bench.simulations.civil_violence.agents import (
 )
 from mam_bench.simulations.civil_violence.results import EvaluationResult, Outcome
 from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
-from support import civil, observation, records, runtime, stay, turn_calls
+from support import SandboxTestCase, civil, observation, records, runtime, stay, turn_calls
 
 
-class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
+class CivilViolenceTests(SandboxTestCase):
     async def test_all_roles_share_vision_radius(self) -> None:
         for role in ("citizen", "police"):
             with self.subTest(role=role), tempfile.TemporaryDirectory() as directory:
@@ -535,7 +534,7 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                     citizen.location, citizen.active = None, False
                     self.assertEqual(sim.participating_count, participating)
 
-    async def test_jailed_agent_communicates_keeps_memory_and_defers_until_release(self) -> None:
+    async def test_jailed_agent_communicates_keeps_notes_and_defers_until_release(self) -> None:
         calls: dict[tuple[int, int], int] = {}
         jailed_views: list[dict[str, object]] = []
         remembered = False
@@ -551,12 +550,15 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                 if step == 1 and calls[key] == 1:
                     return ModelResponse(
                         parts=[
-                            ToolCallPart("write_memory", {"content": "custody memory survives"}),
+                            ToolCallPart(
+                                "write_file",
+                                {"path": "custody.txt", "content": "custody notes survive"},
+                            ),
                             ToolCallPart("post_message", {"text": "I am jailed"}),
                         ]
                     )
                 if step >= 2:
-                    remembered |= "custody memory survives" in str(messages)
+                    remembered |= "custody notes survive" in str(messages)
                 if cast(dict[str, object], view["self"])["jailed"]:
                     jailed_views.append(view)
                     if calls[key] == 2 and step == 1:

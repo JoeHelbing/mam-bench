@@ -1,6 +1,5 @@
 """Provider construction and settings shared by every simulation."""
 
-import os
 from dataclasses import dataclass
 from typing import cast
 
@@ -34,6 +33,23 @@ class CaseRuntime:
     settings: AgentSettings
     writer: ArtifactWriter
     context_window_tokens: int
+
+
+class VLLMSettings(BaseSettings):
+    """vLLM credentials loaded from the environment or `.env`."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="VLLM_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_ignore_empty=True,
+        extra="ignore",
+        frozen=True,
+        hide_input_in_errors=True,
+    )
+
+    # Match VLLMProvider's internal placeholder for the OpenAI client's credential check.
+    api_key: SecretStr = SecretStr("api-key-not-set")
 
 
 class OpenRouterSettings(BaseSettings):
@@ -105,7 +121,6 @@ def create_model(selection: ModelSelection) -> Model:
         )
 
     if selection.runtime == "vllm":
-        assert selection.api_key_env is not None
         if selection.repetition_detection is not None:
             request_settings["extra_body"] = {
                 **cast(dict[str, object], request_settings.get("extra_body") or {}),
@@ -116,7 +131,7 @@ def create_model(selection: ModelSelection) -> Model:
             profile=profile,
             provider=VLLMProvider(
                 base_url=selection.base_url,
-                api_key=os.environ[selection.api_key_env],
+                api_key=VLLMSettings().api_key.get_secret_value(),
             ),
             settings=vllm_settings(selection, request_settings),
         )

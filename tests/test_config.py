@@ -30,9 +30,7 @@ class ConfigurationTests(unittest.TestCase):
             )
             dumped = config.model.model_dump()
             self.assertEqual(dumped, {**model, "settings": config.model.settings.model_dump()})
-            unexpected = {"base_url", "api_key_env", "provider", "repetition_detection"} - set(
-                model
-            )
+            unexpected = {"base_url", "provider", "repetition_detection"} - set(model)
             if model["runtime"] == "vllm":
                 unexpected.discard("repetition_detection")
             for field in unexpected:

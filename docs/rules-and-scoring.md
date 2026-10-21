@@ -91,7 +91,7 @@ score = direction * (100 * (controlled_participation - reference_participation)
 
 Revolution indicators are zero or one. Time to revolution is saved without a
 timing reward. Arrest alone does not reduce participation. A jailed model citizen
-retains its identity, session, memory, and shared-board access, receives an
+retains its identity, session, private workspace, and shared-board access, receives an
 explicit jailed observation, and ends its communication-only turn with `defer`.
 Physical actions retry; ordinary jailed citizens defer automatically.
 

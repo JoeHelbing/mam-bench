@@ -5,7 +5,8 @@ six-case benchmark suite.
 
 ## Configure the model
 
-Put `OPENAI_API_KEY` in your Git-ignored `.env` file. Select the model in
+Put `OPENAI_API_KEY`, `MODAL_TOKEN_ID`, and `MODAL_TOKEN_SECRET` in your Git-ignored
+`.env` file. Modal hosts each controlled agent's private workspace. Select the model in
 `models/openai.yaml`:
 
 ```yaml

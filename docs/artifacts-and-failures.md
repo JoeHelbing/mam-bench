@@ -8,7 +8,7 @@
   benchmark.json                 # complete runs only; calculated total_score
   failure.json                   # failed runs, when storage permits
   telemetry/
-    traces.jsonl                 # native OpenTelemetry records, content disabled
+    traces.jsonl                 # native agent/model/tool spans, including content
     logs.jsonl                   # correlated package logs
     metrics.jsonl                # native GenAI metrics, delta temporality
   cases/001/
@@ -18,10 +18,6 @@
     ordinary-outcome.json         # retained even if the controlled world fails
     controlled-outcome.json
     result.json                  # one simulation-owned result, including score
-    agent-messages/              # native Pydantic AI Harness archives
-    agent-streams/<call-id>.jsonl # native streaming events, appended as received
-    provider-streams/<call-id>.jsonl # vLLM SDK chunks before native event mapping
-    message-board.jsonl
     turns.jsonl                  # exhausted-turn reason and fallback, when needed
     failure.json                 # failed case, when storage permits
 ```
@@ -37,34 +33,33 @@ requested settings. It does not claim to know unreported endpoint generation
 defaults. Native CLI telemetry records request/token/cache
 usage, including summary calls and requests completed before a later failure.
 An absent or zero cache-token count does not establish a measured cache miss.
-Native message snapshots retain per-response usage. Direct library users can
+Native model spans retain per-response usage. Direct library users can
 enable telemetry with `collect_telemetry`; simulations do not write a separate
 usage artifact.
 
-Native Harness `StepPersistence` retains messages, model reasoning when returned,
-tool calls/results, and interrupted runs. Shared-board posts persist as accepted.
-Native snapshots overlap; inspect them rather than concatenating histories.
-When an artifact directory is supplied, turns and compaction summaries use
-streaming requests. Each stream record contains its arrival timestamp, native
-conversation ID, request step, and event. Files use the native agent call ID;
-text, reasoning, and tool-argument deltas remain readable before completion and
-after cancellation. These are diagnostic events, not accepted simulation actions
-or exact token counts. In-memory sessions without artifacts retain their existing
-request path. Closing each append flushes Python buffers; this is not an fsync
-guarantee against power loss.
-Archived vLLM calls additionally request `return_token_ids=true` and
-`include_reasoning=true`, without changing the thinking-mode switch. Provider
-stream records retain each SDK-decoded JSON chunk (including extra fields), its
-arrival timestamp, conversation ID, and request step. These are not byte-for-byte
-SSE frames. Token-only chunks with empty parsed deltas are saved too; concatenate
-each choice's `token_ids` in order within one call/request step/choice, then decode
-with the exact served tokenizer and `skip_special_tokens=False`. Prompt token IDs
-are separate and must not be included in generated output. A partial stream only
-establishes which tokens reached the client before cancellation. This capture
-does not recover older unrecorded requests or change accepted simulation actions.
-Compaction does not erase earlier archived messages. Private notebook operations
-are in tool histories; standalone notebook files and summarizer conversations
-are not separate artifacts.
+`Agent.instrument_all()` is the single source of saved agent data: prompts,
+replies, returned reasoning, tool arguments/results, and usage. Model-controlled
+simulation turns use native streaming; completed responses are assembled into
+model spans. There are no separate Harness message snapshots, board archives,
+stream-event files, or raw vLLM chunks. Instrumentation does not record each
+chunk as it arrives, and interrupted streams may lack partial response content.
+Compaction does not erase earlier exported spans; nested summary requests are
+instrumented too. Session histories and board messages remain in memory for
+execution. Coder commands and file operations appear as native tool spans.
+Package logs record session and sandbox IDs for cleanup diagnostics. Workspace
+files are not copied into local artifacts and are lost when the sandbox is
+terminated; notebook memory tools have been removed.
+
+Every controlled identity owns a separate Modal sandbox for one case, retained
+across turns. The custom image is defined in `sandboxes.py`. Project Modal
+credentials come from the host environment or `.env` and are not forwarded into
+the sandbox. `observation.json` is refreshed before each model turn, and
+`observe.py` lets Python code read this same local snapshot. An agent can also
+call the ordinary `observe()` tool. Neither grants additional simulation visibility.
+Sandbox preparation is outside the model-turn deadline. Cases explicitly
+terminate all owned sandboxes on completion, error, or cancellation; the default
+12-hour sandbox lifetime is a backstop. Cleanup failures stop a successful case,
+or are logged while preserving an existing failure.
 
 Invalid actions receive bounded retry feedback. Exhausted request, tool, output,
 or retry budgets select a simulation fallback and retain a diagnostic reason.
@@ -77,7 +72,7 @@ normal fallback. Each new turn starts with a fresh failure budget. Accepted tool
 effects remain; incomplete streamed tool calls receive an explicit not-executed
 reply before retrying. Failed calls log their exception type and status code.
 Tool failures include argument validation, rejected actions, unknown tools, and
-reported failures across actions, messaging, and memory. Tool batches settle
+reported failures across actions, messaging, and workspace tools. Tool batches settle
 before the limit is checked, preserving matching replies and accepted effects.
 The limit prevents the next request and does not override an accepted terminal action.
 They do not cause an infrastructure failure or an extra scoring penalty.
@@ -98,19 +93,17 @@ Native OpenTelemetry spans supply model request and tool timing, including
 nested summarizer requests. Set `MAM_BENCH_LOG_LEVEL` to override the YAML
 `log_level`. Logs retain complete exception chains and provider error bodies,
 including errors received inside successful HTTP streaming responses. Native
-failure events and tool-effect records retain their original error details.
+spans retain their original error details.
 
 The CLI collects all three telemetry signals locally using standard SDK JSON
 exporters. Native instrumentation includes prompts, replies, reasoning, and tool
 arguments/results by default, both locally and when sending to Logfire.
 Request/tool spans export when they finish; metrics export every 30 seconds and
-at orderly shutdown. Harness owns the complete conversation archives, including
-the history retained before a failure. Read each JSONL record independently;
+at orderly shutdown. Read each JSONL record independently;
 the console-export JSON is a diagnostic format, not an OTLP protobuf dump.
-Native `gen_ai.agent.call.id` matches the archived messages' `run_id`;
-`gen_ai.conversation.id` identifies the session. Use `FileStepStore.list_runs`
-and `list_snapshots` to read matching histories instead of decoding archive
-directory names or creating a second identity system.
+Native `gen_ai.agent.call.id` identifies an agent call and
+`gen_ai.conversation.id` identifies the session. Use these attributes to group
+related request and tool spans.
 
 The CLI reads `LOGFIRE_TOKEN` from the environment or the working directory's
 `.env` file to enable background OTLP HTTP delivery to Logfire. Environment

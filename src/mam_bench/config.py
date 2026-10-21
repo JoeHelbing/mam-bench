@@ -28,7 +28,7 @@ class AgentSettings(BaseModel):
     compaction_trigger_fraction: float = Field(default=0.7, gt=0, lt=1)
     compaction_tail_tokens: int | None = Field(default=None, ge=0)
     summary_completion_tokens: int | None = Field(default=None, gt=0)
-    memory_injection_tokens: int = Field(default=4_000, gt=0)
+    sandbox_timeout_seconds: int = Field(default=43_200, ge=10, le=86_400, strict=True)
 
     def compaction_tail(self, context_window_tokens: int) -> int:
         """Resolve the retained history against the actual serving context."""
@@ -69,7 +69,6 @@ class ModelSelection(BaseModel):
         default=None, min_length=1, pattern=r"^\S(?:.*\S)?$", exclude_if=lambda v: v is None
     )
     base_url: str | None = Field(default=None, exclude_if=lambda v: v is None)
-    api_key_env: str | None = Field(default=None, exclude_if=lambda v: v is None)
     repetition_detection: RepetitionDetection | None = Field(
         default=None, exclude_if=lambda v: v is None
     )
@@ -83,7 +82,7 @@ class ModelSelection(BaseModel):
     @model_validator(mode="after")
     def validate_connection(self) -> Self:
         required = {
-            "vllm": {"base_url", "api_key_env"},
+            "vllm": {"base_url"},
             "openrouter": {"provider"},
         }.get(self.runtime, set())
         allowed = required | {"runtime", "model", "settings"}

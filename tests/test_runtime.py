@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import chdir
 from pathlib import Path
 from typing import Literal, cast
 from unittest.mock import AsyncMock, patch
@@ -30,7 +31,7 @@ from mam_bench.runtime import CaseRuntime, create_model
 from mam_bench.sessions import AgentSessions, Completed
 from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
 from mam_bench.simulations.schelling.simulation import SchellingSim
-from support import civil, schelling
+from support import SandboxTestCase, civil, schelling
 
 
 def completion(
@@ -92,10 +93,40 @@ def streamed_request(client: AsyncOpenAI, *, tool_name: str, tool_args: str) -> 
     {
         "OPENROUTER_API_KEY": "unused-offline-test-value",
         "OPENROUTER_BASE_URL": "https://router.example.test/v1",
-        "COMPAT_TEST_API_KEY": "unused-offline-test-value",
+        "VLLM_API_KEY": "unused-offline-test-value",
     },
 )
-class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
+class ModelProviderTests(SandboxTestCase):
+    async def test_vllm_sessions_allow_a_missing_or_empty_api_key(self) -> None:
+        async def stay() -> str:
+            return "Stayed."
+
+        for key in (None, ""):
+            with (
+                self.subTest(key=key),
+                tempfile.TemporaryDirectory(dir=".scratch") as directory,
+                patch.dict(os.environ),
+            ):
+                os.environ.pop("VLLM_API_KEY", None)
+                if key is not None:
+                    os.environ["VLLM_API_KEY"] = key
+                with chdir(directory):
+                    model = create_model(
+                        ModelSelection(
+                            runtime="vllm",
+                            model="vendor/test-model",
+                            base_url="https://compatible.example.test/v1",
+                        )
+                    )
+                assert isinstance(model, OpenAIChatModel)
+                self.addAsyncCleanup(model.client.close)
+                agent: Agent[None, str] = Agent(model, output_type=ToolOutput(stay, name="stay"))
+                async with AgentSessions(agent, context_window_tokens=262144) as sessions:
+                    request = AsyncMock(return_value=completion(tool_call=True))
+                    with patch.object(model.client.chat.completions, "create", request):
+                        result = await sessions.run("probe", "Stay.", deps=None)
+                self.assertEqual(result, Completed("Stayed."))
+
     async def test_openai_sessions_send_equivalent_fixed_integer_arrays(self) -> None:
         async def move(destination: tuple[StrictInt, StrictInt] | None) -> str:
             return str(destination)
@@ -281,7 +312,6 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                 runtime="vllm",
                 model="google/gemma-4-27b-it",
                 base_url="https://compatible.example.test/v1",
-                api_key_env="COMPAT_TEST_API_KEY",
                 settings=AgentSettings(
                     temperature=0.5,
                     top_p=0.8,
@@ -335,7 +365,6 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                         runtime="vllm",
                         model="nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB",
                         base_url="https://compatible.example.test/v1",
-                        api_key_env="COMPAT_TEST_API_KEY",
                         settings=settings,
                     )
                 )
@@ -363,7 +392,6 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                         runtime="vllm",
                         model="nvidia/Qwen3.8-27B-NVFP4",
                         base_url="https://compatible.example.test/v1",
-                        api_key_env="COMPAT_TEST_API_KEY",
                         settings=settings,
                     )
                 )
@@ -399,7 +427,6 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                             runtime="vllm",
                             model="google/gemma-4-27b-it",
                             base_url="https://compatible.example.test/v1",
-                            api_key_env="COMPAT_TEST_API_KEY",
                             settings=settings,
                         )
                     )
@@ -448,7 +475,6 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                     "runtime": "vllm",
                     "model": "test-model",
                     "base_url": "https://compatible.example.test/v1",
-                    "api_key_env": "COMPAT_TEST_API_KEY",
                     "repetition_detection": {},
                 }
             )
@@ -489,7 +515,6 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                 runtime="vllm",
                 model="openai/gpt-oss-120b",
                 base_url="https://vllm.example.test/v1",
-                api_key_env="COMPAT_TEST_API_KEY",
             ),
             ModelSelection(
                 runtime="openrouter", model="qwen/qwen-3-coder", provider="selected-provider"
@@ -563,7 +588,6 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
                         runtime="vllm",
                         model="google/gemma-4-27b-it",
                         base_url="https://compatible.example.test/v1",
-                        api_key_env="COMPAT_TEST_API_KEY",
                         settings=settings,
                     )
                 )
@@ -606,7 +630,6 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
             max_completion_tokens=1000,
             compaction_trigger_fraction=0.5,
             compaction_tail_tokens=20,
-            memory_injection_tokens=100,
         )
         model = create_model(
             ModelSelection(

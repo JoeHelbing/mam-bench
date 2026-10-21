@@ -250,15 +250,16 @@ distinguished from agent posts, and each agent has an independent unread
 position.
 _Avoid_: Public Document, shared notebook, controller
 
-**Private Notebook**:
-One model-controlled agent's private persistent notes within one world,
-isolated from other agents. Each test case creates fresh notebooks.
-_Avoid_: Message Board, shared memory, transcript
+**Private Workspace**:
+One model-controlled agent's private Modal sandbox within one world. Its files
+persist across that agent's turns, isolated from other agents. Each test case
+creates fresh workspaces and closes them when the case ends.
+_Avoid_: Private Notebook, Message Board, shared memory, transcript
 
 **Agent Turn**:
 One model-controlled agent's opportunity to act in its simulation's current
 step or role phase. It receives a frozen observation, can communicate and use
-private memory, and ends with a legal role-specific action or fallback.
+its Private Workspace, and ends with a legal role-specific action or fallback.
 _Avoid_: wave, request, round
 
 **Paired Random Slot**:

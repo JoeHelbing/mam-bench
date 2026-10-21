@@ -3,7 +3,6 @@
 import json
 import os
 import tempfile
-import unittest
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
@@ -19,7 +18,7 @@ from mam_bench.model_setup import resolve_model_setup
 from mam_bench.runtime import CaseRuntime, create_model
 from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
 from mam_bench.simulations.schelling.simulation import SchellingSim
-from support import civil, schelling
+from support import SandboxTestCase, civil, schelling
 
 
 def locations(state: dict[str, object]) -> dict[int, tuple[int, int] | None]:
@@ -153,7 +152,7 @@ def anthropic_stream(name: str, arguments: dict[str, object]) -> str:
 @patch.dict(
     os.environ, {"OPENAI_API_KEY": "offline-test-key", "ANTHROPIC_API_KEY": "offline-test-key"}
 )
-class NativeProviderTests(unittest.IsolatedAsyncioTestCase):
+class NativeProviderTests(SandboxTestCase):
     async def test_native_yaml_drives_validated_actions_and_retains_cache_usage(self) -> None:
         for service, model_name, context in (
             ("openai", "gpt-4.1-mini", 1000000),

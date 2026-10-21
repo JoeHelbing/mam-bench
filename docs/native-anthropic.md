@@ -5,7 +5,8 @@ six-case benchmark suite.
 
 ## Configure the model
 
-Put `ANTHROPIC_API_KEY` in your Git-ignored `.env` file. Create your own model YAML
+Put `ANTHROPIC_API_KEY`, `MODAL_TOKEN_ID`, and `MODAL_TOKEN_SECRET` in your Git-ignored
+`.env` file. Modal hosts each controlled agent's private workspace. Create your own model YAML
 file with the model you want to evaluate:
 
 ```yaml

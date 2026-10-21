@@ -1,14 +1,13 @@
 import asyncio
 import json
 import tempfile
-import unittest
 from collections.abc import AsyncIterable
 from decimal import Decimal
-from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx2 as httpx
+import modal
 from openai import APIConnectionError, APIError, AsyncOpenAI
 from pydantic_ai import Agent, ModelMessage, RunContext, ToolOutput, UsageLimits
 from pydantic_ai.agent import EventStreamHandler
@@ -30,12 +29,14 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.usage import RequestUsage
-from pydantic_ai_harness.memory import InMemoryStore, MemoryFile
+from pydantic_ai.workspaces import Workspace
+from pydantic_ai_harness.modal_sandbox import ModalSandboxBackend
 
 from mam_bench.communication import MessageBoard
 from mam_bench.config import AgentSettings
 from mam_bench.diagnostics import ExecutionFailure
 from mam_bench.sessions import AgentSessions, Completed, Stopped
+from support import OfflineSandbox, SandboxTestCase
 
 
 def _response(
@@ -82,67 +83,32 @@ def _request_text(request: ModelRequest) -> str:
     return "\n".join(rendered)
 
 
-class MemoryModel:
+class FileModel:
     def __init__(self) -> None:
         self.tool_names: set[str] = set()
-        self.memory_blocks: list[str] = []
 
     async def __call__(self, messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         self.tool_names = {tool.name for tool in info.function_tools}
         request = _latest_request(messages)
-        tool_results = [part for part in request.parts if isinstance(part, ToolReturnPart)]
-        retry_parts = [part for part in request.parts if isinstance(part, RetryPromptPart)]
         text = _request_text(request)
-        self.memory_blocks.extend(
-            item.content
-            for part in request.parts
-            if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
-            for item in part.content
-            if isinstance(item, TextContent) and item.content.startswith("<memory>")
-        )
-
-        if "recall" in text:
-            return _response(TextPart("remembered" if "alpha is durable" in text else "empty"))
-        if tool_results:
-            return _response(TextPart("stored"))
-        if retry_parts:
-            return _response(TextPart("protected"))
         if "remember alpha" in text:
             return _response(
-                ToolCallPart(
-                    tool_name="write_memory",
-                    args={"content": "alpha is durable"},
-                    tool_call_id="write-alpha",
-                )
-            )
-        if "remember large" in text:
-            lines = [f"old-{index:03d}-" + "x" * 100 for index in range(300)]
-            lines.append("tail fact")
-            return _response(
-                ToolCallPart(
-                    tool_name="write_memory",
-                    args={"content": "\n".join(lines)},
-                    tool_call_id="write-large",
-                )
-            )
-        if "try deleting main" in text:
-            return _response(
-                ToolCallPart(
-                    tool_name="delete_memory",
-                    args={"file": "MEMORY.md"},
-                    tool_call_id="delete-main",
-                )
+                ToolCallPart("write_file", {"path": "notes.txt", "content": "alpha is durable"})
             )
         if "recall" in text:
-            remembered = "alpha is durable" in text
-            return _response(TextPart("remembered" if remembered else "empty"))
+            return _response(ToolCallPart("read_file", {"path": "notes.txt"}))
+        for part in request.parts:
+            if isinstance(part, ToolReturnPart):
+                return _response(
+                    TextPart(
+                        ("remembered" if "alpha is durable" in str(part.content) else "empty")
+                        if part.tool_name == "read_file"
+                        else "stored"
+                    )
+                )
+            if isinstance(part, RetryPromptPart):
+                return _response(TextPart("empty"))
         return _response(TextPart("ok"))
-
-
-class FailingReadStore(InMemoryStore):
-    async def read(self, path: str, *, max_chars: int) -> MemoryFile | None:
-        del path, max_chars
-        raise OSError("memory unavailable")
 
 
 class CompactionModel:
@@ -190,7 +156,124 @@ class StreamingAgent(Agent[None, str]):
         return _drain_events
 
 
-class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
+class AgentSessionsTests(SandboxTestCase):
+    async def test_modal_startup_error_preserves_the_original_failure(self) -> None:
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            self.fail("Failed sandbox startup must not reach the model")
+
+        sessions = AgentSessions(Agent(FunctionModel(model)), context_window_tokens=260_000)
+        with (
+            patch("pydantic_ai_harness.modal_sandbox.ModalSandboxBackend", ModalSandboxBackend),
+            patch("modal.App.lookup.aio", AsyncMock(return_value=object())),
+            patch(
+                "modal.Sandbox.create.aio",
+                AsyncMock(side_effect=modal.exception.InvalidError("bad image")),
+            ),
+            patch(
+                "modal.Sandbox.from_name.aio",
+                AsyncMock(side_effect=modal.exception.NotFoundError("missing")),
+            ),
+            self.assertRaises(ExecutionFailure) as caught,
+        ):
+            async with sessions:
+                await sessions.run("a", "go", deps=None)
+        self.assertEqual(caught.exception.kind, "sandbox")
+        self.assertIn("bad image", str(caught.exception.__cause__))
+
+    async def test_cancellation_during_provisioning_waits_and_cleans_up(self) -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def prepare(backend: OfflineSandbox) -> None:
+            entered.set()
+            await release.wait()
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            self.fail("Cancelled preparation must not reach the model")
+
+        sessions = AgentSessions(Agent(FunctionModel(model)), context_window_tokens=260_000)
+
+        async def run() -> None:
+            async with sessions:
+                await sessions.run("a", "go", deps=None)
+
+        with patch.object(OfflineSandbox, "get_sandbox", prepare):
+            task = asyncio.create_task(run())
+            await entered.wait()
+            task.cancel()
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertTrue(self.sandboxes[0].closed)
+
+    async def test_workspace_is_private_persistent_and_observes_only_local_context(self) -> None:
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            instructions = info.instructions or ""
+            self.assertIn("Simulation-specific guidance.", instructions)
+            self.assertEqual(
+                instructions.count("Use read_messages and post_message to coordinate."), 1
+            )
+            self.assertIn("Each turn allows up to 25 model requests.", instructions)
+            names = {tool.name for tool in info.function_tools}
+            self.assertIn("shell", names)
+            self.assertIn("observe", names)
+            self.assertNotIn("delegate_task", names)
+            self.assertNotIn("write_memory", names)
+            latest = _latest_request(messages)
+            if any(isinstance(part, UserPromptPart) for part in latest.parts):
+                return _response(ToolCallPart("observe", {}))
+            result = next(p for p in latest.parts if isinstance(p, ToolReturnPart))
+            return _response(TextPart(str(result.content)))
+
+        sessions = AgentSessions(
+            Agent(FunctionModel(model), instructions="Simulation-specific guidance."),
+            context_window_tokens=260_000,
+        )
+        self.addAsyncCleanup(sessions.aclose)
+        first: dict[str, object] = {"step": 1, "location": [2, 3]}
+        result = await sessions.run("a", "go", deps=None, observation=first)
+        self.assertEqual(result, Completed(str(first)))
+        self.assertEqual(len(self.sandboxes), 1)
+        backend = self.sandboxes[0]
+        workspace = Workspace(backend)
+        await workspace.write_bytes("notes.txt", b"private notes")
+        second: dict[str, object] = {"step": 2, "location": [3, 4]}
+        await sessions.run("a", "again", deps=None, observation=second)
+        self.assertEqual(await workspace.read_bytes("notes.txt"), b"private notes")
+        self.assertEqual(
+            await workspace.read_bytes("observation.json"), b'{"step": 2, "location": [3, 4]}'
+        )
+        await sessions.run("b", "go", deps=None, observation={"step": 1})
+        self.assertEqual(len(self.sandboxes), 2)
+        self.assertFalse(await Workspace(self.sandboxes[1]).exists("notes.txt"))
+        self.assertEqual(backend.options["sandbox_timeout"], 43_200)
+        await sessions.aclose()
+        self.assertTrue(all(value.closed for value in self.sandboxes))
+
+    async def test_python_can_read_its_local_observation(self) -> None:
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            returns = [p for p in _latest_request(messages).parts if isinstance(p, ToolReturnPart)]
+            if returns:
+                self.assertIn("[2, 3]", str(returns[0].content))
+                return _response(TextPart("computed"))
+            return _response(
+                ToolCallPart(
+                    "shell",
+                    {
+                        "command": "python -c 'from observe import observe; "
+                        'print(observe()["location"])\''
+                    },
+                )
+            )
+
+        async with AgentSessions(
+            Agent(FunctionModel(model)), context_window_tokens=260_000
+        ) as sessions:
+            result = await sessions.run(
+                "a", "calculate", deps=None, observation={"location": [2, 3]}
+            )
+        self.assertEqual(result, Completed("computed"))
+        self.assertTrue(self.sandboxes[0].closed)
+
     async def test_three_tool_failures_accumulate_across_successes_and_reset_next_turn(
         self,
     ) -> None:
@@ -209,7 +292,7 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
                 case 2:
                     part = ToolCallPart("post_message", {"text": {"invalid": True}}, "bad-schema")
                 case _:
-                    part = ToolCallPart("delete_memory", {"file": "MEMORY.md"}, "bad-memory")
+                    part = ToolCallPart("read_messages", {"invalid": True}, "bad-read")
             return _response(part)
 
         sessions = AgentSessions(
@@ -372,7 +455,6 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
                                 deps_type=type(None),
                             ),
                             context_window_tokens=260_000,
-                            artifact_directory=Path(directory.name),
                         )
                         result = await runtime.run("a", "go", deps=None)
                         self.assertEqual(
@@ -523,8 +605,8 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(await runtime.run("a", "again", deps=None), Completed("recovered"))
 
-    async def test_private_memory_and_history(self) -> None:
-        model = MemoryModel()
+    async def test_private_files_and_history(self) -> None:
+        model = FileModel()
         runtime = AgentSessions(Agent(FunctionModel(model)), context_window_tokens=260_000)
         self.assertEqual(await runtime.run("a", "remember alpha", deps=None), Completed("stored"))
         self.assertEqual(await runtime.run("a", "recall", deps=None), Completed("remembered"))
@@ -532,13 +614,13 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(runtime.history("a")), len(runtime.history("b")))
         self.assertIn("post_message", model.tool_names)
         self.assertIn("read_messages", model.tool_names)
-        self.assertEqual(runtime.usage.requests, 4)
+        self.assertEqual(runtime.usage.requests, 6)
         snapshot = runtime.usage
         snapshot.requests = 0
-        self.assertEqual(runtime.usage.requests, 4)
+        self.assertEqual(runtime.usage.requests, 6)
 
-    async def test_limit_preserves_memory_and_history_and_resets_per_turn(self) -> None:
-        model = MemoryModel()
+    async def test_limit_preserves_files_and_history_and_resets_per_turn(self) -> None:
+        model = FileModel()
         runtime = AgentSessions(Agent(FunctionModel(model)), context_window_tokens=260_000)
         result = await runtime.run(
             "a", "remember alpha", deps=None, usage_limits=UsageLimits(request_limit=1)
@@ -601,7 +683,6 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
                 compaction_trigger_fraction=0.5,
                 compaction_tail_tokens=20,
                 summary_completion_tokens=16,
-                memory_injection_tokens=100,
             ),
         )
         await runtime.run("a", "A" * 600, deps=None)
@@ -618,15 +699,6 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
                 for part in message.parts
             )
         )
-
-    async def test_memory_store_failure_poisons_runtime(self) -> None:
-        with patch("mam_bench.sessions.InMemoryStore", return_value=FailingReadStore()):
-            runtime = AgentSessions(
-                Agent(FunctionModel(MemoryModel())), context_window_tokens=260_000
-            )
-        for identity in ("a", "b"):
-            with self.assertRaisesRegex(ExecutionFailure, "notebook failed"):
-                await runtime.run(identity, "go", deps=None)
 
     async def test_message_board_pages_and_isolated_cursors(self) -> None:
         board = MessageBoard()
@@ -721,7 +793,6 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
                 compaction_trigger_fraction=0.5,
                 compaction_tail_tokens=20,
                 summary_completion_tokens=16,
-                memory_injection_tokens=100,
             ),
         )
         self.assertEqual(await runtime.run("a", "A" * 600, deps=None), Completed("normal-1"))
@@ -739,7 +810,6 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
             compaction_trigger_fraction=0.5,
             compaction_tail_tokens=20,
             summary_completion_tokens=16,
-            memory_injection_tokens=100,
         )
         fallback = CompactionModel(summary_error=ModelAPIError("scripted", "unavailable"))
         runtime = AgentSessions(

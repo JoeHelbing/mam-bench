@@ -3,7 +3,6 @@
 import asyncio
 import json
 import tempfile
-import unittest
 from fractions import Fraction
 from pathlib import Path
 from typing import cast
@@ -15,7 +14,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from mam_bench.simulations.schelling.agents import ModelControlledAgent, OrdinaryAgent
 from mam_bench.simulations.schelling.results import EvaluationResult, Outcome
 from mam_bench.simulations.schelling.simulation import SchellingSim
-from support import observation, records, runtime, schelling
+from support import SandboxTestCase, observation, records, runtime, schelling
 
 
 def neighborhood(place: int, size: int, radius: int) -> set[int]:
@@ -33,7 +32,7 @@ def quality(cells: list[int], places: set[int], kind: int) -> Fraction:
     return Fraction(occupied.count(kind), len(occupied)) if occupied else Fraction(1)
 
 
-class SchellingTests(unittest.IsolatedAsyncioTestCase):
+class SchellingTests(SandboxTestCase):
     def test_satisfaction_at_float_thresholds_and_without_neighbors(self) -> None:
         neighbors = sorted(neighborhood(27, 8, 1))
         for total in range(1, 9):
@@ -329,16 +328,17 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             await sim.step()
             self.assertTrue(checked)
             starts = cast(list[int], initial["agent_locations"])
-            announcements = records(resources.writer.directory / "message-board.jsonl")
+            assert sim.sessions is not None
+            announcements = (await sim.sessions.board.read("observer")).content.splitlines()
             self.assertEqual(
-                {row["text"] for row in announcements},
+                {line.split("] ", 1)[1] for line in announcements},
                 {
                     f"Step 1: agent {identity} accepted stay at [{r},{c}]."
                     for identity in settings.controlled_agent_ids
                     for r, c in [divmod(starts[identity], settings.board_size)]
                 },
             )
-            self.assertTrue(all(row["announcement"] for row in announcements))
+            self.assertTrue(all(" announcement by " in line for line in announcements))
 
     def test_schelling_observation_groups_visible_cells_and_renders_wraparound(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -396,11 +396,12 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             sim = SchellingSim(schelling(), runtime=resources)
             origin = sim.agents[0].position
             await sim.step()
-            announcements = records(resources.writer.directory / "message-board.jsonl")
+            assert sim.sessions is not None
+            announcements = (await sim.sessions.board.read("observer")).content
             row, column = divmod(origin, sim.settings.board_size)
             self.assertIn(
                 f"Step 1: agent 0 accepted stay at [{row},{column}].",
-                {row["text"] for row in announcements},
+                announcements,
             )
 
     async def test_json_local_observations_and_exhaustion_retains_identity(self) -> None:

@@ -1,5 +1,6 @@
 """Discover serving constraints before running cases; YAML owns request choices."""
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
@@ -7,9 +8,16 @@ from urllib.parse import quote
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic_ai.exceptions import ModelAPIError
+from pydantic_ai.messages import ModelRequest, UserPromptPart
+from pydantic_ai.models import Model, ModelRequestParameters
+from pydantic_ai.settings import ModelSettings
 
 from mam_bench.config import AgentSettings, ModelSelection
+from mam_bench.diagnostics import ExecutionFailure
 from mam_bench.runtime import OpenRouterSettings, VLLMSettings, create_model
+
+logger = logging.getLogger(__name__)
 
 
 class EndpointMetadata(BaseModel):
@@ -36,6 +44,24 @@ class EndpointResponse(BaseModel):
     data: ModelEndpointData
 
 
+class AdvertisedReasoning(BaseModel):
+    """Catalog reasoning options, kept whole as evidence; never enforced."""
+
+    model_config = ConfigDict(extra="allow")
+    supported_efforts: list[str] | None = None
+
+
+class CatalogEntry(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    reasoning: AdvertisedReasoning | None = None
+
+
+class CatalogResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    data: list[CatalogEntry]
+
+
 class VLLMModelMetadata(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
@@ -52,7 +78,8 @@ class ResolvedModelSetup:
     metadata: dict[str, object]
 
 
-async def _fetch_endpoints(model: str) -> EndpointResponse:
+async def _fetch_endpoints(model: str) -> tuple[EndpointResponse, AdvertisedReasoning | None]:
+    """Endpoint limits plus the model's advertised reasoning options, if any."""
     connection = OpenRouterSettings()  # pyright: ignore[reportCallIssue]
     async with AsyncOpenAI(
         base_url=connection.base_url,
@@ -63,7 +90,29 @@ async def _fetch_endpoints(model: str) -> EndpointResponse:
         payload = await client.get(
             f"/models/{quote(model, safe='/')}/endpoints", cast_to=dict[str, object]
         )
-        return EndpointResponse.model_validate(payload)
+        # Only the catalog listing carries reasoning options; record, never enforce.
+        catalog = CatalogResponse.model_validate(
+            await client.get("/models", cast_to=dict[str, object])
+        )
+        reasoning = next((e.reasoning for e in catalog.data if e.id == model), None)
+        return EndpointResponse.model_validate(payload), reasoning
+
+
+async def probe_request(model: Model, settings: AgentSettings) -> None:
+    """Send one real request with the run's settings so a provider refusal stops setup."""
+    request_settings = ModelSettings()
+    if settings.max_completion_tokens is not None:
+        request_settings["max_tokens"] = settings.max_completion_tokens
+    try:
+        await model.request(
+            [ModelRequest(parts=[UserPromptPart("Reply with OK.")])],
+            request_settings,
+            ModelRequestParameters(),
+        )
+    except ModelAPIError as error:
+        raise ExecutionFailure(
+            "provider_probe", f"Provider refused the startup request: {error}"
+        ) from error
 
 
 async def _fetch_vllm_model(selection: ModelSelection) -> VLLMModelMetadata:
@@ -131,6 +180,7 @@ async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
                 "model": selection.model,
                 "context_window_tokens": context,
                 "output_limit_policy": "Omitted caps use native provider defaults",
+                "advertised_reasoning": None,
             },
         )
 
@@ -149,12 +199,13 @@ async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
                 "fetched_at": datetime.now(UTC).isoformat(),
                 "model": model.model_dump(mode="json"),
                 "context_window_tokens": model.max_model_len,
+                "advertised_reasoning": None,
             },
         )
 
     requested_provider = selection.provider
     assert requested_provider is not None
-    response = await _fetch_endpoints(selection.model)
+    response, advertised = await _fetch_endpoints(selection.model)
     endpoints = [
         endpoint
         for endpoint in response.data.endpoints
@@ -184,17 +235,14 @@ async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
         if endpoint.supported_parameters is not None
     ]
     supported = set[str].intersection(*known_parameters) if known_parameters else None
-    if supported is not None:
-        if not {"tools", "tool_choice"} <= supported:
-            raise ValueError("Selected provider endpoints do not support tools and tool_choice")
-        for field, parameter in {
-            "temperature": "temperature",
-            "top_p": "top_p",
-            "top_k": "top_k",
-            "reasoning_effort": "reasoning",
-        }.items():
-            if getattr(selection.settings, field) is not None and parameter not in supported:
-                raise ValueError(f"Explicit settings.{field} is unsupported by selected endpoints")
+    # Explicit sampling and reasoning values are the provider's to accept or refuse.
+    if supported is not None and not {"tools", "tool_choice"} <= supported:
+        raise ValueError("Selected provider endpoints do not support tools and tool_choice")
+    effort = selection.settings.reasoning_effort
+    efforts = advertised.supported_efforts if advertised is not None else None
+    if effort is not None and efforts is not None and effort not in efforts:
+        # OpenRouter remaps valid-but-unadvertised efforts without an error.
+        logger.warning("reasoning_effort.unadvertised effort=%s advertised=%s", effort, efforts)
 
     completion_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
     if supported is not None and "max_tokens" not in supported:
@@ -242,5 +290,8 @@ async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
             "parameter_metadata_complete": len(known_parameters) == len(endpoints),
             "completion_token_parameter": completion_parameter,
             "endpoint_status_policy": "Only status=0 accepted; not a health guarantee",
+            "advertised_reasoning": advertised.model_dump(mode="json")
+            if advertised is not None
+            else None,
         },
     )

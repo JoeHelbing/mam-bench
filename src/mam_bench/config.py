@@ -19,10 +19,8 @@ class AgentSettings(BaseModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
     top_p: float | None = Field(default=None, gt=0, le=1)
     top_k: int | None = Field(default=None, ge=0)
-    # "max" is an OpenRouter effort above xhigh; native runtimes have no equivalent.
-    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None = (
-        None
-    )
+    # Forwarded verbatim; the provider owns the vocabulary and rejects what it lacks.
+    reasoning_effort: str | None = Field(default=None, min_length=1)
     max_completion_tokens: int | None = Field(default=None, gt=0)
     concurrency: int = Field(default=4, gt=0)
     tool_choice: Literal["required", "auto"] | None = None
@@ -97,8 +95,6 @@ class ModelSelection(BaseModel):
             raise ValueError(f"Missing fields for {self.runtime}: {sorted(missing)}")
         if self.runtime == "openrouter" and re.fullmatch(r"\S+/\S+", self.model) is None:
             raise ValueError("OpenRouter model must use vendor/model format")
-        if self.runtime != "openrouter" and self.settings.reasoning_effort == "max":
-            raise ValueError("reasoning_effort 'max' requires the openrouter runtime")
         return self
 
     @property

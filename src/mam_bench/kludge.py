@@ -12,6 +12,7 @@ to apply in their own vLLM environment.
 from typing import Literal, cast
 
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
+from openai.types.shared import ReasoningEffort
 from pydantic_ai._json_schema import JsonSchema
 from pydantic_ai.messages import FinishReason, ModelResponse
 from pydantic_ai.models.openai import (
@@ -19,7 +20,6 @@ from pydantic_ai.models.openai import (
     OpenAIChatModelSettings,
     OpenAIStreamedResponse,
 )
-from pydantic_ai.models.openrouter import OpenRouterReasoning
 from pydantic_ai.profiles.openai import OpenAIJsonSchemaTransformer
 from pydantic_ai.settings import ModelSettings
 
@@ -122,18 +122,6 @@ class VLLMChatModel(OpenAIChatModel):
         return result
 
 
-def openrouter_reasoning(effort: str) -> OpenRouterReasoning:
-    """Send the configured OpenRouter effort instead of PydanticAI's lossy map.
-
-    PydanticAI 2.55 maps unified 'xhigh' to OpenRouter 'high' and has no 'max',
-    though OpenRouter accepts both. DeepSeek V4.1 Flash on DeepInfra advertises
-    max/high/low/none; six probes each on 2026-10-21 averaged 15.5k reasoning
-    tokens at max versus 10.3k at high. Remove when the native map forwards
-    every OpenRouter effort unchanged.
-    """
-    return cast(OpenRouterReasoning, {"effort": effort})
-
-
 def vllm_settings(selection: ModelSelection, settings: ModelSettings) -> OpenAIChatModelSettings:
     """Forward explicit thinking settings that native profile inference drops.
 
@@ -163,5 +151,5 @@ def vllm_settings(selection: ModelSelection, settings: ModelSettings) -> OpenAIC
             "chat_template_kwargs": chat_settings,
         }
     else:
-        resolved["openai_reasoning_effort"] = effort
+        resolved["openai_reasoning_effort"] = cast(ReasoningEffort, effort)
     return resolved

@@ -30,7 +30,16 @@ the exact settings, scored/controlled identities, both outcomes and termination,
 and calculated scores. Those same result objects feed saved and displayed totals.
 The effective setup records discovered context/capabilities separately from
 requested settings. It does not claim to know unreported endpoint generation
-defaults. Native CLI telemetry records request/token/cache
+defaults. Requested sampling and reasoning values are forwarded verbatim; the
+provider accepts or refuses them. For OpenRouter, `advertised_reasoning` records
+the catalog's reasoning options beside the requested effort, and an unadvertised
+effort logs `reasoning_effort.unadvertised` without stopping the run, because
+OpenRouter can remap such efforts silently. Before any case starts, one probe
+request with the run's settings must succeed; a refusal stops setup with kind
+`provider_probe` and the provider's reason. The probe is not instrumented, so
+run statistics exclude it. `logs.jsonl` records each distinct request body once
+as `request.wire`, with conversation `messages`/`input` omitted because traces
+already hold them. Native CLI telemetry records request/token/cache
 usage, including summary calls and requests completed before a later failure.
 An absent or zero cache-token count does not establish a measured cache miss.
 Native model spans retain per-response usage. Direct library users can

@@ -58,6 +58,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 f"Failed case: {config.cases[error.case_index].model_dump_json()}", file=sys.stderr
             )
         print(error, file=sys.stderr)
+        if error.case_index is None and error.__cause__ is not None:
+            # Setup refusals carry the provider's own reason; show it, not just the kind.
+            print(error.__cause__, file=sys.stderr)
         return 1
     print(f"Model: {result.model.model}")
     print(f"Combined Benchmark Score: {result.total_score:+.6f}")

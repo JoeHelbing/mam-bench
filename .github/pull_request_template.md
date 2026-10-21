@@ -8,6 +8,4 @@
 
 <!-- List checks run from the README; explain any that were not run. Do not include credentials or private model conversations. -->
 
-<!-- For test changes, follow CONTRIBUTING.md#testing-changes: identify the behavior
-and independent expectation, give regression-failure evidence, and explain any
-changed expectations, removed assertions, or skips. Note relevant suite checks. -->
+<!-- For testing expectations and review guidance, see CONTRIBUTING.md#testing-changes. -->

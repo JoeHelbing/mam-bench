@@ -2,10 +2,34 @@
 
 ## Why
 
-<!-- Describe the problem and what changed. Note any effect on benchmark behavior or scoring. -->
+<!-- Describe the problem, expected behavior, and why the change is needed.
+Link the issue or reproduction when available. -->
 
-## Checks
+## What changed
 
-<!-- List checks run from the README; explain any that were not run. Do not include credentials or private model conversations. -->
+<!-- Summarize the changes a reviewer should focus on. Call out effects on
+simulation rules, scoring, configuration, provider requests, or saved artifacts. -->
 
-<!-- For testing expectations and review guidance, see CONTRIBUTING.md#testing-changes. -->
+## Test coverage
+
+<!-- Follow CONTRIBUTING.md#testing-changes. For documentation-only changes,
+explain why behavioral test changes are unnecessary. -->
+
+- Behavior protected, and the scenario or existing tests that cover it:
+- Source of the expected result, and regression-failure evidence where applicable:
+- Justification for removed tests, changed expectations, assertions, or skips:
+
+## Verification
+
+<!-- Commands and requirements are in CONTRIBUTING.md#verification-checks.
+Check only items actually run and passed. Report results and explain unchecked
+items, including checks intentionally skipped for documentation-only changes.
+Do not include credentials, private model conversations, or paid-provider logs. -->
+
+- [ ] Full offline unittest suite
+- [ ] Ruff lint
+- [ ] Ruff format check
+- [ ] Strict Pyright
+- [ ] git diff --check
+
+Results, checks not run, and remaining limitations:

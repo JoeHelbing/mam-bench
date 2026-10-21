@@ -4,7 +4,50 @@ MAM-Bench is an early, solo-maintained research project. Its interfaces, suites,
 
 For a bug, include a small reproduction, expected and actual behavior, and the version or commit tested. For a proposed change, explain the problem and its effect on benchmark behavior. Do not post credentials, private model conversations, or paid-provider logs.
 
-Target `dev` for changes. Use a Conventional Commit PR title such as `fix: correct case validation` or `feat(schelling): add a scenario`; feature PRs are squash-merged. Keep the change focused and run the local checks from [README.md](README.md#quickstart). Say which checks you ran and note any that you could not run. Those checks do not require model calls; running a benchmark can incur provider charges.
+Target `dev` for changes. Use a Conventional Commit PR title such as `fix: correct case validation` or `feat(schelling): add a scenario`; feature PRs are squash-merged. Keep the change focused and complete the [verification checks](#verification-checks). Say which checks you ran and note any that you could not run. Those checks do not require model calls; running a benchmark can incur provider charges.
+
+## Verification checks
+
+Run commands from the repository root. Use Python 3.14.7 and uv 0.12.7, as pinned
+in [mise.toml](mise.toml). If the environment is not ready, prepare the locked
+runtime dependencies first:
+
+```fish
+uv python install 3.14.7
+uv sync --frozen --no-dev
+```
+
+For code or test changes, run all of the following before opening or updating a
+PR. These commands match the test, lint, format, and type checks in
+[CI](.github/workflows/ci.yml), plus a local whitespace check:
+
+```fish
+# Run the full offline suite.
+uv run --no-sync python -m unittest discover -s tests -v
+
+# Check lint and formatting with the pinned Ruff version.
+uvx --from ruff==0.16.5 ruff check src tests main.py
+uvx --from ruff==0.16.5 ruff format --check src tests main.py
+
+# Run strict type checking against the project environment; requires Node.js/npm.
+npx --yes pyright@1.1.413 --pythonpath .venv/bin/python
+
+# Check the patch for whitespace errors.
+git diff --check
+```
+
+Use installed tools at the same versions if available; `uvx` and `npx` may download
+their pinned tools. The tests use synthetic provider responses and require no
+model credentials or paid inference calls. Real-provider benchmark evaluations
+are separate and are not required for an ordinary PR.
+
+During development, run the affected scenarios on their own before the full
+suite. For documentation-only changes, inspect the rendered structure, local
+links, and any documented commands, and run `git diff --check`; explain why the
+application checks were not rerun. In every PR, report checks actually run and
+their results, with reasons for skipped or unavailable checks. An unchecked box
+is not a successful check. GitHub also verifies the Conventional Commit PR title
+and runs the application checks on the published revision.
 
 ## Testing changes
 
@@ -83,7 +126,7 @@ and restore environment variables, patches, clients, and other shared state.
 Prefer explicit synchronization to timing sleeps in concurrency scenarios.
 Run changed scenarios alone and then with the relevant suite to catch state
 pollution. Repeated passing runs can expose flakiness but do not prove its absence.
-Before submitting, run the [local checks](README.md#quickstart)
+Before submitting, run the [verification checks](#verification-checks)
 and report any checks that could not run. Real provider evaluations remain separate
 because they require credentials and can incur charges.
 

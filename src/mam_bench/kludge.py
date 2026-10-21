@@ -19,6 +19,7 @@ from pydantic_ai.models.openai import (
     OpenAIChatModelSettings,
     OpenAIStreamedResponse,
 )
+from pydantic_ai.models.openrouter import OpenRouterReasoning
 from pydantic_ai.profiles.openai import OpenAIJsonSchemaTransformer
 from pydantic_ai.settings import ModelSettings
 
@@ -119,6 +120,18 @@ class VLLMChatModel(OpenAIChatModel):
                 "stop_reason": "repetition_detected",
             }
         return result
+
+
+def openrouter_reasoning(effort: str) -> OpenRouterReasoning:
+    """Send the configured OpenRouter effort instead of PydanticAI's lossy map.
+
+    PydanticAI 2.55 maps unified 'xhigh' to OpenRouter 'high' and has no 'max',
+    though OpenRouter accepts both. DeepSeek V4.1 Flash on DeepInfra advertises
+    max/high/low/none; six probes each on 2026-10-21 averaged 15.5k reasoning
+    tokens at max versus 10.3k at high. Remove when the native map forwards
+    every OpenRouter effort unchanged.
+    """
+    return cast(OpenRouterReasoning, {"effort": effort})
 
 
 def vllm_settings(selection: ModelSelection, settings: ModelSettings) -> OpenAIChatModelSettings:

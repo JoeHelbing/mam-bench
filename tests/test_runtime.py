@@ -579,6 +579,30 @@ class ModelProviderTests(SandboxTestCase):
                 self.assertEqual(sent["temperature"], 1.0 if sampling else omit)
                 self.assertEqual(sent["top_p"], 0.95 if sampling else omit)
 
+    async def test_openrouter_sends_configured_reasoning_effort_verbatim(self) -> None:
+        for effort in ("xhigh", "max"):
+            with self.subTest(effort=effort):
+                model = create_model(
+                    ModelSelection(
+                        runtime="openrouter",
+                        model="deepseek/deepseek-v4.1-flash",
+                        provider="deepinfra/fp8",
+                        settings=AgentSettings(reasoning_effort=effort),
+                    )
+                )
+                assert isinstance(model, OpenRouterModel)
+                self.addAsyncCleanup(model.client.close)
+                request = AsyncMock(return_value=completion())
+                with patch.object(model.client.chat.completions, "create", request):
+                    await model.request(
+                        [ModelRequest(parts=[UserPromptPart("Respond.")])],
+                        None,
+                        ModelRequestParameters(),
+                    )
+                body = request.call_args.kwargs["extra_body"]
+                self.assertEqual(body["reasoning"]["effort"], effort)
+                self.assertEqual(body["provider"]["only"], ["deepinfra/fp8"])
+
     async def test_civil_citizen_defer_uses_per_model_strict_schema(self) -> None:
         for strict in (False, True):
             with self.subTest(strict=strict), tempfile.TemporaryDirectory() as directory:

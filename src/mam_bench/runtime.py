@@ -22,7 +22,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, ModelSelection
-from mam_bench.kludge import OpenAIFixedArrayTransformer, VLLMChatModel, vllm_settings
+from mam_bench.kludge import (
+    OpenAIFixedArrayTransformer,
+    VLLMChatModel,
+    openrouter_reasoning,
+    vllm_settings,
+)
 
 
 @dataclass(frozen=True)
@@ -81,9 +86,9 @@ def create_model(selection: ModelSelection) -> Model:
         request_settings["temperature"] = agent_settings.temperature
     if agent_settings.top_p is not None:
         request_settings["top_p"] = agent_settings.top_p
-    if agent_settings.reasoning_effort is not None:
+    if (effort := agent_settings.reasoning_effort) is not None:
         request_settings["thinking"] = (
-            False if agent_settings.reasoning_effort == "none" else agent_settings.reasoning_effort
+            False if effort == "none" else "xhigh" if effort == "max" else effort
         )
     if agent_settings.top_k is not None:
         request_settings["extra_body"] = {"top_k": agent_settings.top_k}
@@ -150,6 +155,8 @@ def create_model(selection: ModelSelection) -> Model:
                 "require_parameters": True,
             },
         )
+        if effort is not None:
+            router_settings["openrouter_reasoning"] = openrouter_reasoning(effort)
         router_settings["openrouter_cache_instructions"] = True
         router_settings["openrouter_cache_messages"] = True
         router_settings["openrouter_cache_tool_definitions"] = True

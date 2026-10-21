@@ -226,6 +226,16 @@ class ConfigurationTests(unittest.TestCase):
         selected = ModelSelection.model_validate({**base, "settings": {"temperature": 1.0}})
         self.assertEqual(selected.settings.model_fields_set, {"temperature"})
 
+    def test_max_reasoning_effort_is_openrouter_only(self) -> None:
+        from mam_bench.config import ModelSelection
+
+        maximum = {"settings": {"reasoning_effort": "max"}}
+        ModelSelection.model_validate(
+            {"runtime": "openrouter", "model": "vendor/model", "provider": "p", **maximum}
+        )
+        with self.assertRaises(ValidationError):
+            ModelSelection.model_validate({"runtime": "openai", "model": "gpt-x", **maximum})
+
     def test_agent_budget_and_sampling_settings_validate(self) -> None:
         for settings in (
             {"concurrency": 0},

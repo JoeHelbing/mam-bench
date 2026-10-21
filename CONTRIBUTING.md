@@ -38,8 +38,9 @@ git diff --check
 
 Use installed tools at the same versions if available; `uvx` and `npx` may download
 their pinned tools. The tests use synthetic provider responses and require no
-model credentials or paid inference calls. Real-provider benchmark evaluations
-are separate and are not required for an ordinary PR.
+model credentials or paid inference calls. They are one part of verification;
+changes to real-input handling also need the
+[artifact-based validation](#end-to-end-validation-with-actual-artifacts) below.
 
 During development, run the affected scenarios on their own before the full
 suite. For documentation-only changes, inspect the rendered structure, local
@@ -48,6 +49,59 @@ application checks were not rerun. In every PR, report checks actually run and
 their results, with reasons for skipped or unavailable checks. An unchecked box
 is not a successful check. GitHub also verifies the Conventional Commit PR title
 and runs the application checks on the published revision.
+
+## End-to-end validation with actual artifacts
+
+When changing how input is acquired, interpreted, processed, or saved, exercise
+the actual workflow on representative real inputs during development. Use the
+resulting artifacts to refine the implementation. Passing automated tests or
+showing that a prototype exits successfully does not establish that its outputs
+are useful or correct on the data it will encounter.
+
+For example, when building a scraper, process a few hundred real pages spanning
+the relevant layouts and failure cases. Retain the fetched pages and extracted
+records, inspect them together, identify missing or incorrect fields, refine the
+scraper, and rerun against the same inputs. Choose the sample size and variety to
+expose the workflow's likely failures; this example is not a page-count quota for
+every contribution.
+
+For MAM-Bench, relevant inputs include captured provider responses and streams,
+retained conversations, and completed or interrupted run archives. Exercise the
+changed path using those inputs and inspect its resulting actions, trajectories,
+scores, or persisted records. Replaying genuine captured data is useful even when
+a live run is unavailable. State what replay cannot establish about current
+provider or serving behavior. Synthetic fixtures remain useful for controlled
+checks, but describe them as synthetic rather than as real-world validation.
+
+Use this development loop:
+
+1. **Define the question.** State the behavior or quality being investigated and
+   what observations would support or reject the proposed approach.
+2. **Select inputs.** Record their source, sample size, selection method, and
+   relevant variation, including ordinary, unusual, and failed or partial cases.
+   Explain important gaps instead of assuming a convenient sample is representative.
+3. **Run the real path.** Record the revision, commands, configuration, and
+   environment needed to repeat the trial. Retain the inputs and outputs so a
+   later code change can be compared against the same material.
+4. **Inspect artifacts.** Compare outputs with their inputs and intended meaning.
+   Inspect examples and all observed failure categories, and measure the relevant
+   properties: extraction completeness, dropped records, replay mismatches, stream
+   truncation, or resource use. Report denominators as well as successes.
+5. **Refine and rerun.** Describe the failures found, the changes they prompted,
+   and the results of another pass over the retained inputs. Preserve useful
+   failing examples as small, appropriate regression fixtures when practical.
+6. **Report the finding.** Include the process, artifact references, results,
+   refinements, and remaining limitations in the PR's dedicated section. Explain
+   what was actually inspected and distinguish observations from conclusions.
+
+Keep exploratory code and bulk trial artifacts in Git-ignored `.scratch/`. Give
+reviewers shareable artifact references or reproduction steps; a local scratch
+path alone is not accessible evidence for another person. Keep credentials and
+private model conversations out of public PRs. Use authorized captured material
+or scoped live runs; this policy does not authorize paid evaluations or changes
+to production data. For documentation-only changes or other cases where an
+artifact trial adds no useful evidence, explain why it is not applicable. If
+access or resources prevent a needed trial, state what remains unverified.
 
 ## Testing changes
 

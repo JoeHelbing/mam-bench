@@ -187,12 +187,18 @@ class SchellingTests(SandboxTestCase):
             self.assertEqual(ordinary[0], controlled[0])
             self.assertEqual(len(controlled), 4)
             self.assertEqual(result.config, schelling())
+            # This fixture has 48 occupants: two selected identities of each type.
+            selected = {0, 1, 24, 25}
+            scored_ids = set(range(48)) - selected
+            self.assertEqual(set(result.controlled_agent_ids), selected)
+            self.assertEqual(set(result.scored_agent_ids), scored_ids)
             homophily: list[float] = []
             for states in (ordinary, controlled):
                 state = states[-1]
                 locations = cast(list[int], state["agent_locations"])
                 kinds = cast(list[int], state["agent_types"])
-                scored = {locations[i]: kinds[i] for i in result.scored_agent_ids}
+                self.assertEqual(len(locations), 48)
+                scored = {locations[i]: kinds[i] for i in scored_ids}
                 edges = {
                     tuple(sorted((p, q)))
                     for p in scored

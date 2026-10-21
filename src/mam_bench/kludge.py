@@ -22,7 +22,7 @@ from pydantic_ai.models.openai import (
 from pydantic_ai.profiles.openai import OpenAIJsonSchemaTransformer
 from pydantic_ai.settings import ModelSettings
 
-from mam_bench.config import VLLMModel
+from mam_bench.config import ModelSelection
 
 
 def modal_filesystem_error_workaround() -> None:
@@ -121,7 +121,7 @@ class VLLMChatModel(OpenAIChatModel):
         return result
 
 
-def vllm_settings(selection: VLLMModel, settings: ModelSettings) -> OpenAIChatModelSettings:
+def vllm_settings(selection: ModelSelection, settings: ModelSettings) -> OpenAIChatModelSettings:
     """Forward explicit thinking settings that native profile inference drops.
 
     Qwen3.8-27B: preserve the chat-template switch/effort from c5e1b26 on

@@ -14,15 +14,18 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, BenchmarkConfig, CaseSettings, ModelSelection
-from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunFailure, BenchmarkRunner
+from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
+from mam_bench.simulations.schelling.simulation import SchellingSim
 from support import (
     SandboxTestCase,
     civil,
     observation,
     records,
+    runtime,
     schelling,
     selection,
+    served_model,
     stay,
     streaming_model,
 )
@@ -31,12 +34,7 @@ from support import (
 class RunnerTests(SandboxTestCase):
     def setUp(self) -> None:
         super().setUp()
-        discovery = patch(
-            "mam_bench.model_setup._fetch_vllm_model",
-            AsyncMock(return_value=VLLMModelMetadata(id="scripted", max_model_len=260_000)),
-        )
-        discovery.start()
-        self.addCleanup(discovery.stop)
+        self.enterContext(served_model())
 
     async def test_complete_suite_order_fresh_case_state_and_saved_total(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -68,11 +66,49 @@ class RunnerTests(SandboxTestCase):
             again = await rerun.run()
             self.assertNotEqual(runner.output_directory, rerun.output_directory)
             self.assertEqual(result, again)
+            self.assertTrue(self.sandboxes)
+            self.assertTrue(all(sandbox.closed for sandbox in self.sandboxes))
             self.assertTrue(
                 all(
                     (runner.output_directory / p).read_bytes() == data for p, data in before.items()
                 )
             )
+
+    async def test_failed_and_cancelled_cases_close_their_sandboxes(self) -> None:
+        for kind in ("schelling", "civil-violence"):
+            for cancel in (False, True):
+                with (
+                    self.subTest(simulation=kind, cancel=cancel),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    entered = asyncio.Event()
+
+                    async def model(
+                        messages: list[ModelMessage],
+                        info: AgentInfo,
+                        *,
+                        entered: asyncio.Event = entered,
+                        cancel: bool = cancel,
+                    ) -> ModelResponse:
+                        entered.set()
+                        if cancel:
+                            await asyncio.Event().wait()
+                        raise RuntimeError("simulated model failure")
+
+                    simulation = (
+                        SchellingSim(schelling())
+                        if kind == "schelling"
+                        else CivilViolenceSim(civil())
+                    )
+                    resources = runtime(Path(directory) / "case", FunctionModel(model))
+                    task = asyncio.create_task(simulation.evaluate(resources))
+                    await asyncio.wait_for(entered.wait(), 10)
+                    if cancel:
+                        task.cancel()
+                    with self.assertRaises(asyncio.CancelledError if cancel else RuntimeError):
+                        await task
+                    self.assertTrue(self.sandboxes)
+                    self.assertTrue(all(sandbox.closed for sandbox in self.sandboxes))
 
     async def test_preflight_records_effective_model_before_first_case(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -5,7 +5,7 @@ import io
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import main
 import yaml
@@ -14,9 +14,16 @@ from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from mam_bench.config import BenchmarkConfig
-from mam_bench.model_setup import VLLMModelMetadata
 from mam_bench.runner import BenchmarkRunner
-from support import SandboxTestCase, civil, schelling, selection, stay, streaming_model
+from support import (
+    SandboxTestCase,
+    civil,
+    schelling,
+    selection,
+    served_model,
+    stay,
+    streaming_model,
+)
 
 
 class MainTests(SandboxTestCase):
@@ -26,12 +33,7 @@ class MainTests(SandboxTestCase):
         environment = patch.dict(os.environ, {"LOGFIRE_TOKEN": ""})
         environment.start()
         self.addCleanup(environment.stop)
-        discovery = patch(
-            "mam_bench.model_setup._fetch_vllm_model",
-            AsyncMock(return_value=VLLMModelMetadata(id="scripted", max_model_len=260_000)),
-        )
-        discovery.start()
-        self.addCleanup(discovery.stop)
+        self.enterContext(served_model())
 
     def files(self, root: Path) -> list[str]:
         (root / "model.yaml").write_text(yaml.safe_dump(selection().model_dump()))

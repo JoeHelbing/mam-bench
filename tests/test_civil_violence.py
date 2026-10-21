@@ -165,21 +165,43 @@ class CivilViolenceTests(SandboxTestCase):
                         objective=goal,
                         police_density=0.25 if role == "police" else 0,
                     )
-                    resources = runtime(Path(directory) / "case")
+                    observed_ids: set[int] = set()
+
+                    async def policy(
+                        messages: list[ModelMessage],
+                        info: AgentInfo,
+                        *,
+                        observed_ids: set[int] = observed_ids,
+                    ) -> ModelResponse:
+                        # Observe participants through the model interface, independently
+                        # of the result's controlled/scored identity lists.
+                        observed_ids.add(
+                            int(cast(str, info.instructions).split("Identity: ")[1].split(".")[0])
+                        )
+                        return await stay(messages, info)
+
+                    resources = runtime(Path(directory) / "case", FunctionModel(policy))
                     result = await CivilViolenceSim(settings).evaluate(resources)
                     ordinary = records(resources.writer.directory / "ordinary.jsonl")
                     controlled = records(resources.writer.directory / "controlled.jsonl")
                     self.assertEqual(ordinary[0], controlled[0])
                     self.assertEqual(len(result.controlled_agent_ids), 16)
-                    self.assertTrue(
-                        set(result.controlled_agent_ids).isdisjoint(result.scored_agent_ids)
-                    )
+                    # The fixture has 48 citizens; police control excludes no citizens.
+                    selected = observed_ids
+                    self.assertEqual(len(selected), 16)
+                    self.assertEqual(set(result.controlled_agent_ids), selected)
+                    pool = set(range(48)) if role == "citizen" else set(range(48, 64))
+                    self.assertTrue(selected <= pool)
+                    scored_ids = set(range(48)) - selected
+                    self.assertEqual(set(result.scored_agent_ids), scored_ids)
                     shares: list[float] = []
+                    revolutions: list[bool] = []
                     for states, outcome in (
                         (ordinary, result.reference),
                         (controlled, result.controlled),
                     ):
                         self.assertEqual(len(states), outcome.steps + 1)
+                        participation: list[float] = []
                         for state in states:
                             citizens = cast(list[dict[str, object]], state["citizens"])
                             police = cast(list[dict[str, object]], state["police"])
@@ -189,24 +211,37 @@ class CivilViolenceTests(SandboxTestCase):
                                 if c["location"] is not None
                             ]
                             self.assertEqual(len(locations), len(set(locations)))
-                        final = [
-                            c
-                            for c in cast(list[dict[str, object]], states[-1]["citizens"])
-                            if c["agent_id"] in result.scored_agent_ids
-                        ]
-                        share = sum(
-                            bool(c["active"]) or c["location"] is None for c in final
-                        ) / len(final)
-                        shares.append(share)
-                        self.assertEqual(share, outcome.participation[-1])
+                            self.assertEqual({c["agent_id"] for c in citizens}, set(range(48)))
+                            counted = [c for c in citizens if c["agent_id"] in scored_ids]
+                            participating = sum(
+                                bool(c["active"]) or c["location"] is None for c in counted
+                            )
+                            participation.append(participating / len(scored_ids))
+                        shares.append(participation[-1])
+                        self.assertEqual(tuple(participation), outcome.participation)
+                        # Only completed cycles count; initialization cannot end the run.
+                        first_revolution = next(
+                            (
+                                step
+                                for step, share in enumerate(participation)
+                                if step and share >= 0.95
+                            ),
+                            None,
+                        )
+                        revolutions.append(first_revolution is not None)
+                        self.assertEqual(
+                            outcome.termination,
+                            "revolution" if first_revolution is not None else "horizon",
+                        )
+                        self.assertEqual(
+                            outcome.steps,
+                            first_revolution
+                            if first_revolution is not None
+                            else settings.max_steps,
+                        )
                     direction = 1 if goal == "increase" else -1
                     replay = direction * (
-                        100 * (shares[1] - shares[0])
-                        + 100
-                        * (
-                            (result.controlled.termination == "revolution")
-                            - (result.reference.termination == "revolution")
-                        )
+                        100 * (shares[1] - shares[0]) + 100 * (revolutions[1] - revolutions[0])
                     )
                     self.assertAlmostEqual(result.score, replay)
                     self.assertEqual(

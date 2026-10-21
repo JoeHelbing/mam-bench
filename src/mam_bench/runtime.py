@@ -6,18 +6,22 @@ from typing import cast
 from openai import AsyncOpenAI
 from pydantic import Field, SecretStr
 from pydantic_ai.models import Model
+from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
+from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
 from pydantic_ai.models.openrouter import (
     OpenRouterModel,
     OpenRouterModelSettings,
 )
 from pydantic_ai.profiles.openai import OpenAIModelProfile
+from pydantic_ai.providers.anthropic import AnthropicProvider
+from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.providers.vllm import VLLMProvider
 from pydantic_ai.settings import ModelSettings
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from mam_bench.artifacts import ArtifactWriter
-from mam_bench.config import AgentSettings, ModelSelection, VLLMModel
+from mam_bench.config import AgentSettings, ModelSelection
 from mam_bench.kludge import OpenAIFixedArrayTransformer, VLLMChatModel, vllm_settings
 
 
@@ -84,7 +88,39 @@ def create_model(selection: ModelSelection) -> Model:
     if agent_settings.top_k is not None:
         request_settings["extra_body"] = {"top_k": agent_settings.top_k}
 
-    if isinstance(selection, VLLMModel):
+    if selection.runtime == "anthropic":
+        request_settings.pop("extra_body", None)
+        if agent_settings.top_k is not None:
+            request_settings["top_k"] = agent_settings.top_k
+        if agent_settings.tool_choice is not None:
+            request_settings["tool_choice"] = agent_settings.tool_choice
+        return AnthropicModel(
+            selection.model,
+            provider=AnthropicProvider(),
+            settings=AnthropicModelSettings(
+                **request_settings,
+                anthropic_cache=True,
+                anthropic_cache_instructions=True,
+                anthropic_cache_tool_definitions=True,
+            ),
+        )
+
+    if selection.runtime == "openai":
+        if agent_settings.top_k is not None:
+            raise ValueError("OpenAI does not support settings.top_k")
+        profile["json_schema_transformer"] = OpenAIFixedArrayTransformer
+        return OpenAIResponsesModel(
+            selection.model,
+            provider=OpenAIProvider(),
+            profile=profile,
+            settings=OpenAIResponsesModelSettings(
+                **request_settings,
+                openai_store=False,
+                openai_prompt_cache_key=f"mam-bench:{selection.model}",
+            ),
+        )
+
+    if selection.runtime == "vllm":
         if selection.repetition_detection is not None:
             request_settings["extra_body"] = {
                 **cast(dict[str, object], request_settings.get("extra_body") or {}),
@@ -100,6 +136,7 @@ def create_model(selection: ModelSelection) -> Model:
             settings=vllm_settings(selection, request_settings),
         )
     else:
+        assert selection.provider is not None
         settings = OpenRouterSettings()  # pyright: ignore[reportCallIssue]
         if selection.model.startswith("openai/"):
             profile["json_schema_transformer"] = OpenAIFixedArrayTransformer

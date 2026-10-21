@@ -4,11 +4,14 @@ import json
 import os
 import tempfile
 import unittest
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
+import httpx2 as httpx
+from openai import AsyncOpenAI
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -30,7 +33,7 @@ from pydantic_ai.models.function import (
 from pydantic_ai.workspaces import LocalWorkspaceBackend, WorkspaceRef
 
 from mam_bench.artifacts import ArtifactWriter
-from mam_bench.config import AgentSettings, VLLMModel
+from mam_bench.config import AgentSettings, ModelSelection
 from mam_bench.runtime import CaseRuntime
 from mam_bench.simulations.civil_violence.settings import CivilViolenceSettings
 from mam_bench.simulations.schelling.settings import SchellingSettings
@@ -121,12 +124,37 @@ def civil(**updates: object) -> CivilViolenceSettings:
     )
 
 
-def selection() -> VLLMModel:
-    return VLLMModel(
+def selection() -> ModelSelection:
+    return ModelSelection(
         runtime="vllm",
         model="scripted",
         base_url="http://127.0.0.1:1/v1",
     )
+
+
+@contextmanager
+def served_model() -> Generator[None]:
+    """Serve real offline discovery requests for scripted benchmark runs."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert (request.method, request.url.path) == ("GET", "/v1/models")
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "scripted", "max_model_len": 260_000}]},
+        )
+
+    def client(**_: object) -> AsyncOpenAI:
+        return AsyncOpenAI(
+            api_key="offline-test-key",
+            base_url="https://provider.example.test/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        )
+
+    with (
+        patch.dict(os.environ, {"UNUSED_OFFLINE_TEST_KEY": "offline-test-key"}),
+        patch("mam_bench.model_setup.AsyncOpenAI", side_effect=client),
+    ):
+        yield
 
 
 def observation(messages: list[ModelMessage]) -> dict[str, object]:

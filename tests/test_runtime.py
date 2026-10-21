@@ -22,11 +22,11 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.openrouter import OpenRouterModel
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition
 
 from mam_bench.artifacts import ArtifactWriter
-from mam_bench.config import AgentSettings, VLLMModel
-from mam_bench.config import OpenRouterModel as OpenRouterSelection
+from mam_bench.config import AgentSettings, ModelSelection
 from mam_bench.runtime import CaseRuntime, create_model
 from mam_bench.sessions import AgentSessions, Completed
 from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
@@ -112,7 +112,7 @@ class ModelProviderTests(SandboxTestCase):
                     os.environ["VLLM_API_KEY"] = key
                 with chdir(directory):
                     model = create_model(
-                        VLLMModel(
+                        ModelSelection(
                             runtime="vllm",
                             model="vendor/test-model",
                             base_url="https://compatible.example.test/v1",
@@ -135,7 +135,7 @@ class ModelProviderTests(SandboxTestCase):
             with self.subTest(model=model_name):
                 settings = AgentSettings(timeout_seconds=3)
                 model = create_model(
-                    OpenRouterSelection(
+                    ModelSelection(
                         runtime="openrouter", model=model_name, provider="openai", settings=settings
                     )
                 )
@@ -157,9 +157,10 @@ class ModelProviderTests(SandboxTestCase):
                     if tool["function"]["name"] == "move"
                 )
                 alternatives = schema["properties"]["destination"]["anyOf"]
-                self.assertEqual(alternatives[1], {"type": "null"})
+                self.assertIn({"type": "null"}, alternatives)
+                array = next(branch for branch in alternatives if branch.get("type") == "array")
                 self.assertEqual(
-                    alternatives[0],
+                    array,
                     {
                         "type": "array",
                         "minItems": 2,
@@ -172,172 +173,115 @@ class ModelProviderTests(SandboxTestCase):
                     },
                 )
 
-    def router_model(self) -> OpenRouterModel:
-        model = create_model(
-            OpenRouterSelection(
-                runtime="openrouter",
-                model="vendor/test-model",
-                provider="selected-provider",
-            )
-        )
-        assert isinstance(model, OpenRouterModel)
-        self.addAsyncCleanup(model.client.close)
-        self.assertEqual(str(model.client.base_url), "https://router.example.test/v1/")
-        self.assertEqual(model.client.default_headers["X-Title"], "MAM-Bench")
-        return model
+    async def test_router_discovery_and_terminal_requests_keep_defaults_and_routing(self) -> None:
+        from mam_bench.model_setup import resolve_model_setup
 
-    async def test_openrouter_preserves_endpoint_defaults_and_terminal_tools(self) -> None:
-        model = self.router_model()
-        request = AsyncMock(return_value=completion(tool_call=True))
-        with patch.object(model.client.chat.completions, "create", request):
-            response = await model.request(
-                [ModelRequest(parts=[UserPromptPart("Choose an action.")])],
-                None,
-                ModelRequestParameters(
-                    output_mode="tool",
-                    output_tools=[
-                        ToolDefinition(
-                            name="stay",
-                            parameters_json_schema={"type": "object", "properties": {}},
-                            strict=True,
-                        )
-                    ],
-                    allow_text_output=False,
-                ),
-            )
-
-        request.assert_awaited_once()
-        sent = cast(dict[str, object], request.call_args.kwargs)
-        self.assertEqual(
-            sent["extra_body"],
-            {
-                "provider": {
-                    "only": ["selected-provider"],
-                    "allow_fallbacks": False,
-                    "require_parameters": True,
-                },
-            },
-        )
-        self.assertIs(sent["max_tokens"], omit)
-        self.assertIs(sent["max_completion_tokens"], omit)
-        self.assertIs(sent["temperature"], omit)
-        self.assertIs(sent["top_p"], omit)
-        self.assertEqual(sent["timeout"], 3_600.0)
-        self.assertIs(sent["seed"], omit)
-        self.assertIsNot(sent.get("parallel_tool_calls"), False)
-        self.assertEqual(sent["tool_choice"], "required")
-        tools = cast(list[dict[str, object]], sent["tools"])
-        function = cast(dict[str, object], tools[0]["function"])
-        self.assertEqual(function["name"], "stay")
-        self.assertIs(function["strict"], True)
-        self.assertIsInstance(response.parts[0], ToolCallPart)
-        self.assertEqual(response.usage.total_tokens, 12)
-
-    async def test_completion_parameter_reaches_sdk_http_body(self) -> None:
-        from mam_bench.model_setup import EndpointResponse, resolve_model_setup
-
-        for parameter in ("max_tokens", "max_completion_tokens"):
-            with self.subTest(parameter=parameter):
-                payload = EndpointResponse.model_validate(
-                    {
-                        "data": {
-                            "endpoints": [
-                                {
-                                    "tag": "azure",
-                                    "provider_name": "Azure",
-                                    "status": 0,
-                                    "context_length": 1047576,
-                                    "max_completion_tokens": 32768,
-                                    "supported_parameters": ["tools", "tool_choice", parameter],
-                                    "supports_tool_choice": {"required": True, "auto": True},
-                                }
-                            ]
-                        }
-                    }
-                )
-                with patch(
-                    "mam_bench.model_setup._fetch_endpoints", AsyncMock(return_value=payload)
-                ):
-                    setup = await resolve_model_setup(
-                        OpenRouterSelection(
-                            runtime="openrouter",
-                            model="openai/gpt-4.1",
-                            provider="azure",
-                        )
-                    )
-                max_tokens = setup.selection.settings.max_completion_tokens
-                assert max_tokens is not None
-                requests: list[dict[str, object]] = []
+        for parameter in (None, "max_tokens", "max_completion_tokens"):
+            with self.subTest(completion_parameter=parameter):
+                requests: list[httpx.Request] = []
 
                 def respond(
-                    request: httpx.Request, captured: list[dict[str, object]] = requests
+                    request: httpx.Request,
+                    *,
+                    parameter: str | None = parameter,
+                    requests: list[httpx.Request] = requests,
                 ) -> httpx.Response:
-                    captured.append(cast(dict[str, object], json.loads(request.content)))
-                    return httpx.Response(200, json=completion().model_dump(mode="json"))
+                    requests.append(request)
+                    self.assertEqual(request.url.host, "router.example.test")
+                    if request.method == "GET":
+                        self.assertEqual(request.url.path, "/v1/models/openai/gpt-4.1/endpoints")
+                        return httpx.Response(
+                            200,
+                            json={
+                                "data": {
+                                    "endpoints": [
+                                        {
+                                            "tag": "azure",
+                                            "provider_name": "Azure",
+                                            "status": 0,
+                                            "context_length": 1047576,
+                                            "max_completion_tokens": 32768,
+                                            "supported_parameters": [
+                                                "tools",
+                                                "tool_choice",
+                                                parameter,
+                                            ],
+                                            "supports_tool_choice": {
+                                                "required": True,
+                                                "auto": True,
+                                            },
+                                        }
+                                    ]
+                                }
+                            },
+                        )
+                    self.assertEqual(
+                        (request.method, request.url.path), ("POST", "/v1/chat/completions")
+                    )
+                    self.assertEqual(request.headers["X-Title"], "MAM-Bench")
+                    return httpx.Response(
+                        200, json=completion(tool_call=True).model_dump(mode="json")
+                    )
 
-                async with AsyncOpenAI(
-                    api_key="unused-offline-test-value",
-                    base_url="https://router.example.test/v1",
-                    http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
-                ) as client:
-                    with patch("mam_bench.runtime.AsyncOpenAI", return_value=client):
-                        model = create_model(setup.selection)
-                    await model.request(
+                def client(**kwargs: object) -> AsyncOpenAI:
+                    return AsyncOpenAI(
+                        base_url=cast(str, kwargs["base_url"]),
+                        api_key=cast(str, kwargs["api_key"]),
+                        default_headers=cast(dict[str, str], kwargs.get("default_headers", {})),
+                        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+                    )
+
+                with (
+                    patch("mam_bench.model_setup.AsyncOpenAI", side_effect=client),
+                    patch("mam_bench.runtime.AsyncOpenAI", side_effect=client),
+                ):
+                    selected = ModelSelection(
+                        runtime="openrouter", model="openai/gpt-4.1", provider="azure"
+                    )
+                    if parameter is not None:
+                        selected = (await resolve_model_setup(selected)).selection
+                    model = create_model(selected)
+                    assert isinstance(model, OpenRouterModel)
+                    self.addAsyncCleanup(model.client.close)
+                    request_settings: ModelSettings = {}
+                    if parameter:
+                        cap = selected.settings.max_completion_tokens
+                        assert cap is not None
+                        request_settings["max_tokens"] = cap
+                    response = await model.request(
                         [ModelRequest(parts=[UserPromptPart("Choose an action.")])],
-                        {"max_tokens": max_tokens},
+                        request_settings or None,
                         ModelRequestParameters(
                             output_mode="tool",
-                            allow_text_output=False,
                             output_tools=[
                                 ToolDefinition(
                                     name="stay",
                                     parameters_json_schema={"type": "object", "properties": {}},
+                                    strict=True,
                                 )
                             ],
+                            allow_text_output=False,
                         ),
                     )
-                self.assertEqual(len(requests), 1)
-                self.assertEqual(requests[0][parameter], 32768)
-                other = (
-                    "max_tokens"
-                    if parameter == "max_completion_tokens"
-                    else "max_completion_tokens"
-                )
-                self.assertNotIn(other, requests[0])
-                self.assertEqual(requests[0]["tool_choice"], "required")
+                self.assertEqual(len(requests), 2 if parameter else 1)
+                sent = json.loads(requests[-1].content)
                 self.assertEqual(
-                    requests[0]["provider"],
+                    sent["provider"],
                     {"only": ["azure"], "allow_fallbacks": False, "require_parameters": True},
                 )
-
-    async def test_unconfigured_request_leaves_parameters_unset(self) -> None:
-        selected = OpenRouterSelection(
-            runtime="openrouter", model="vendor/test-model", provider="selected-provider"
-        )
-        model = create_model(selected)
-        assert isinstance(model, OpenRouterModel)
-        self.addAsyncCleanup(model.client.close)
-        request = AsyncMock(return_value=completion())
-        with patch.object(model.client.chat.completions, "create", request):
-            await model.request(
-                [ModelRequest(parts=[UserPromptPart("Respond.")])], None, ModelRequestParameters()
-            )
-        sent = cast(dict[str, object], request.call_args.kwargs)
-        self.assertIs(sent["temperature"], omit)
-        self.assertIs(sent["top_p"], omit)
-        self.assertEqual(
-            sent["extra_body"],
-            {
-                "provider": {
-                    "only": ["selected-provider"],
-                    "allow_fallbacks": False,
-                    "require_parameters": True,
-                }
-            },
-        )
+                self.assertEqual(sent["tool_choice"], "required")
+                self.assertIs(sent["tools"][0]["function"]["strict"], True)
+                for field in ("temperature", "top_p", "seed"):
+                    self.assertNotIn(field, sent)
+                if parameter:
+                    self.assertEqual(sent[parameter], 32768)
+                for field in {"max_tokens", "max_completion_tokens"} - {parameter}:
+                    self.assertNotIn(field, sent)
+                self.assertIsInstance(response.parts[0], ToolCallPart)
+                self.assertEqual(response.usage.total_tokens, 12)
 
     async def test_explicit_cache_adds_native_breakpoints_to_claude_requests(self) -> None:
-        selected = OpenRouterSelection(
+        selected = ModelSelection(
             runtime="openrouter",
             model="anthropic/claude-sonnet-4",
             provider="anthropic",
@@ -364,7 +308,7 @@ class ModelProviderTests(SandboxTestCase):
 
     async def test_vllm_uses_native_profile_and_request_format(self) -> None:
         model = create_model(
-            VLLMModel(
+            ModelSelection(
                 runtime="vllm",
                 model="google/gemma-4-27b-it",
                 base_url="https://compatible.example.test/v1",
@@ -417,7 +361,7 @@ class ModelProviderTests(SandboxTestCase):
             with self.subTest(effort=effort):
                 settings = AgentSettings(reasoning_effort=effort)
                 model = create_model(
-                    VLLMModel(
+                    ModelSelection(
                         runtime="vllm",
                         model="nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB",
                         base_url="https://compatible.example.test/v1",
@@ -444,7 +388,7 @@ class ModelProviderTests(SandboxTestCase):
                     reasoning_effort=cast(Literal["none", "medium"], effort), top_k=10
                 )
                 model = create_model(
-                    VLLMModel(
+                    ModelSelection(
                         runtime="vllm",
                         model="nvidia/Qwen3.8-27B-NVFP4",
                         base_url="https://compatible.example.test/v1",
@@ -479,7 +423,7 @@ class ModelProviderTests(SandboxTestCase):
                         strict_parameterless_tools=strict,
                     )
                     model = create_model(
-                        VLLMModel(
+                        ModelSelection(
                             runtime="vllm",
                             model="google/gemma-4-27b-it",
                             base_url="https://compatible.example.test/v1",
@@ -526,7 +470,7 @@ class ModelProviderTests(SandboxTestCase):
 
     async def test_vllm_repetition_stop_retains_cause_without_provider_failure(self) -> None:
         model = create_model(
-            VLLMModel.model_validate(
+            ModelSelection.model_validate(
                 {
                     "runtime": "vllm",
                     "model": "test-model",
@@ -567,15 +511,15 @@ class ModelProviderTests(SandboxTestCase):
 
     async def test_native_profiles_keep_tool_forcing_exceptions(self) -> None:
         for selected in (
-            VLLMModel(
+            ModelSelection(
                 runtime="vllm",
                 model="openai/gpt-oss-120b",
                 base_url="https://vllm.example.test/v1",
             ),
-            OpenRouterSelection(
+            ModelSelection(
                 runtime="openrouter", model="qwen/qwen-3-coder", provider="selected-provider"
             ),
-            OpenRouterSelection(
+            ModelSelection(
                 runtime="openrouter",
                 model="anthropic/claude-sonnet-4",
                 provider="anthropic",
@@ -611,7 +555,7 @@ class ModelProviderTests(SandboxTestCase):
         ):
             with self.subTest(model=name):
                 model = create_model(
-                    OpenRouterSelection(
+                    ModelSelection(
                         runtime="openrouter",
                         model=name,
                         provider="selected-provider",
@@ -640,7 +584,7 @@ class ModelProviderTests(SandboxTestCase):
             with self.subTest(strict=strict), tempfile.TemporaryDirectory() as directory:
                 settings = AgentSettings(strict_parameterless_tools=strict)
                 model = create_model(
-                    VLLMModel(
+                    ModelSelection(
                         runtime="vllm",
                         model="google/gemma-4-27b-it",
                         base_url="https://compatible.example.test/v1",
@@ -688,7 +632,7 @@ class ModelProviderTests(SandboxTestCase):
             compaction_tail_tokens=20,
         )
         model = create_model(
-            OpenRouterSelection(
+            ModelSelection(
                 runtime="openrouter",
                 model="vendor/test-model",
                 provider="selected-provider",

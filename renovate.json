@@ -9,6 +9,12 @@
       "description": "Match uv's exclude-newer window so uv lock can resolve the update",
       "matchDatasources": ["pypi"],
       "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "One PR for uv in mise, CI, and uv_build; uv_build waits 7 days on PyPI, so wait for all of them",
+      "matchPackageNames": ["astral-sh/uv", "uv-build"],
+      "groupName": "uv",
+      "minimumReleaseAge": "7 days"
     }
   ],
   "customManagers": [

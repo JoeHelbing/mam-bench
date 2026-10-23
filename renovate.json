@@ -3,5 +3,12 @@
   "extends": [
     "config:recommended"
   ],
-  "baseBranchPatterns": ["dev"]
+  "baseBranchPatterns": ["dev"],
+  "packageRules": [
+    {
+      "description": "Match uv's exclude-newer window so uv lock can resolve the update",
+      "matchDatasources": ["pypi"],
+      "minimumReleaseAge": "7 days"
+    }
+  ]
 }

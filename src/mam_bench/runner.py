@@ -130,7 +130,7 @@ class BenchmarkRunner:
             trace = failure_trace(error)
             logger.error("benchmark.failed case=%s kind=%s trace=%s", case_index, kind, trace)
             failure: dict[str, object] = {
-                # A model that cannot play fails; other failures are rerun.
+                # A model that cannot play fails; provider and other failures are rerun.
                 "status": "failed" if kind == "model_fallbacks" else "incomplete",
                 "case": None if case_index is None else case_index + 1,
                 "kind": kind,

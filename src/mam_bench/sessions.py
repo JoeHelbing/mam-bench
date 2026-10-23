@@ -67,24 +67,24 @@ async def stream_responses(
     """Enable native streaming without adding a second recorder."""
 
 
+# Waits before each session-level retry of a transient provider error, after the
+# provider client's own retries. Exhausting them stops the world: a provider error
+# never becomes a simulation fallback.
+PROVIDER_RETRY_DELAYS = (15.0, 30.0, 60.0, 120.0, 240.0)
+
+
 class _CallErrorLimitReached(Exception):
-    def __init__(self, *, provider: bool) -> None:
-        # Provider requests caused most of the failures, rather than the model's calls.
-        self.provider = provider
-        super().__init__("provider" if provider else "model")
+    pass
 
 
 class _CallErrors[DepsT](AbstractCapability[DepsT]):
-    """Share one cumulative failure budget across tools and provider requests."""
+    """Bound failed tool calls per turn; retry transient provider errors with backoff."""
 
     def __init__(self, history: Sequence[ModelMessage]) -> None:
         self._seen = self._tool_failures(history)
         self._count = 0
-        self._provider_count = 0
+        self._provider_retries = 0
         self._requests_before = 0
-
-    def _limit(self) -> _CallErrorLimitReached:
-        return _CallErrorLimitReached(provider=2 * self._provider_count > self._count)
 
     @staticmethod
     def _tool_failures(messages: Sequence[ModelMessage]) -> set[tuple[datetime | None, str]]:
@@ -109,9 +109,19 @@ class _CallErrors[DepsT](AbstractCapability[DepsT]):
         self._count += len(failures - self._seen)
         self._seen.update(failures)
         if self._count >= 3:
-            raise self._limit()
+            raise _CallErrorLimitReached
         self._requests_before = ctx.usage.requests
         return request_context
+
+    async def after_model_request(
+        self,
+        ctx: RunContext[DepsT],
+        *,
+        request_context: ModelRequestContext,
+        response: ModelResponse,
+    ) -> ModelResponse:
+        self._provider_retries = 0  # Backoff applies to consecutive failures only.
+        return response
 
     async def on_node_run_error(
         self, ctx: RunContext[DepsT], *, node: AgentNode[DepsT], error: Exception
@@ -133,12 +143,17 @@ class _CallErrors[DepsT](AbstractCapability[DepsT]):
         # Native streaming increments only after the stream opens; failed opens count too.
         if ctx.usage.requests == self._requests_before:
             ctx.usage.requests += 1
-        self._count += 1
-        self._provider_count += 1
+        if self._provider_retries == len(PROVIDER_RETRY_DELAYS):
+            raise error
+        delay = PROVIDER_RETRY_DELAYS[self._provider_retries]
+        self._provider_retries += 1
         logger.warning(
-            "request.failed session=%s failures=%d exception=%s status=%s error=%s body=%r",
+            "request.failed session=%s retry=%d/%d wait_s=%.0f exception=%s status=%s "
+            "error=%s body=%r",
             ctx.conversation_id,
-            self._count,
+            self._provider_retries,
+            len(PROVIDER_RETRY_DELAYS),
+            delay,
             type(error).__name__,
             status if isinstance(status, int) else None,
             error,
@@ -157,11 +172,8 @@ class _CallErrors[DepsT](AbstractCapability[DepsT]):
                 if isinstance(part, ToolCallPart)
             )
         parts.append(RetryPromptPart(content="Provider request failed. Try again."))
-        request = ModelRequest(parts=parts)
-        if self._count >= 3:
-            ctx.messages.append(request)
-            raise self._limit() from error
-        return ModelRequestNode(request)
+        await asyncio.sleep(delay)
+        return ModelRequestNode(ModelRequest(parts=parts))
 
 
 class _Compaction[DepsT](FallbackCompaction[DepsT]):
@@ -398,8 +410,8 @@ end the turn; successful calls do not reset this failure count.
                             ),
                             toolsets=[self._board_tools(session_id, observation)],
                         )
-                except _CallErrorLimitReached as limit:
-                    outcome = "provider_error_limit" if limit.provider else "call_error_limit"
+                except _CallErrorLimitReached:
+                    outcome = "call_error_limit"
                     logger.info("turn.stop session=%s reason=%s", session_id, outcome)
                     turn: Completed[OutputDataT] | Stopped = Stopped(outcome)
                 except UsageLimitExceeded:

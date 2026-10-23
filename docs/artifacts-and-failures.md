@@ -66,33 +66,46 @@ or are logged while preserving an existing failure.
 
 Invalid actions receive bounded retry feedback. Exhausted request, tool, output,
 or retry budgets select a simulation fallback and retain a diagnostic reason.
-Transient API errors, including streamed provider errors, connection failures,
-request timeouts, HTTP 408/409/429, and server errors, retry within the same turn.
-Failed API requests count toward the request allowance. API errors and failed
-tool calls share a cumulative three-failure limit; successful calls do not reset
-it. At the limit, the turn ends with the simulation's normal fallback. The reason
-is `provider_error_limit` when failed API requests made up most of the three
-failures, and `call_error_limit` otherwise. Each new turn starts with a fresh
-failure budget. Accepted tool
-effects remain; incomplete streamed tool calls receive an explicit not-executed
-reply before retrying. Failed calls log their exception type and status code.
-Tool failures include argument validation, rejected actions, unknown tools, and
-reported failures across actions, messaging, and workspace tools. Tool batches settle
-before the limit is checked, preserving matching replies and accepted effects.
-The limit prevents the next request and does not override an accepted terminal action.
 
-A run counts its model-controlled turns and fallbacks. `provider_error_limit`
-fallbacks are provider fallbacks; every other reason is a model fallback.
-Either kind disqualifies the run when it exceeds 10% of the turns taken by the
-end of the run, exceeds 10% of every possible turn (failure is then certain, so
-the run stops at once), or reaches half of the first 48 turns. Turns already in
-progress finish and are counted. Model fallbacks give `kind: model_fallbacks`
-and `status: failed`: the model cannot play the benchmark, and the run has no
-score. Provider fallbacks give `kind: provider_fallbacks` and
-`status: incomplete`: rerun the model, perhaps on another provider. Run
-`failure.json` records the counts as `fallbacks: {turns, model, provider}`.
-Fallbacks within the limit carry no extra penalty beyond their effect on the
-world.
+Provider errors never cause a fallback. A fallback is an action applied to a
+shared world, so a provider fault must not change the outcome being scored.
+Transient API errors are HTTP 408/409/429, server errors, connection failures,
+request timeouts, and errors streamed inside a successful response. They are
+retried in two layers:
+
+1. Each provider client retries the request itself up to 16 times, with
+   exponential backoff from 0.5 s doubling to 8 s that honors Retry-After (about
+   80-100 s per request).
+2. Errors that outlast those retries, including streamed provider errors, retry
+   in the same turn after waits of 15, 30, 60, 120, and 240 s. Any successful
+   request resets this count.
+
+A request that still fails after the last wait stops the world and the run as
+incomplete: `kind: provider` (or `network` or `timeout`), with no total. Rerun
+the model, perhaps on another provider. Each failed request still counts toward
+the turn's 25-request allowance, so a turn that exhausts the allowance while
+retrying ends with `usage_limit`. Incomplete streamed tool calls receive an
+explicit not-executed reply before retrying. Failed requests log their exception
+type, status code, and retry wait.
+
+Failed tool calls have a cumulative three-failure limit per turn; successful
+calls do not reset it. At the limit, `call_error_limit` ends the turn with the
+simulation's normal fallback. Each new turn starts with a fresh failure budget.
+Tool failures include argument validation, rejected actions, unknown tools, and
+reported failures across actions, messaging, and workspace tools. Tool batches
+settle before the limit is checked, preserving matching replies and accepted
+effects. The limit prevents the next request and does not override an accepted
+terminal action.
+
+A run counts its model-controlled turns and fallbacks. It fails when fallbacks
+exceed 10% of the turns taken by the end of the run, exceed 10% of every
+possible turn (failure is then certain, so the run stops at once), or reach half
+of the first 48 turns. Turns already in progress finish and are counted. A
+failed run records `kind: model_fallbacks` and `status: failed`: the model
+cannot play the benchmark, and the run has no score. Run `failure.json` records
+the counts as `fallbacks: {turns, fallbacks}`. Fallbacks within the limit carry
+no extra penalty beyond their effect on the world.
+
 Permanent HTTP errors (including invalid credentials or request parameters),
 turn deadlines, persistence failures, and simulation defects still stop the
 invocation and cancel outstanding turns. Completed records remain available.

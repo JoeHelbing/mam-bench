@@ -8,6 +8,7 @@ from typing import Literal, cast
 from unittest.mock import AsyncMock, patch
 
 import httpx2 as httpx
+from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI, AsyncStream, omit
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from pydantic import StrictInt
@@ -27,7 +28,7 @@ from pydantic_ai.tools import ToolDefinition
 
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, ModelSelection
-from mam_bench.runtime import CaseRuntime, create_model
+from mam_bench.runtime import PROVIDER_MAX_RETRIES, CaseRuntime, create_model
 from mam_bench.sessions import AgentSessions, Completed
 from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
 from mam_bench.simulations.schelling.simulation import SchellingSim
@@ -305,6 +306,59 @@ class ModelProviderTests(SandboxTestCase):
         messages = cast(list[dict[str, object]], sent["messages"])
         content = cast(list[dict[str, object]], messages[-1]["content"])
         self.assertEqual(content[-1]["cache_control"], {"type": "ephemeral", "ttl": "5m"})
+
+    async def test_provider_client_rides_out_transient_errors_before_the_turn(self) -> None:
+        attempts = 0
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 5:
+                # Flex shedding; the short Retry-After keeps the test fast.
+                return httpx.Response(
+                    502, headers={"retry-after-ms": "1"}, json={"error": {"message": "busy"}}
+                )
+            return httpx.Response(200, json=completion().model_dump(mode="json"))
+
+        def client(**kwargs: object) -> AsyncOpenAI:
+            return AsyncOpenAI(
+                base_url=cast(str, kwargs["base_url"]),
+                api_key="test",
+                max_retries=cast(int, kwargs.get("max_retries", 2)),
+                http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+            )
+
+        with patch("mam_bench.runtime.AsyncOpenAI", side_effect=client):
+            model = create_model(
+                ModelSelection(runtime="openrouter", model="vendor/model", provider="p")
+            )
+        assert isinstance(model, OpenRouterModel)
+        self.addAsyncCleanup(model.client.close)
+        response = await model.request(
+            [ModelRequest(parts=[UserPromptPart("Respond.")])], None, ModelRequestParameters()
+        )
+        self.assertIsInstance(response.parts[0], TextPart)
+        self.assertEqual(attempts, 6)
+
+    async def test_every_runtime_client_uses_the_provider_retry_budget(self) -> None:
+        selections = (
+            ModelSelection(runtime="openrouter", model="vendor/model", provider="p"),
+            ModelSelection(runtime="openai", model="gpt-4.1-mini"),
+            ModelSelection(runtime="anthropic", model="claude-haiku-4-5"),
+            ModelSelection(
+                runtime="vllm", model="served", base_url="https://compatible.example.test/v1"
+            ),
+        )
+        keys = {"OPENAI_API_KEY": "test", "ANTHROPIC_API_KEY": "test"}
+        for selected in selections:
+            with self.subTest(runtime=selected.runtime), patch.dict(os.environ, keys):
+                model = create_model(selected)
+                client = cast(
+                    AsyncOpenAI | AsyncAnthropic,
+                    model.client,  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+                )
+                self.addAsyncCleanup(client.close)
+                self.assertEqual(client.max_retries, PROVIDER_MAX_RETRIES)
 
     async def test_vllm_uses_native_profile_and_request_format(self) -> None:
         model = create_model(

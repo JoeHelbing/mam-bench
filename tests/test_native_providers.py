@@ -272,7 +272,7 @@ class NativeProviderTests(SandboxTestCase):
                                 )
                             else:
                                 provider = patch(
-                                    "pydantic_ai.providers.anthropic.AsyncAnthropic",
+                                    "mam_bench.runtime.AsyncAnthropic",
                                     return_value=client,
                                 )
                             with provider:

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import cast
 
+from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 from pydantic import Field, SecretStr
 from pydantic_ai.models import Model
@@ -24,6 +25,11 @@ from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, ModelSelection
 from mam_bench.kludge import OpenAIFixedArrayTransformer, VLLMChatModel, vllm_settings
 from mam_bench.qualification import FallbackLedger
+
+# Each provider client retries HTTP 408/409/429, server errors, and connection
+# failures itself with exponential backoff (0.5 s doubling to 8 s, honoring
+# Retry-After), about 80-100 s per request, before a session-level retry.
+PROVIDER_MAX_RETRIES = 16
 
 
 @dataclass(frozen=True)
@@ -99,7 +105,9 @@ def create_model(selection: ModelSelection) -> Model:
             request_settings["tool_choice"] = agent_settings.tool_choice
         return AnthropicModel(
             selection.model,
-            provider=AnthropicProvider(),
+            provider=AnthropicProvider(
+                anthropic_client=AsyncAnthropic(max_retries=PROVIDER_MAX_RETRIES)
+            ),
             settings=AnthropicModelSettings(
                 **request_settings,
                 anthropic_cache=True,
@@ -114,7 +122,7 @@ def create_model(selection: ModelSelection) -> Model:
         profile["json_schema_transformer"] = OpenAIFixedArrayTransformer
         return OpenAIResponsesModel(
             selection.model,
-            provider=OpenAIProvider(),
+            provider=OpenAIProvider(openai_client=AsyncOpenAI(max_retries=PROVIDER_MAX_RETRIES)),
             profile=profile,
             settings=OpenAIResponsesModelSettings(
                 **request_settings,
@@ -133,8 +141,11 @@ def create_model(selection: ModelSelection) -> Model:
             selection.model,
             profile=profile,
             provider=VLLMProvider(
-                base_url=selection.base_url,
-                api_key=VLLMSettings().api_key.get_secret_value(),
+                openai_client=AsyncOpenAI(
+                    base_url=selection.base_url,
+                    api_key=VLLMSettings().api_key.get_secret_value(),
+                    max_retries=PROVIDER_MAX_RETRIES,
+                )
             ),
             settings=vllm_settings(selection, request_settings),
         )
@@ -167,6 +178,7 @@ def create_model(selection: ModelSelection) -> Model:
                     base_url=settings.base_url,
                     api_key=settings.api_key.get_secret_value(),
                     default_headers={"X-Title": "MAM-Bench"},
+                    max_retries=PROVIDER_MAX_RETRIES,
                 )
             ),
             settings=router_settings,

@@ -35,6 +35,7 @@ from pydantic_ai.workspaces import LocalWorkspaceBackend, WorkspaceRef
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, ModelSelection
 from mam_bench.runtime import CaseRuntime
+from mam_bench.sessions import PROVIDER_RETRY_DELAYS
 from mam_bench.simulations.civil_violence.settings import CivilViolenceSettings
 from mam_bench.simulations.schelling.settings import SchellingSettings
 
@@ -77,6 +78,8 @@ class SandboxTestCase(unittest.IsolatedAsyncioTestCase):
         for replacement in (
             patch("pydantic_ai_harness.modal_sandbox.ModalSandboxBackend", backend),
             patch("pydantic_ai_harness.modal_sandbox.ModalSandbox.destroy", destroy),
+            # Keep the retry count but skip the real backoff waits.
+            patch("mam_bench.sessions.PROVIDER_RETRY_DELAYS", (0.0,) * len(PROVIDER_RETRY_DELAYS)),
             patch.dict(
                 os.environ, MODAL_TOKEN_ID="offline-id", MODAL_TOKEN_SECRET="offline-secret"
             ),

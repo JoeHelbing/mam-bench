@@ -128,10 +128,9 @@ class RunnerTests(SandboxTestCase):
                 self.assertEqual(record["status"], "failed")
                 self.assertEqual(record["kind"], "model_fallbacks")
                 counts = record["fallbacks"]
-                self.assertEqual(counts["provider"], 0)
-                self.assertEqual(counts["model"], counts["turns"])
-                self.assertGreaterEqual(counts["model"], least)
-                self.assertLess(counts["model"], below)
+                self.assertEqual(counts["fallbacks"], counts["turns"])
+                self.assertGreaterEqual(counts["fallbacks"], least)
+                self.assertLess(counts["fallbacks"], below)
 
     def test_runs_that_end_early_judge_fallbacks_against_turns_taken(self) -> None:
         # A revolution can end worlds early: 2 of 10 taken turns is 20%, although 2 of
@@ -144,15 +143,15 @@ class RunnerTests(SandboxTestCase):
         self.assertEqual(failure.exception.kind, "model_fallbacks")
         ledger.record(None)  # 2 of 11 is still over 10%; the in-progress check waits.
 
-    async def test_provider_fallbacks_leave_the_run_incomplete_for_a_rerun(self) -> None:
+    async def test_provider_errors_that_outlast_retries_leave_the_run_incomplete(self) -> None:
         async def overloaded(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             raise ModelHTTPError(503, "scripted")
 
         error, record = await self.run_until_disqualified((schelling(),), FunctionModel(overloaded))
-        self.assertEqual(error.kind, "provider_fallbacks")
+        self.assertEqual(error.kind, "provider")
         self.assertEqual(record["status"], "incomplete")
-        self.assertEqual(record["fallbacks"]["model"], 0)
-        self.assertGreaterEqual(record["fallbacks"]["provider"], 2)
+        # The provider never turned a turn into a fallback; the world stopped instead.
+        self.assertEqual(record["fallbacks"], {"turns": 0, "fallbacks": 0})
 
     async def test_fallbacks_up_to_ten_percent_of_turns_keep_the_score(self) -> None:
         # Three cases x 4 agents x 3 steps = 36 turns. Three fallbacks (8.3%) keep the

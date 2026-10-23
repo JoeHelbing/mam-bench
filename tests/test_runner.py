@@ -16,7 +16,12 @@ from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, BenchmarkConfig, CaseSettings, ModelSelection
 from mam_bench.diagnostics import ExecutionFailure
 from mam_bench.qualification import FallbackLedger
-from mam_bench.runner import BenchmarkResult, BenchmarkRunFailure, BenchmarkRunner
+from mam_bench.runner import (
+    BenchmarkResult,
+    BenchmarkRunFailure,
+    BenchmarkRunner,
+    load_incomplete_run,
+)
 from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
 from mam_bench.simulations.schelling.simulation import SchellingSim
 from support import (
@@ -187,6 +192,59 @@ class RunnerTests(SandboxTestCase):
                 config, model_factory=lambda _: streaming_model(FunctionModel(script))
             )
             return await runner.run()
+
+    async def test_resumed_run_counts_earlier_fallbacks_toward_the_limit(self) -> None:
+        # Three cases x 4 agents x 3 steps = 36 turns, so a fourth fallback exceeds 10%.
+        # Attempt 1 falls back on 3 of case 1's 12 turns, then the provider fails in case 2.
+        # Resumed, one more fallback is only 1 of 24 new turns but the run's fourth.
+        def model(fallbacks: int, overload_after: int | None = None) -> FunctionModel:
+            failing: set[str] = set()
+            turns = 0
+
+            async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+                nonlocal turns
+                agent = info.instructions or ""
+                if any(isinstance(part, UserPromptPart) for part in messages[-1].parts):
+                    turns += 1
+                    failing.discard(agent)
+                    if turns <= fallbacks:
+                        failing.add(agent)
+                if overload_after is not None and turns > overload_after:
+                    raise ModelHTTPError(503, "scripted")
+                if agent in failing:
+                    return ModelResponse(parts=[ToolCallPart("move", {"destination": "x"})])
+                return await stay(messages, info)
+
+            return streaming_model(FunctionModel(script))
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = BenchmarkConfig(
+                model=selection(), cases=(schelling(),) * 3, output_directory=Path(directory)
+            )
+            interrupted = BenchmarkRunner(config, model_factory=lambda _: model(3, 12))
+            with self.assertRaises(BenchmarkRunFailure) as failure, self.assertLogs("mam_bench"):
+                await interrupted.run()
+            self.assertEqual(failure.exception.kind, "provider")
+            root = interrupted.output_directory
+            assert root is not None
+            self.assertEqual(
+                records(root / "completed-cases.jsonl")[0]["fallbacks"],
+                {"turns": 12, "fallbacks": 3},
+            )
+
+            resumed = BenchmarkRunner(
+                load_incomplete_run(root), model_factory=lambda _: model(1), resume=root
+            )
+            with self.assertRaises(BenchmarkRunFailure) as failure, self.assertLogs("mam_bench"):
+                await resumed.run()
+            self.assertEqual(failure.exception.kind, "model_fallbacks")
+            record = json.loads((root / "failure.json").read_text())
+            self.assertEqual(record["status"], "failed")
+            self.assertEqual(record["fallbacks"]["fallbacks"], 4)
+            self.assertGreater(record["fallbacks"]["turns"], 12)
+            self.assertFalse((root / "benchmark.json").exists())
+            with self.assertRaisesRegex(ValueError, "failed qualification"):
+                load_incomplete_run(root)
 
     async def test_failed_and_cancelled_cases_close_their_sandboxes(self) -> None:
         for kind in ("schelling", "civil-violence"):

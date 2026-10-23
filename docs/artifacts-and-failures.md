@@ -3,10 +3,15 @@
 ```text
 <output>/<timestamp>-<uuid>/
   config.json                   # original requested model and suite
-  effective-model.json          # requested settings and discovered serving facts
-  completed-cases.jsonl
+  effective-model.json          # requested settings, request setup, serving facts
+  attempts.jsonl                # one record per attempt: source commit, cases run
+  completed-cases.jsonl         # attempt, fallback counts, and result per case
   benchmark.json                 # complete runs only; calculated total_score
   failure.json                   # failed runs, when storage permits
+  attempts/001/                  # resumed runs only: an earlier attempt's leftovers
+    failure.json
+    telemetry/
+    cases/002/                   # the unfinished case, as that attempt left it
   telemetry/
     traces.jsonl                 # native agent/model/tool spans, including content
     logs.jsonl                   # correlated package logs
@@ -81,8 +86,9 @@ retried in two layers:
    request resets this count.
 
 A request that still fails after the last wait stops the world and the run as
-incomplete: `kind: provider` (or `network` or `timeout`), with no total. Rerun
-the model, perhaps on another provider. Each failed request still counts toward
+incomplete: `kind: provider` (or `network` or `timeout`), with no total.
+[Resume](#resuming-an-incomplete-run) it, or start a new run, perhaps on another
+provider. Each failed request still counts toward
 the turn's 25-request allowance, so a turn that exhausts the allowance while
 retrying ends with `usage_limit`. Incomplete streamed tool calls receive an
 explicit not-executed reply before retrying. Failed requests log their exception
@@ -116,7 +122,6 @@ the original error. Both run and case `failure.json` retain the error message
 and complete traceback, including chained causes. The raised `BenchmarkRunFailure`
 also retains the original exception as its cause. Configuration errors print the
 original file/YAML/validation details, including invalid values.
-There is no resume or selective rerun support.
 
 INFO logging reports case progress; DEBUG adds session timing and usage.
 Native OpenTelemetry spans supply model request and tool timing, including
@@ -183,3 +188,43 @@ Library imports do not initialize telemetry. `collect_telemetry(directory)`
 owns one invocation's process-wide agent instrumentation and scoped package
 logging; run independent collection contexts in separate processes. Scientific
 results and trajectories retain their existing atomic/checkpoint writes.
+
+## Resuming an incomplete run
+
+`main.py --resume <run-directory>` continues an incomplete run in place. It
+reruns only the cases missing from `completed-cases.jsonl`, each in a fresh case
+directory, and leaves completed cases' artifacts unchanged. The final
+`benchmark.json` sums every case's `adjusted_score`, whichever attempt produced
+it. Cases are independent and seeded, so only the model's own responses can
+differ from an uninterrupted run.
+
+Resume refuses, and leaves the directory unchanged, when:
+
+- the run is complete (`benchmark.json`) or failed (`failure.json` status
+  `failed`); both results are final;
+- it has no `attempts.jsonl`: it stopped before its first case, or predates
+  resume support;
+- the current code reads `config.json` differently, for example after a
+  settings field or default changed;
+- the model's serving setup changed: the model selection with resolved
+  settings, and `setup` in `effective-model.json` (context window, completion
+  token parameter, `tool_choice` support), must match the first attempt. Another
+  provider is a new run.
+
+Before rerunning, resume moves the previous attempt's `failure.json`,
+`telemetry/`, and unfinished case directories into `attempts/<n>/`, where `n` is
+that attempt's number. Each attempt appends a record to `attempts.jsonl`: its
+number, start time, source `commit`, `dirty` (uncommitted changes; both are
+`null` outside a Git checkout), and the cases it set out to run. Each
+`completed-cases.jsonl` record names the `attempt` that produced it, and run
+`failure.json` names the attempt that stopped. A different or uncommitted source
+version does not block a resume: it logs `resume.code_changed`, and the records
+show which code produced each case. Check them before comparing scores.
+
+Fallback qualification spans attempts. Each `completed-cases.jsonl` record
+holds that case's `fallbacks: {turns, fallbacks}`. A resume restores the counts
+from those records and discards the unfinished case's partial turns, so the 10%
+rule judges the whole run as if it were uninterrupted.
+
+A killed process leaves no `failure.json`; such a run can still be resumed.
+Nothing detects a run that is still in progress, so never resume one.

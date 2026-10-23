@@ -15,6 +15,11 @@
       "matchPackageNames": ["astral-sh/uv", "uv-build"],
       "groupName": "uv",
       "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "pydantic-ai-harness 0.N pins pydantic-ai-slim==2.N.0, so they can only move together",
+      "matchPackageNames": ["pydantic-ai-harness", "pydantic-ai-slim"],
+      "groupName": "pydantic-ai"
     }
   ],
   "customManagers": [

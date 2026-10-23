@@ -108,7 +108,9 @@ Each turn refreshes `observation.json`.
 
 Use the actual served model ID so PydanticAI's `VLLMProvider` can select its
 model-family profile. It handles reasoning, tool schemas, and system-message
-formatting. `settings.reasoning_effort` uses native unified thinking (`none` disables it). Omitted sampling and reasoning settings use endpoint defaults, including for
+formatting. `settings.reasoning_effort` is sent verbatim as the runtime's native effort
+(`none` disables thinking); the provider, not MAM-Bench, decides whether it is valid.
+Omitted sampling and reasoning settings use endpoint defaults, including for
 history summaries. Action and summary output caps default to one quarter of the
 discovered serving context, bounded by any reported provider output limit. For
 a 262,144-token context, the default is 65,536 output tokens per request. Override

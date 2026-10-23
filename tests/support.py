@@ -35,9 +35,16 @@ from pydantic_ai.workspaces import LocalWorkspaceBackend, WorkspaceRef
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, ModelSelection
 from mam_bench.runtime import CaseRuntime
+from mam_bench.sandboxes import ModalSettings
 from mam_bench.sessions import PROVIDER_RETRY_DELAYS
 from mam_bench.simulations.civil_violence.settings import CivilViolenceSettings
 from mam_bench.simulations.schelling.settings import SchellingSettings
+
+# Fail closed: no test may reach Modal with the developer's real credentials, even one
+# that forgets SandboxTestCase. Ignore `.env` (a cleared os.environ would fall back to
+# it) and default the process to offline values, which real Modal rejects.
+ModalSettings.model_config["env_file"] = None
+os.environ.update(MODAL_TOKEN_ID="offline-id", MODAL_TOKEN_SECRET="offline-secret")
 
 
 class OfflineSandbox(LocalWorkspaceBackend):

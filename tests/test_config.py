@@ -226,6 +226,14 @@ class ConfigurationTests(unittest.TestCase):
         selected = ModelSelection.model_validate({**base, "settings": {"temperature": 1.0}})
         self.assertEqual(selected.settings.model_fields_set, {"temperature"})
 
+    def test_reasoning_effort_is_any_provider_string(self) -> None:
+        # Providers own their effort vocabulary; MAM-Bench only forwards it.
+        for effort in ("max", "ultra", "none"):
+            with self.subTest(effort=effort):
+                self.assertEqual(AgentSettings(reasoning_effort=effort).reasoning_effort, effort)
+        with self.assertRaises(ValidationError):
+            AgentSettings(reasoning_effort="")
+
     def test_agent_budget_and_sampling_settings_validate(self) -> None:
         for settings in (
             {"concurrency": 0},

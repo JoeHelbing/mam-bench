@@ -9,7 +9,13 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 from pydantic_ai.exceptions import ModelHTTPError
-from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart, UserPromptPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    UserPromptPart,
+)
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from mam_bench.artifacts import ArtifactWriter
@@ -145,6 +151,8 @@ class RunnerTests(SandboxTestCase):
 
     async def test_provider_errors_that_outlast_retries_leave_the_run_incomplete(self) -> None:
         async def overloaded(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if not info.instructions:  # Let the startup probe through to reach the case.
+                return ModelResponse(parts=[TextPart("OK")])
             raise ModelHTTPError(503, "scripted")
 
         error, record = await self.run_until_disqualified((schelling(),), FunctionModel(overloaded))
@@ -168,7 +176,9 @@ class RunnerTests(SandboxTestCase):
 
         async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             nonlocal failed_turns
-            agent = info.instructions or ""
+            if not info.instructions:  # The startup probe is not an agent turn.
+                return ModelResponse(parts=[TextPart("OK")])
+            agent = info.instructions
             # A request that carries a user prompt starts the agent's next turn.
             if any(isinstance(part, UserPromptPart) for part in messages[-1].parts):
                 failing.discard(agent)
@@ -261,6 +271,32 @@ class RunnerTests(SandboxTestCase):
             self.assertEqual(record["model"]["settings"]["max_completion_tokens"], 512)
             self.assertEqual(record["metadata"]["source"], "test-endpoint")
             self.assertTrue((output / "cases/001/result.json").exists())
+
+    async def test_provider_rejection_at_startup_probe_starts_no_case(self) -> None:
+        requests: list[list[ModelMessage]] = []
+
+        async def reject(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            requests.append(messages)
+            raise ModelHTTPError(400, "scripted", {"message": "reasoning.effort: Invalid option"})
+
+        with tempfile.TemporaryDirectory() as directory:
+            runner = BenchmarkRunner(
+                BenchmarkConfig(
+                    model=selection(),
+                    cases=(schelling(max_steps=1),),
+                    output_directory=Path(directory),
+                ),
+                model_factory=lambda _: FunctionModel(reject),
+            )
+            with self.assertRaises(BenchmarkRunFailure) as failure:
+                await runner.run()
+            self.assertIsNone(failure.exception.case_index)
+            self.assertEqual(failure.exception.kind, "provider_probe")
+            self.assertEqual(len(requests), 1)
+            assert runner.output_directory is not None
+            self.assertFalse((runner.output_directory / "cases").exists())
+            record = json.loads((runner.output_directory / "failure.json").read_text())
+            self.assertIn("reasoning.effort: Invalid option", record["error"])
 
     async def test_failed_preflight_starts_no_case_or_model(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

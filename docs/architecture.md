@@ -59,7 +59,7 @@ simulation owns legality and settlement. [scheduling.py](../src/mam_bench/schedu
 shares cohort ordering, concurrent admission, failure cleanup, and
 addressed random streams. [artifacts.py](../src/mam_bench/artifacts.py) writes supplied
 simulation records. The runner retains case
-results, and `BenchmarkResult.total_score` sums their calculated scores.
+results, and `BenchmarkResult.total_score` sums their null-adjusted scores.
 
 At run-directory creation, the CLI enters [telemetry.py](../src/mam_bench/telemetry.py)
 in the task that owns the benchmark. It configures native Pydantic AI

@@ -254,7 +254,9 @@ to stay. Exhaustion means stay.
         # Ordinary-choice randomness has its own addressed slot. Leaving it unused
         # cannot shift another agent's draws, even after the paired states diverge.
         sessions, runtime = simulation.sessions, simulation.runtime
-        assert sessions is not None and runtime is not None
+        if sessions is None:
+            return Stay()  # Null policy: every turn takes the fallback action.
+        assert runtime is not None
         view = self.observation()
         turn = await sessions.run(
             str(self.agent_id),

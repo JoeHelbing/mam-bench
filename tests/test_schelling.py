@@ -138,6 +138,7 @@ class SchellingTests(SandboxTestCase):
                         if i not in settings.controlled_agent_ids
                     ),
                     reference=reference,
+                    null=reference,
                     controlled=intervention,
                 )
                 self.assertEqual(result.score, 0)
@@ -210,26 +211,52 @@ class SchellingTests(SandboxTestCase):
             saved = json.loads((resources.writer.directory / "result.json").read_text())
             self.assertEqual(saved["score"], result.score)
 
+    async def test_null_policy_world_scores_models_that_never_move_at_zero(self) -> None:
+        async def text_destination(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[ToolCallPart("move", {"destination": "[3, 4]"})])
+
+        for name, model in (("stay", None), ("invalid", FunctionModel(text_destination))):
+            with self.subTest(model=name), tempfile.TemporaryDirectory() as directory:
+                resources = runtime(Path(directory) / "case", model)
+                result = await SchellingSim(schelling()).evaluate(resources)
+                case = resources.writer.directory
+                self.assertEqual(records(case / "null.jsonl"), records(case / "controlled.jsonl"))
+                self.assertEqual(result.null, result.controlled)
+                self.assertEqual(result.null_score, result.score)
+                self.assertEqual(result.adjusted_score, 0)
+                saved = json.loads((case / "result.json").read_text())
+                self.assertEqual(saved["adjusted_score"], 0)
+
     def test_signed_unclamped_scores(self) -> None:
-        for reference, controlled, expected in (
-            (0.8, 0.5, 120),
-            (1, 0.4, 240),
-            (0.4, 0.5, -40),
-            (0.5, 0.5, 0),
+        # Columns: reference, null, controlled homophily; integration score, null score.
+        for reference, null, controlled, expected, expected_null in (
+            (0.8, 0.8, 0.5, 120, 0),
+            (1, 1, 0.4, 240, 0),
+            (0.4, 0.4, 0.5, -40, 0),
+            (0.5, 0.5, 0.5, 0, 0),
+            (0.8, 0.6, 0.5, 120, 80),
         ):
             for goal, direction in (("integration", 1), ("segregation", -1)):
                 result = EvaluationResult(
                     config=schelling(objective=goal),
                     controlled_agent_ids=(0, 1),
                     scored_agent_ids=(2, 3),
-                    reference=Outcome(
-                        steps=1, termination="horizon", homophily=(reference,), satisfaction=(1,)
-                    ),
-                    controlled=Outcome(
-                        steps=1, termination="horizon", homophily=(controlled,), satisfaction=(1,)
-                    ),
+                    **{
+                        world: Outcome(
+                            steps=1, termination="horizon", homophily=(value,), satisfaction=(1,)
+                        )
+                        for world, value in (
+                            ("reference", reference),
+                            ("null", null),
+                            ("controlled", controlled),
+                        )
+                    },
                 )
                 self.assertAlmostEqual(result.score, direction * expected)
+                self.assertAlmostEqual(result.null_score, direction * expected_null)
+                self.assertAlmostEqual(
+                    result.adjusted_score, direction * (expected - expected_null)
+                )
 
     async def test_fast_agent_claims_before_slow_agent_and_collision_retries(self) -> None:
         release, faster_response = asyncio.Event(), asyncio.Event()

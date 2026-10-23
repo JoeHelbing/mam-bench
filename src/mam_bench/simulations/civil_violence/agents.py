@@ -248,7 +248,9 @@ class ModelControlledAgent(SimulationAgent):
         simulation = self.simulation
         # Ordinary random slots are addressed by identity and purpose, not consumed here.
         sessions, runtime = simulation.sessions, simulation.runtime
-        assert sessions is not None and runtime is not None
+        if sessions is None:
+            return self.fallback_action()  # Null policy: every turn takes the fallback action.
+        assert runtime is not None
         view = self.observation()
         turn = await sessions.run(
             str(self.agent_id),

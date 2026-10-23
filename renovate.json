@@ -10,5 +10,38 @@
       "matchDatasources": ["pypi"],
       "minimumReleaseAge": "7 days"
     }
+  ],
+  "customManagers": [
+    {
+      "description": "Python pins outside mise's [tools]; same lookup as the mise manager so updates share one PR",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yml$/", "/^mise\\.toml$/"],
+      "matchStrings": [
+        "uv python install (?<currentValue>\\d+\\.\\d+\\.\\d+)",
+        "UV_PYTHON = \"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
+      ],
+      "depNameTemplate": "python",
+      "packageNameTemplate": "python/cpython",
+      "datasourceTemplate": "github-tags",
+      "extractVersionTemplate": "^v(?<version>\\S+)"
+    },
+    {
+      "description": "Ruff pin in CI; same lookup as the mise manager",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yml$/"],
+      "matchStrings": ["ruff==(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "ruff",
+      "packageNameTemplate": "astral-sh/ruff",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "description": "Pyright pin in CI; same lookup as the mise manager",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yml$/"],
+      "matchStrings": ["pyright@(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "npm:pyright",
+      "packageNameTemplate": "pyright",
+      "datasourceTemplate": "npm"
+    }
   ]
 }

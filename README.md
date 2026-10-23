@@ -151,6 +151,13 @@ endpoint support, data-use terms, and pricing before running all six cases.
 Each invocation creates a new output directory and does not overwrite a
 previous run. See [artifacts and failures](docs/artifacts-and-failures.md) for the saved records and failure behavior.
 
+An incomplete run, such as one stopped by a persistent provider error, can be
+resumed. Only its unfinished cases run again, in the same directory:
+
+```bash
+uv run --no-sync main.py --resume results/default/<run-directory>
+```
+
 Each CLI run uses Pydantic AI's `Agent.instrument_all()` to capture agent
 conversations, reasoning, tool calls/results, and usage. OpenTelemetry writes
 traces, logs, and metrics to `<run-directory>/telemetry/` under `--output`.

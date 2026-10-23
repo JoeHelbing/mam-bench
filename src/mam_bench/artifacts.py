@@ -9,8 +9,8 @@ from pydantic import BaseModel
 class ArtifactWriter:
     """Write supplied records; simulations decide their content and timing."""
 
-    def __init__(self, directory: Path) -> None:
-        directory.mkdir(parents=True, exist_ok=False)
+    def __init__(self, directory: Path, *, existing: bool = False) -> None:
+        directory.mkdir(parents=True, exist_ok=existing)
         self.directory = directory
 
     def append(self, name: str, record: object) -> None:

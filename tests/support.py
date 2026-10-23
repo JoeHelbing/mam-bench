@@ -143,14 +143,14 @@ def selection() -> ModelSelection:
 
 
 @contextmanager
-def served_model() -> Generator[None]:
+def served_model(context_window: int = 260_000) -> Generator[None]:
     """Serve real offline discovery requests for scripted benchmark runs."""
 
     def respond(request: httpx.Request) -> httpx.Response:
         assert (request.method, request.url.path) == ("GET", "/v1/models")
         return httpx.Response(
             200,
-            json={"data": [{"id": "scripted", "max_model_len": 260_000}]},
+            json={"data": [{"id": "scripted", "max_model_len": context_window}]},
         )
 
     def client(**_: object) -> AsyncOpenAI:

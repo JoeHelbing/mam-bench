@@ -8,10 +8,12 @@ from typing import Literal, cast
 from unittest.mock import AsyncMock, patch
 
 import httpx2 as httpx
+from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI, AsyncStream, omit
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from pydantic import StrictInt
 from pydantic_ai import Agent, ToolOutput
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import (
     ModelRequest,
     SystemPromptPart,
@@ -22,6 +24,8 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.openrouter import OpenRouterModel
+from pydantic_ai.providers.anthropic import AnthropicProvider
+from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition
 
@@ -188,6 +192,8 @@ class ModelProviderTests(SandboxTestCase):
                 ) -> httpx.Response:
                     requests.append(request)
                     self.assertEqual(request.url.host, "router.example.test")
+                    if request.method == "GET" and request.url.path == "/v1/models":
+                        return httpx.Response(200, json={"data": []})
                     if request.method == "GET":
                         self.assertEqual(request.url.path, "/v1/models/openai/gpt-4.1/endpoints")
                         return httpx.Response(
@@ -263,7 +269,7 @@ class ModelProviderTests(SandboxTestCase):
                             allow_text_output=False,
                         ),
                     )
-                self.assertEqual(len(requests), 2 if parameter else 1)
+                self.assertEqual(len(requests), 3 if parameter else 1)
                 sent = json.loads(requests[-1].content)
                 self.assertEqual(
                     sent["provider"],
@@ -578,6 +584,116 @@ class ModelProviderTests(SandboxTestCase):
                 sent = request.call_args.kwargs
                 self.assertEqual(sent["temperature"], 1.0 if sampling else omit)
                 self.assertEqual(sent["top_p"], 0.95 if sampling else omit)
+
+    async def test_native_runtimes_send_reasoning_effort_verbatim(self) -> None:
+        # The provider, not MAM-Bench, decides whether an effort is valid.
+        for runtime, model_name in (("openai", "gpt-4.1-mini"), ("anthropic", "claude-opus-4-6")):
+            with self.subTest(runtime=runtime):
+                bodies: list[dict[str, object]] = []
+
+                def reject(
+                    request: httpx.Request, bodies: list[dict[str, object]] = bodies
+                ) -> httpx.Response:
+                    bodies.append(json.loads(request.content))
+                    return httpx.Response(400, json={"error": {"message": "effort rejected"}})
+
+                http_client = httpx.AsyncClient(transport=httpx.MockTransport(reject))
+                provider = (
+                    patch(
+                        "mam_bench.runtime.OpenAIProvider",
+                        return_value=OpenAIProvider(
+                            openai_client=AsyncOpenAI(api_key="test", http_client=http_client)
+                        ),
+                    )
+                    if runtime == "openai"
+                    else patch(
+                        "mam_bench.runtime.AnthropicProvider",
+                        return_value=AnthropicProvider(
+                            anthropic_client=AsyncAnthropic(api_key="test", http_client=http_client)
+                        ),
+                    )
+                )
+                with provider:
+                    model = create_model(
+                        ModelSelection.model_validate(
+                            {
+                                "runtime": runtime,
+                                "model": model_name,
+                                "settings": {"reasoning_effort": "ultra"},
+                            }
+                        )
+                    )
+                with self.assertRaises(ModelHTTPError):
+                    await model.request(
+                        [ModelRequest(parts=[UserPromptPart("Respond.")])],
+                        None,
+                        ModelRequestParameters(),
+                    )
+                await http_client.aclose()
+                sent = cast(dict[str, dict[str, object]], bodies[-1])
+                key = "reasoning" if runtime == "openai" else "output_config"
+                self.assertEqual(sent[key]["effort"], "ultra")
+
+    async def test_wire_requests_are_logged_once_per_distinct_shape(self) -> None:
+        def respond(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=completion().model_dump(mode="json"))
+
+        def client(**kwargs: object) -> AsyncOpenAI:
+            hooks = cast(httpx.AsyncClient, kwargs["http_client"]).event_hooks
+            return AsyncOpenAI(
+                base_url=cast(str, kwargs["base_url"]),
+                api_key="test",
+                http_client=httpx.AsyncClient(
+                    transport=httpx.MockTransport(respond), event_hooks=hooks
+                ),
+            )
+
+        with patch("mam_bench.runtime.AsyncOpenAI", side_effect=client):
+            model = create_model(
+                ModelSelection(
+                    runtime="openrouter",
+                    model="deepseek/deepseek-v4.1-flash",
+                    provider="deepinfra/fp8",
+                    settings=AgentSettings(reasoning_effort="max"),
+                )
+            )
+        assert isinstance(model, OpenRouterModel)
+        self.addAsyncCleanup(model.client.close)
+        with self.assertLogs("mam_bench.runtime", "INFO") as logs:
+            for prompt, cap in (("One.", 100), ("Two.", 100), ("Three.", 200)):
+                await model.request(
+                    [ModelRequest(parts=[UserPromptPart(prompt)])],
+                    ModelSettings(max_tokens=cap),
+                    ModelRequestParameters(),
+                )
+        wire = [line for line in logs.output if "request.wire" in line]
+        self.assertEqual(len(wire), 2)
+        self.assertIn('"effort": "max"', wire[0])
+        self.assertNotIn("One.", wire[0])
+
+    async def test_openrouter_sends_configured_reasoning_effort_verbatim(self) -> None:
+        for effort in ("xhigh", "max", "ultra"):
+            with self.subTest(effort=effort):
+                model = create_model(
+                    ModelSelection(
+                        runtime="openrouter",
+                        model="deepseek/deepseek-v4.1-flash",
+                        provider="deepinfra/fp8",
+                        settings=AgentSettings(reasoning_effort=effort),
+                    )
+                )
+                assert isinstance(model, OpenRouterModel)
+                self.addAsyncCleanup(model.client.close)
+                request = AsyncMock(return_value=completion())
+                with patch.object(model.client.chat.completions, "create", request):
+                    await model.request(
+                        [ModelRequest(parts=[UserPromptPart("Respond.")])],
+                        None,
+                        ModelRequestParameters(),
+                    )
+                body = request.call_args.kwargs["extra_body"]
+                self.assertEqual(body["reasoning"]["effort"], effort)
+                self.assertEqual(body["provider"]["only"], ["deepinfra/fp8"])
 
     async def test_civil_citizen_defer_uses_per_model_strict_schema(self) -> None:
         for strict in (False, True):

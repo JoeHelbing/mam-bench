@@ -148,6 +148,32 @@ class RunnerTests(SandboxTestCase):
             self.assertEqual(record["metadata"]["source"], "test-endpoint")
             self.assertTrue((output / "cases/001/result.json").exists())
 
+    async def test_provider_rejection_at_startup_probe_starts_no_case(self) -> None:
+        requests: list[list[ModelMessage]] = []
+
+        async def reject(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            requests.append(messages)
+            raise ModelHTTPError(400, "scripted", {"message": "reasoning.effort: Invalid option"})
+
+        with tempfile.TemporaryDirectory() as directory:
+            runner = BenchmarkRunner(
+                BenchmarkConfig(
+                    model=selection(),
+                    cases=(schelling(max_steps=1),),
+                    output_directory=Path(directory),
+                ),
+                model_factory=lambda _: FunctionModel(reject),
+            )
+            with self.assertRaises(BenchmarkRunFailure) as failure:
+                await runner.run()
+            self.assertIsNone(failure.exception.case_index)
+            self.assertEqual(failure.exception.kind, "provider_probe")
+            self.assertEqual(len(requests), 1)
+            assert runner.output_directory is not None
+            self.assertFalse((runner.output_directory / "cases").exists())
+            record = json.loads((runner.output_directory / "failure.json").read_text())
+            self.assertIn("reasoning.effort: Invalid option", record["error"])
+
     async def test_failed_preflight_starts_no_case_or_model(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runner = BenchmarkRunner(

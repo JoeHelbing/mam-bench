@@ -12,6 +12,7 @@ to apply in their own vLLM environment.
 from typing import Literal, cast
 
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
+from openai.types.shared import ReasoningEffort
 from pydantic_ai._json_schema import JsonSchema
 from pydantic_ai.messages import FinishReason, ModelResponse
 from pydantic_ai.models.openai import (
@@ -150,5 +151,5 @@ def vllm_settings(selection: ModelSelection, settings: ModelSettings) -> OpenAIC
             "chat_template_kwargs": chat_settings,
         }
     else:
-        resolved["openai_reasoning_effort"] = effort
+        resolved["openai_reasoning_effort"] = cast(ReasoningEffort, effort)
     return resolved

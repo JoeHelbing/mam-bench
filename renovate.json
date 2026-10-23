@@ -1,0 +1,50 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "baseBranchPatterns": ["dev"],
+  "packageRules": [
+    {
+      "description": "Match uv's exclude-newer window so uv lock can resolve the update",
+      "matchDatasources": ["pypi"],
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "One PR for uv in mise, CI, and uv_build; uv_build waits 7 days on PyPI, so wait for all of them",
+      "matchPackageNames": ["astral-sh/uv", "uv-build"],
+      "groupName": "uv",
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "pydantic-ai-harness 0.N pins pydantic-ai-slim==2.N.0, so they can only move together",
+      "matchPackageNames": ["pydantic-ai-harness", "pydantic-ai-slim"],
+      "groupName": "pydantic-ai"
+    },
+    {
+      "description": "Python versions are bumped by hand",
+      "matchDepNames": ["python"],
+      "enabled": false
+    }
+  ],
+  "customManagers": [
+    {
+      "description": "Ruff pin in CI; same lookup as the mise manager",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yml$/"],
+      "matchStrings": ["ruff==(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "ruff",
+      "packageNameTemplate": "astral-sh/ruff",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "description": "Pyright pin in CI; same lookup as the mise manager",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yml$/"],
+      "matchStrings": ["pyright@(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "npm:pyright",
+      "packageNameTemplate": "pyright",
+      "datasourceTemplate": "npm"
+    }
+  ]
+}

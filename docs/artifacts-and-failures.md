@@ -3,23 +3,28 @@
 ```text
 <output>/<timestamp>-<uuid>/
   config.json                   # original requested model and suite
-  effective-model.json          # requested settings and discovered serving facts
-  completed-cases.jsonl
+  effective-model.json          # requested settings, request setup, serving facts
+  attempts.jsonl                # one record per attempt: source commit, cases run
+  completed-cases.jsonl         # attempt, fallback counts, and result per case
   benchmark.json                 # complete runs only; calculated total_score
   failure.json                   # failed runs, when storage permits
+  attempts/001/                  # resumed runs only: an earlier attempt's leftovers
+    failure.json
+    telemetry/
+    cases/002/                   # the unfinished case, as that attempt left it
   telemetry/
-    traces.jsonl                 # native OpenTelemetry records, content disabled
+    traces.jsonl                 # native agent/model/tool spans, including content
     logs.jsonl                   # correlated package logs
     metrics.jsonl                # native GenAI metrics, delta temporality
   cases/001/
     config.json
     ordinary.jsonl
+    null.jsonl                   # null-policy world: every selected turn falls back
     controlled.jsonl
     ordinary-outcome.json         # retained even if the controlled world fails
+    null-outcome.json
     controlled-outcome.json
-    result.json                  # one simulation-owned result, including score
-    agent-messages/              # native Pydantic AI Harness archives
-    message-board.jsonl
+    result.json                  # one simulation-owned result, including scores
     turns.jsonl                  # exhausted-turn reason and fallback, when needed
     failure.json                 # failed case, when storage permits
 ```
@@ -28,51 +33,121 @@ Each trajectory starts with initialization, then appends every completed step
 immediately after settlement. Civil Violence writes one state per full cycle,
 not separate phase snapshots. States contain stable identities, locations,
 simulation-specific state, and intermediate measurements. Case results contain
-the exact settings, scored/controlled identities, both outcomes and termination,
-and calculated scores. Those same result objects feed saved and displayed totals.
+the exact settings, scored/controlled identities, all three outcomes (reference,
+null policy, controlled) and termination, and the raw, null-policy, and adjusted
+scores. Those same result objects feed saved and displayed totals.
 The effective setup records discovered context/capabilities separately from
 requested settings. It does not claim to know unreported endpoint generation
-defaults. Native CLI telemetry records request/token/cache
+defaults. Requested sampling and reasoning values are forwarded verbatim; the
+provider accepts or refuses them. For OpenRouter, `advertised_reasoning` records
+the catalog's reasoning options beside the requested effort, and an unadvertised
+effort logs `reasoning_effort.unadvertised` without stopping the run, because
+OpenRouter can remap such efforts silently. Before any case starts, one probe
+request with the run's settings must succeed; a refusal stops setup with kind
+`provider_probe` and the provider's reason. The probe is not instrumented, so
+run statistics exclude it. `logs.jsonl` records each distinct request body once
+as `request.wire`, with conversation `messages`/`input` omitted because traces
+already hold them. Native CLI telemetry records request/token/cache
 usage, including summary calls and requests completed before a later failure.
 An absent or zero cache-token count does not establish a measured cache miss.
-Native message snapshots retain per-response usage. Direct library users can
+Native model spans retain per-response usage. Direct library users can
 enable telemetry with `collect_telemetry`; simulations do not write a separate
 usage artifact.
 
-Native Harness `StepPersistence` retains messages, model reasoning when returned,
-tool calls/results, and interrupted runs. Shared-board posts persist as accepted.
-Native snapshots overlap; inspect them rather than concatenating histories.
-Compaction does not erase earlier archived messages. Private notebook operations
-are in tool histories; standalone notebook files and summarizer conversations
-are not separate artifacts.
+`Agent.instrument_all()` is the single source of saved agent data: prompts,
+replies, returned reasoning, tool arguments/results, and usage. Model-controlled
+simulation turns use native streaming; completed responses are assembled into
+model spans. There are no separate Harness message snapshots, board archives,
+stream-event files, or raw vLLM chunks. Instrumentation does not record each
+chunk as it arrives, and interrupted streams may lack partial response content.
+Compaction does not erase earlier exported spans; nested summary requests are
+instrumented too. Session histories and board messages remain in memory for
+execution. Coder commands and file operations appear as native tool spans.
+Package logs record session and sandbox IDs for cleanup diagnostics. Workspace
+files are not copied into local artifacts and are lost when the sandbox is
+terminated; notebook memory tools have been removed.
+
+Every controlled identity owns a separate Modal sandbox for one case, retained
+across turns. The custom image is defined in `sandboxes.py`. Project Modal
+credentials come from the host environment or `.env` and are not forwarded into
+the sandbox. `observation.json` is refreshed before each model turn, and
+`observe.py` lets Python code read this same local snapshot. An agent can also
+call the ordinary `observe()` tool. Neither grants additional simulation visibility.
+Sandbox preparation is outside the model-turn deadline. Cases explicitly
+terminate all owned sandboxes on completion, error, or cancellation; the default
+12-hour sandbox lifetime is a backstop. Cleanup failures stop a successful case,
+or are logged while preserving an existing failure.
 
 Invalid actions receive bounded retry feedback. Exhausted request, tool, output,
 or retry budgets select a simulation fallback and retain a diagnostic reason.
-They do not cause an infrastructure failure or an extra scoring penalty.
-Provider/network/timeouts, persistence failures, and simulation defects stop
-the invocation and cancel outstanding turns. Completed records remain available.
+
+Provider errors never cause a fallback. A fallback is an action applied to a
+shared world, so a provider fault must not change the outcome being scored.
+Transient API errors are HTTP 408/409/429, server errors, connection failures,
+request timeouts, and errors streamed inside a successful response. They are
+retried in two layers:
+
+1. Each provider client retries the request itself up to 16 times, with
+   exponential backoff from 0.5 s doubling to 8 s that honors Retry-After (about
+   80-100 s per request).
+2. Errors that outlast those retries, including streamed provider errors, retry
+   in the same turn after waits of 15, 30, 60, 120, and 240 s. Any successful
+   request resets this count.
+
+A request that still fails after the last wait stops the world and the run as
+incomplete: `kind: provider` (or `network` or `timeout`), with no total.
+[Resume](#resuming-an-incomplete-run) it, or start a new run, perhaps on another
+provider. Each failed request still counts toward
+the turn's 25-request allowance, so a turn that exhausts the allowance while
+retrying ends with `usage_limit`. Incomplete streamed tool calls receive an
+explicit not-executed reply before retrying. Failed requests log their exception
+type, status code, and retry wait.
+
+Failed tool calls have a cumulative three-failure limit per turn; successful
+calls do not reset it. At the limit, `call_error_limit` ends the turn with the
+simulation's normal fallback. Each new turn starts with a fresh failure budget.
+Tool failures include argument validation, rejected actions, unknown tools, and
+reported failures across actions, messaging, and workspace tools. Tool batches
+settle before the limit is checked, preserving matching replies and accepted
+effects. The limit prevents the next request and does not override an accepted
+terminal action.
+
+A run counts its model-controlled turns and fallbacks. It fails when fallbacks
+exceed 10% of the turns taken by the end of the run, exceed 10% of every
+possible turn (failure is then certain, so the run stops at once), or reach half
+of the first 48 turns. Turns already in progress finish and are counted. A
+failed run records `kind: model_fallbacks` and `status: failed`: the model
+cannot play the benchmark, and the run has no score. Run `failure.json` records
+the counts as `fallbacks: {turns, fallbacks}`. Fallbacks within the limit carry
+no extra penalty beyond their effect on the world.
+
+Permanent HTTP errors (including invalid credentials or request parameters),
+turn deadlines, persistence failures, and simulation defects still stop the
+invocation and cancel outstanding turns. Completed records remain available.
 Native compaction runs before requests; a server-rejected context overflow
 follows normal provider-failure handling.
 Failure records are best effort; failure to write one is logged without masking
-the original error. There is no resume or selective rerun support.
+the original error. Both run and case `failure.json` retain the error message
+and complete traceback, including chained causes. The raised `BenchmarkRunFailure`
+also retains the original exception as its cause. Configuration errors print the
+original file/YAML/validation details, including invalid values.
 
 INFO logging reports case progress; DEBUG adds session timing and usage.
 Native OpenTelemetry spans supply model request and tool timing, including
 nested summarizer requests. Set `MAM_BENCH_LOG_LEVEL` to override the YAML
-`log_level`. Logs and native failure events omit sensitive exception bodies.
-Conversation artifacts intentionally retain model content.
+`log_level`. Logs retain complete exception chains and provider error bodies,
+including errors received inside successful HTTP streaming responses. Native
+spans retain their original error details.
 
 The CLI collects all three telemetry signals locally using standard SDK JSON
 exporters. Native instrumentation includes prompts, replies, reasoning, and tool
 arguments/results by default, both locally and when sending to Logfire.
 Request/tool spans export when they finish; metrics export every 30 seconds and
-at orderly shutdown. Harness owns the complete conversation archives, including
-the history retained before a failure. Read each JSONL record independently;
+at orderly shutdown. Read each JSONL record independently;
 the console-export JSON is a diagnostic format, not an OTLP protobuf dump.
-Native `gen_ai.agent.call.id` matches the archived messages' `run_id`;
-`gen_ai.conversation.id` identifies the session. Use `FileStepStore.list_runs`
-and `list_snapshots` to read matching histories instead of decoding archive
-directory names or creating a second identity system.
+Native `gen_ai.agent.call.id` identifies an agent call and
+`gen_ai.conversation.id` identifies the session. Use these attributes to group
+related request and tool spans.
 
 The CLI reads `LOGFIRE_TOKEN` from the environment or the working directory's
 `.env` file to enable background OTLP HTTP delivery to Logfire. Environment
@@ -114,13 +189,51 @@ from recorded data, rather than a maintained list of dated campaign names.
 See [Logfire dashboard variables](https://pydantic.dev/docs/logfire/observe/dashboards/#variables)
 and [native OTel resource labels](https://opentelemetry.io/docs/languages/sdk-configuration/general/#otel_resource_attributes).
 
-Prompt, completion, tool content and model request parameters are disabled in
-telemetry. The export adapter also removes exception-event bodies and span
-status descriptions, which native instrumentation can populate despite disabled
-content capture. Safe exception types and stack locations remain in package
-failure logs. Full local conversations remain sensitive artifacts.
+Native telemetry retains conversation content, exception messages, stacktraces
+and span status descriptions. Model request parameters and binary content are
+not captured. The same records go to Logfire when export is explicitly enabled.
 
 Library imports do not initialize telemetry. `collect_telemetry(directory)`
 owns one invocation's process-wide agent instrumentation and scoped package
 logging; run independent collection contexts in separate processes. Scientific
 results and trajectories retain their existing atomic/checkpoint writes.
+
+## Resuming an incomplete run
+
+`main.py --resume <run-directory>` continues an incomplete run in place. It
+reruns only the cases missing from `completed-cases.jsonl`, each in a fresh case
+directory, and leaves completed cases' artifacts unchanged. The final
+`benchmark.json` sums every case's `adjusted_score`, whichever attempt produced
+it. Cases are independent and seeded, so only the model's own responses can
+differ from an uninterrupted run.
+
+Resume refuses, and leaves the directory unchanged, when:
+
+- the run is complete (`benchmark.json`) or failed (`failure.json` status
+  `failed`); both results are final;
+- it has no `attempts.jsonl`: it stopped before its first case, or predates
+  resume support;
+- the current code reads `config.json` differently, for example after a
+  settings field or default changed;
+- the model's serving setup changed: the model selection with resolved
+  settings, and `setup` in `effective-model.json` (context window, completion
+  token parameter, `tool_choice` support), must match the first attempt. Another
+  provider is a new run.
+
+Before rerunning, resume moves the previous attempt's `failure.json`,
+`telemetry/`, and unfinished case directories into `attempts/<n>/`, where `n` is
+that attempt's number. Each attempt appends a record to `attempts.jsonl`: its
+number, start time, source `commit`, `dirty` (uncommitted changes; both are
+`null` outside a Git checkout), and the cases it set out to run. Each
+`completed-cases.jsonl` record names the `attempt` that produced it, and run
+`failure.json` names the attempt that stopped. A different or uncommitted source
+version does not block a resume: it logs `resume.code_changed`, and the records
+show which code produced each case. Check them before comparing scores.
+
+Fallback qualification spans attempts. Each `completed-cases.jsonl` record
+holds that case's `fallbacks: {turns, fallbacks}`. A resume restores the counts
+from those records and discards the unfinished case's partial turns, so the 10%
+rule judges the whole run as if it were uninterrupted.
+
+A killed process leaves no `failure.json`; such a run can still be resumed.
+Nothing detects a run that is still in progress, so never resume one.

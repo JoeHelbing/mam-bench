@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SchellingSettings(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     simulation: Literal["schelling"]
     board_size: int = Field(strict=True, ge=3, le=255)

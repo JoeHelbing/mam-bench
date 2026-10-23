@@ -2,24 +2,31 @@
 
 For either simulation, start at [main.py](../main.py): parse an explicit model file
 and suite, then [config.py](../src/mam_bench/config.py) validates the complete nested
-configuration. [model_setup.py](../src/mam_bench/model_setup.py) discovers the
-served context and available capabilities from vLLM or OpenRouter once before
-any case, and validates YAML request overrides against known constraints. It
-defaults action and summary output caps to one quarter of served context, bounded
-by known provider output limits. Omitted sampling and reasoning settings use
-endpoint defaults. The runner records the input
+configuration with one model-YAML record, rather than separate provider-selection
+classes. [model_setup.py](../src/mam_bench/model_setup.py) discovers serving
+constraints from vLLM or OpenRouter, or context from PydanticAI's native model
+profiles for OpenAI and Anthropic, before any case. It validates YAML overrides
+against known constraints. For vLLM and OpenRouter, action and summary output caps
+default to one quarter of served context, bounded by reported output limits. The
+direct OpenAI and Anthropic adapters leave omitted output caps unset. Omitted
+sampling and reasoning settings use endpoint defaults. The runner records the input
 config and effective setup, then creates one provider, one fresh `CaseRuntime`
 and writer per case with discovered context passed separately from YAML settings,
 constructs the selected simulation, and awaits
 `evaluate(runtime)`. It never steps a world.
 
-[runtime.py](../src/mam_bench/runtime.py) selects native `VLLMProvider` or
-`OpenRouterProvider` profiles and passes unified thinking settings to the model.
+[runtime.py](../src/mam_bench/runtime.py) constructs native PydanticAI model and
+provider instances and applies configured request settings. The model-YAML
+record is configuration only; it does not wrap the native model or its requests.
 Native profiles retain their tool-choice and reasoning safeguards. The runtime
 enables native OpenRouter cache controls without a separate cache policy.
 Model requests receive no automatic sampling seed; simulation random streams
-remain addressed by the case seed. The local model adapter only normalizes vLLM's
-repetition stop while preserving its cause.
+remain addressed by the case seed. [kludge.py](../src/mam_bench/kludge.py) collects
+temporary client workarounds: vLLM repetition stops, explicit
+thinking settings, and OpenAI's fixed-array schema encoding. Each documents its
+cause and removal condition there. Server-side Qwen, Gemma and Bolt corrections
+are explained in the [vLLM serving guide](vllm-serving-workarounds.md), for
+operators to apply to their own serving installation.
 An explicit `tool_choice: auto` opts out of forcing; otherwise native output
 selection decides when forcing is supported. Session history is repaired by
 PydanticAI before requests, rather than rewritten after stopped turns.
@@ -46,18 +53,21 @@ Its [result](../src/mam_bench/simulations/civil_violence/results.py) calculates 
 participation and revolution components through the same `score` property.
 
 Both use [sessions.py](../src/mam_bench/sessions.py) for individual model turns,
-private history/memory, and communication. Instructions carry identity, goal,
+private history/workspaces, and communication. Instructions carry identity, goal,
 and standing rules; user inputs contain changing JSON observations. Each
 simulation owns legality and settlement. [scheduling.py](../src/mam_bench/scheduling.py)
 shares cohort ordering, concurrent admission, failure cleanup, and
 addressed random streams. [artifacts.py](../src/mam_bench/artifacts.py) writes supplied
-records and preserves native archives. The runner retains case
-results, and `BenchmarkResult.total_score` sums their calculated scores.
+simulation records. The runner retains case
+results, and `BenchmarkResult.total_score` sums their null-adjusted scores.
 
 At run-directory creation, the CLI enters [telemetry.py](../src/mam_bench/telemetry.py)
 in the task that owns the benchmark. It configures native Pydantic AI
 instrumentation and OpenTelemetry providers/exporters for local traces, logs,
-and metrics, with optional Logfire delivery. Harness remains the full conversation
-archive; native call IDs connect exported traces to saved messages. The narrow
-export policy removes provider exception bodies without changing the native
-transport, usage accounting, or simulation execution.
+and metrics, with optional Logfire delivery. `Agent.instrument_all()` is the single
+source of saved agent conversations, reasoning, tool calls/results, and usage.
+Native call and conversation IDs identify requests and sessions in those traces.
+Native exception details are retained in traces; package logs also retain provider
+error bodies, including streaming errors. Sessions keep conversation history and
+the shared board in memory for execution, without separate conversation archives
+or stream files.

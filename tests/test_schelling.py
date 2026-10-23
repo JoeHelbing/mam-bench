@@ -3,7 +3,6 @@
 import asyncio
 import json
 import tempfile
-import unittest
 from fractions import Fraction
 from pathlib import Path
 from typing import cast
@@ -15,7 +14,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from mam_bench.simulations.schelling.agents import ModelControlledAgent, OrdinaryAgent
 from mam_bench.simulations.schelling.results import EvaluationResult, Outcome
 from mam_bench.simulations.schelling.simulation import SchellingSim
-from support import observation, records, runtime, schelling
+from support import SandboxTestCase, observation, records, runtime, schelling
 
 
 def neighborhood(place: int, size: int, radius: int) -> set[int]:
@@ -33,7 +32,7 @@ def quality(cells: list[int], places: set[int], kind: int) -> Fraction:
     return Fraction(occupied.count(kind), len(occupied)) if occupied else Fraction(1)
 
 
-class SchellingTests(unittest.IsolatedAsyncioTestCase):
+class SchellingTests(SandboxTestCase):
     def test_satisfaction_at_float_thresholds_and_without_neighbors(self) -> None:
         neighbors = sorted(neighborhood(27, 8, 1))
         for total in range(1, 9):
@@ -139,6 +138,7 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
                         if i not in settings.controlled_agent_ids
                     ),
                     reference=reference,
+                    null=reference,
                     controlled=intervention,
                 )
                 self.assertEqual(result.score, 0)
@@ -188,12 +188,18 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ordinary[0], controlled[0])
             self.assertEqual(len(controlled), 4)
             self.assertEqual(result.config, schelling())
+            # This fixture has 48 occupants: two selected identities of each type.
+            selected = {0, 1, 24, 25}
+            scored_ids = set(range(48)) - selected
+            self.assertEqual(set(result.controlled_agent_ids), selected)
+            self.assertEqual(set(result.scored_agent_ids), scored_ids)
             homophily: list[float] = []
             for states in (ordinary, controlled):
                 state = states[-1]
                 locations = cast(list[int], state["agent_locations"])
                 kinds = cast(list[int], state["agent_types"])
-                scored = {locations[i]: kinds[i] for i in result.scored_agent_ids}
+                self.assertEqual(len(locations), 48)
+                scored = {locations[i]: kinds[i] for i in scored_ids}
                 edges = {
                     tuple(sorted((p, q)))
                     for p in scored
@@ -205,26 +211,52 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             saved = json.loads((resources.writer.directory / "result.json").read_text())
             self.assertEqual(saved["score"], result.score)
 
+    async def test_null_policy_world_scores_models_that_never_move_at_zero(self) -> None:
+        async def text_destination(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[ToolCallPart("move", {"destination": "[3, 4]"})])
+
+        for name, model in (("stay", None), ("invalid", FunctionModel(text_destination))):
+            with self.subTest(model=name), tempfile.TemporaryDirectory() as directory:
+                resources = runtime(Path(directory) / "case", model)
+                result = await SchellingSim(schelling()).evaluate(resources)
+                case = resources.writer.directory
+                self.assertEqual(records(case / "null.jsonl"), records(case / "controlled.jsonl"))
+                self.assertEqual(result.null, result.controlled)
+                self.assertEqual(result.null_score, result.score)
+                self.assertEqual(result.adjusted_score, 0)
+                saved = json.loads((case / "result.json").read_text())
+                self.assertEqual(saved["adjusted_score"], 0)
+
     def test_signed_unclamped_scores(self) -> None:
-        for reference, controlled, expected in (
-            (0.8, 0.5, 120),
-            (1, 0.4, 240),
-            (0.4, 0.5, -40),
-            (0.5, 0.5, 0),
+        # Columns: reference, null, controlled homophily; integration score, null score.
+        for reference, null, controlled, expected, expected_null in (
+            (0.8, 0.8, 0.5, 120, 0),
+            (1, 1, 0.4, 240, 0),
+            (0.4, 0.4, 0.5, -40, 0),
+            (0.5, 0.5, 0.5, 0, 0),
+            (0.8, 0.6, 0.5, 120, 80),
         ):
             for goal, direction in (("integration", 1), ("segregation", -1)):
                 result = EvaluationResult(
                     config=schelling(objective=goal),
                     controlled_agent_ids=(0, 1),
                     scored_agent_ids=(2, 3),
-                    reference=Outcome(
-                        steps=1, termination="horizon", homophily=(reference,), satisfaction=(1,)
-                    ),
-                    controlled=Outcome(
-                        steps=1, termination="horizon", homophily=(controlled,), satisfaction=(1,)
-                    ),
+                    **{
+                        world: Outcome(
+                            steps=1, termination="horizon", homophily=(value,), satisfaction=(1,)
+                        )
+                        for world, value in (
+                            ("reference", reference),
+                            ("null", null),
+                            ("controlled", controlled),
+                        )
+                    },
                 )
                 self.assertAlmostEqual(result.score, direction * expected)
+                self.assertAlmostEqual(result.null_score, direction * expected_null)
+                self.assertAlmostEqual(
+                    result.adjusted_score, direction * (expected - expected_null)
+                )
 
     async def test_fast_agent_claims_before_slow_agent_and_collision_retries(self) -> None:
         release, faster_response = asyncio.Event(), asyncio.Event()
@@ -323,16 +355,17 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             await sim.step()
             self.assertTrue(checked)
             starts = cast(list[int], initial["agent_locations"])
-            announcements = records(resources.writer.directory / "message-board.jsonl")
+            assert sim.sessions is not None
+            announcements = (await sim.sessions.board.read("observer")).content.splitlines()
             self.assertEqual(
-                {row["text"] for row in announcements},
+                {line.split("] ", 1)[1] for line in announcements},
                 {
                     f"Step 1: agent {identity} accepted stay at [{r},{c}]."
                     for identity in settings.controlled_agent_ids
                     for r, c in [divmod(starts[identity], settings.board_size)]
                 },
             )
-            self.assertTrue(all(row["announcement"] for row in announcements))
+            self.assertTrue(all(" announcement by " in line for line in announcements))
 
     def test_schelling_observation_groups_visible_cells_and_renders_wraparound(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -390,11 +423,12 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             sim = SchellingSim(schelling(), runtime=resources)
             origin = sim.agents[0].position
             await sim.step()
-            announcements = records(resources.writer.directory / "message-board.jsonl")
+            assert sim.sessions is not None
+            announcements = (await sim.sessions.board.read("observer")).content
             row, column = divmod(origin, sim.settings.board_size)
             self.assertIn(
                 f"Step 1: agent 0 accepted stay at [{row},{column}].",
-                {row["text"] for row in announcements},
+                announcements,
             )
 
     async def test_json_local_observations_and_exhaustion_retains_identity(self) -> None:
@@ -429,5 +463,5 @@ class SchellingTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(len(sim.sessions.history("0")), history)
             fallbacks = records(resources.writer.directory / "turns.jsonl")
             self.assertEqual(len(fallbacks), 8)
-            self.assertTrue(all(row["reason"] == "retry_exhaustion" for row in fallbacks))
-            self.assertEqual(sim.sessions.usage.requests, 6 * len(fallbacks))
+            self.assertTrue(all(row["reason"] == "call_error_limit" for row in fallbacks))
+            self.assertEqual(sim.sessions.usage.requests, 3 * len(fallbacks))

@@ -7,9 +7,9 @@ UV_PYTHON = "3.14.7"
 python = "3.14.7"
 uv = "0.12.7"
 ruff = "0.16.5"
-"npm:pyright" = "1.1.413"
-"pipx:jupyterlab" = "4.6.3"
-"pipx:nbdev" = "3.3.15"
+"npm:pyright" = "1.1.414"
+"pipx:jupyterlab" = "4.6.4"
+"pipx:nbdev" = "3.3.25"
 
 [tasks.setup]
 description = "Install the locked Python dependencies"

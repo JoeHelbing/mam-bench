@@ -8,8 +8,9 @@ from typing import TYPE_CHECKING
 from pydantic import StrictBool, StrictInt
 from pydantic_ai import Agent as ModelInterface
 from pydantic_ai import ModelRetry, RunContext, ToolOutput
+from pydantic_ai.capabilities import ProcessEventStream
 
-from mam_bench.sessions import Stopped
+from mam_bench.sessions import Stopped, stream_responses
 
 from .results import Coordinate
 
@@ -85,15 +86,10 @@ of a round, a citizen whose jail term has ended returns to a random vacancy if
 one is available. They return inactive, then choose activity and movement on
 that round's citizen turn.
 
-Use read_messages, post_message and private notebook tools to coordinate.
-Posts are unverified; simulation announcements are marked separately.
-Respond with tool calls, not plain text. Read messages and use memory before
-your action. End a free turn with one act(...) call containing your role choice
+Actions
+End a free turn with one act(...) call containing your role choice
 and movement destination (null to stay). Movement is validated first, then the
-whole action is reserved only if valid. An invalid action
-returns retry feedback without reserving any part. A valid act ends the turn;
-other calls in the same response are skipped. Each turn allows up to 25 model
-requests and five retries for invalid actions.
+whole action is reserved only if valid.
 """.strip()
 
 
@@ -252,25 +248,32 @@ class ModelControlledAgent(SimulationAgent):
         simulation = self.simulation
         # Ordinary random slots are addressed by identity and purpose, not consumed here.
         sessions, runtime = simulation.sessions, simulation.runtime
-        assert sessions is not None and runtime is not None
+        if sessions is None:
+            return self.fallback_action()  # Null policy: every turn takes the fallback action.
+        assert runtime is not None
+        view = self.observation()
         turn = await sessions.run(
             str(self.agent_id),
-            json.dumps(self.observation()),
+            json.dumps(view),
             deps=self,
+            observation=view,
         )
         if isinstance(turn, Stopped):
-            fallback = self.fallback_action()
+            action = self.fallback_action()
             runtime.writer.append(
                 "turns.jsonl",
                 {
                     "step": simulation.steps + 1,
                     "agent_id": self.agent_id,
                     "reason": turn.reason,
-                    "fallback": {"action": type(fallback).__name__, **asdict(fallback)},
+                    "fallback": {"action": type(action).__name__, **asdict(action)},
                 },
             )
-            return fallback
-        return turn.value
+        else:
+            action = turn.value
+        if runtime.fallbacks is not None:
+            runtime.fallbacks.record(turn.reason if isinstance(turn, Stopped) else None)
+        return action
 
 
 async def _act_citizen(
@@ -323,6 +326,7 @@ def _model_interface(
         instructions=instructions,
         retries=5,
         end_strategy="early",
+        capabilities=[ProcessEventStream(stream_responses)],
     )
     interface.instructions(_identity)
     return interface
@@ -342,7 +346,7 @@ current location if staying). You need not follow the ordinary citizen policy.
 
 Your jailed turn
 While jailed, you see no neighborhood and cannot move or change activity.
-You may read/post messages and use your private notebook, then call defer().
+You may read/post messages and use your private workspace, then call defer().
 An accepted defer ends the turn.
 Exhaustion means stay with unchanged activity, or defer while jailed.
 """

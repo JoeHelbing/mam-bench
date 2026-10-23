@@ -3,7 +3,6 @@
 import asyncio
 import json
 import tempfile
-import unittest
 from copy import deepcopy
 from pathlib import Path
 from typing import cast
@@ -24,10 +23,10 @@ from mam_bench.simulations.civil_violence.agents import (
 )
 from mam_bench.simulations.civil_violence.results import EvaluationResult, Outcome
 from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
-from support import civil, observation, records, runtime, stay, turn_calls
+from support import SandboxTestCase, civil, observation, records, runtime, stay, turn_calls
 
 
-class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
+class CivilViolenceTests(SandboxTestCase):
     async def test_all_roles_share_vision_radius(self) -> None:
         for role in ("citizen", "police"):
             with self.subTest(role=role), tempfile.TemporaryDirectory() as directory:
@@ -166,21 +165,43 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                         objective=goal,
                         police_density=0.25 if role == "police" else 0,
                     )
-                    resources = runtime(Path(directory) / "case")
+                    observed_ids: set[int] = set()
+
+                    async def policy(
+                        messages: list[ModelMessage],
+                        info: AgentInfo,
+                        *,
+                        observed_ids: set[int] = observed_ids,
+                    ) -> ModelResponse:
+                        # Observe participants through the model interface, independently
+                        # of the result's controlled/scored identity lists.
+                        observed_ids.add(
+                            int(cast(str, info.instructions).split("Identity: ")[1].split(".")[0])
+                        )
+                        return await stay(messages, info)
+
+                    resources = runtime(Path(directory) / "case", FunctionModel(policy))
                     result = await CivilViolenceSim(settings).evaluate(resources)
                     ordinary = records(resources.writer.directory / "ordinary.jsonl")
                     controlled = records(resources.writer.directory / "controlled.jsonl")
                     self.assertEqual(ordinary[0], controlled[0])
                     self.assertEqual(len(result.controlled_agent_ids), 16)
-                    self.assertTrue(
-                        set(result.controlled_agent_ids).isdisjoint(result.scored_agent_ids)
-                    )
+                    # The fixture has 48 citizens; police control excludes no citizens.
+                    selected = observed_ids
+                    self.assertEqual(len(selected), 16)
+                    self.assertEqual(set(result.controlled_agent_ids), selected)
+                    pool = set(range(48)) if role == "citizen" else set(range(48, 64))
+                    self.assertTrue(selected <= pool)
+                    scored_ids = set(range(48)) - selected
+                    self.assertEqual(set(result.scored_agent_ids), scored_ids)
                     shares: list[float] = []
+                    revolutions: list[bool] = []
                     for states, outcome in (
                         (ordinary, result.reference),
                         (controlled, result.controlled),
                     ):
                         self.assertEqual(len(states), outcome.steps + 1)
+                        participation: list[float] = []
                         for state in states:
                             citizens = cast(list[dict[str, object]], state["citizens"])
                             police = cast(list[dict[str, object]], state["police"])
@@ -190,24 +211,37 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                                 if c["location"] is not None
                             ]
                             self.assertEqual(len(locations), len(set(locations)))
-                        final = [
-                            c
-                            for c in cast(list[dict[str, object]], states[-1]["citizens"])
-                            if c["agent_id"] in result.scored_agent_ids
-                        ]
-                        share = sum(
-                            bool(c["active"]) or c["location"] is None for c in final
-                        ) / len(final)
-                        shares.append(share)
-                        self.assertEqual(share, outcome.participation[-1])
+                            self.assertEqual({c["agent_id"] for c in citizens}, set(range(48)))
+                            counted = [c for c in citizens if c["agent_id"] in scored_ids]
+                            participating = sum(
+                                bool(c["active"]) or c["location"] is None for c in counted
+                            )
+                            participation.append(participating / len(scored_ids))
+                        shares.append(participation[-1])
+                        self.assertEqual(tuple(participation), outcome.participation)
+                        # Only completed cycles count; initialization cannot end the run.
+                        first_revolution = next(
+                            (
+                                step
+                                for step, share in enumerate(participation)
+                                if step and share >= 0.95
+                            ),
+                            None,
+                        )
+                        revolutions.append(first_revolution is not None)
+                        self.assertEqual(
+                            outcome.termination,
+                            "revolution" if first_revolution is not None else "horizon",
+                        )
+                        self.assertEqual(
+                            outcome.steps,
+                            first_revolution
+                            if first_revolution is not None
+                            else settings.max_steps,
+                        )
                     direction = 1 if goal == "increase" else -1
                     replay = direction * (
-                        100 * (shares[1] - shares[0])
-                        + 100
-                        * (
-                            (result.controlled.termination == "revolution")
-                            - (result.reference.termination == "revolution")
-                        )
+                        100 * (shares[1] - shares[0]) + 100 * (revolutions[1] - revolutions[0])
                     )
                     self.assertAlmostEqual(result.score, replay)
                     self.assertEqual(
@@ -363,7 +397,32 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
         for role in ("citizen", "police"):
             await check(role)
 
-    async def test_local_null_policy_evaluation_has_identical_worlds_and_zero_score(self) -> None:
+    async def test_null_policy_world_scores_models_that_cannot_act_at_zero(self) -> None:
+        async def text_destination(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            arguments = (
+                {"active": True, "destination": "[1, 2]"}
+                if "active" in str(info.output_tools[0].parameters_json_schema)
+                else {"destination": "[1, 2]", "target_location": None}
+            )
+            return ModelResponse(parts=[ToolCallPart("act", arguments)])
+
+        for role in ("citizen", "police"):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as directory:
+                settings = civil(
+                    controlled_role=role, police_density=0.25 if role == "police" else 0
+                )
+                resources = runtime(Path(directory) / "case", FunctionModel(text_destination))
+                result = await CivilViolenceSim(settings).evaluate(resources)
+                case = resources.writer.directory
+                self.assertTrue(records(case / "turns.jsonl"))
+                self.assertEqual(records(case / "null.jsonl"), records(case / "controlled.jsonl"))
+                self.assertEqual(result.null, result.controlled)
+                self.assertEqual(result.null_score, result.score)
+                self.assertEqual(result.adjusted_score, 0)
+                saved = json.loads((case / "result.json").read_text())
+                self.assertEqual(saved["adjusted_score"], 0)
+
+    async def test_ordinary_equivalent_policy_has_identical_worlds_and_zero_score(self) -> None:
         async def check(role: str) -> None:
             with self.subTest(role=role), tempfile.TemporaryDirectory() as directory:
                 settings = civil(
@@ -470,6 +529,7 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                         controlled_agent_ids=(),
                         scored_agent_ids=(1, 2),
                         reference=reference,
+                        null=reference,
                         controlled=controlled,
                     )
                     self.assertAlmostEqual(result.score, direction * expected)
@@ -500,7 +560,7 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                     citizen.location, citizen.active = None, False
                     self.assertEqual(sim.participating_count, participating)
 
-    async def test_jailed_agent_communicates_keeps_memory_and_defers_until_release(self) -> None:
+    async def test_jailed_agent_communicates_keeps_notes_and_defers_until_release(self) -> None:
         calls: dict[tuple[int, int], int] = {}
         jailed_views: list[dict[str, object]] = []
         remembered = False
@@ -516,12 +576,15 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
                 if step == 1 and calls[key] == 1:
                     return ModelResponse(
                         parts=[
-                            ToolCallPart("write_memory", {"content": "custody memory survives"}),
+                            ToolCallPart(
+                                "write_file",
+                                {"path": "custody.txt", "content": "custody notes survive"},
+                            ),
                             ToolCallPart("post_message", {"text": "I am jailed"}),
                         ]
                     )
                 if step >= 2:
-                    remembered |= "custody memory survives" in str(messages)
+                    remembered |= "custody notes survive" in str(messages)
                 if cast(dict[str, object], view["self"])["jailed"]:
                     jailed_views.append(view)
                     if calls[key] == 2 and step == 1:
@@ -973,7 +1036,9 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(not sim.citizens[i].active for i in origins))
             fallbacks = records(resources.writer.directory / "turns.jsonl")
             self.assertEqual(len(fallbacks), 16)
-            self.assertTrue(all(row["reason"] == "retry_exhaustion" for row in fallbacks))
+            self.assertTrue(all(row["reason"] == "call_error_limit" for row in fallbacks))
+            assert sim.sessions is not None
+            self.assertEqual(sim.sessions.usage.requests, 3 * len(fallbacks))
 
     async def test_invalid_police_action_exhausts_then_falls_back(self) -> None:
         async def invalid(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -1000,6 +1065,6 @@ class CivilViolenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(c.location is not None for c in sim.citizens.values()))
             fallbacks = records(resources.writer.directory / "turns.jsonl")
             self.assertEqual(len(fallbacks), 16)
-            self.assertTrue(all(row["reason"] == "retry_exhaustion" for row in fallbacks))
+            self.assertTrue(all(row["reason"] == "call_error_limit" for row in fallbacks))
             assert sim.sessions is not None
-            self.assertEqual(sim.sessions.usage.requests, 6 * len(fallbacks))
+            self.assertEqual(sim.sessions.usage.requests, 3 * len(fallbacks))

@@ -53,7 +53,8 @@ class DiagnosticsTests(SandboxTestCase):
         runtime = AgentSessions(Agent(FunctionModel(broken)), context_window_tokens=260_000)
         with self.assertLogs("mam_bench", level="DEBUG") as captured:
             self.assertEqual(
-                await runtime.run("actor", "SECRET PROMPT", deps=None), Stopped("call_error_limit")
+                await runtime.run("actor", "SECRET PROMPT", deps=None),
+                Stopped("provider_error_limit"),
             )
         self.assertEqual(runtime.usage.requests, 3)
         log = "\n".join(captured.output)

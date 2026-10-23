@@ -5,16 +5,18 @@ import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 from pydantic_ai.exceptions import ModelHTTPError
-from pydantic_ai.messages import ModelMessage, ModelResponse
+from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, BenchmarkConfig, CaseSettings, ModelSelection
-from mam_bench.runner import BenchmarkRunFailure, BenchmarkRunner
+from mam_bench.diagnostics import ExecutionFailure
+from mam_bench.qualification import FallbackLedger
+from mam_bench.runner import BenchmarkResult, BenchmarkRunFailure, BenchmarkRunner
 from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
 from mam_bench.simulations.schelling.simulation import SchellingSim
 from support import (
@@ -88,6 +90,104 @@ class RunnerTests(SandboxTestCase):
             result = await runner.run()
             self.assertNotEqual(result.cases[0].score, 0)
             self.assertEqual(result.total_score, 0)
+
+    async def run_until_disqualified(
+        self, cases: tuple[CaseSettings, ...], model: FunctionModel
+    ) -> tuple[BenchmarkRunFailure, dict[str, Any]]:
+        with tempfile.TemporaryDirectory() as directory:
+            config = BenchmarkConfig(
+                model=selection(), cases=cases, output_directory=Path(directory)
+            )
+            runner = BenchmarkRunner(config, model_factory=lambda _: streaming_model(model))
+            with self.assertRaises(BenchmarkRunFailure) as failure, self.assertLogs("mam_bench"):
+                await runner.run()
+            root = runner.output_directory
+            assert root is not None
+            self.assertFalse((root / "benchmark.json").exists())
+            return failure.exception, json.loads((root / "failure.json").read_text())
+
+    async def test_model_that_cannot_play_fails_without_a_score(self) -> None:
+        async def text_destination(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[ToolCallPart("move", {"destination": "[3, 4]"})])
+
+        # Each Schelling fixture case allows 4 controlled agents x max_steps turns; agents
+        # already mid-turn when the rule fires still finish and are counted.
+        for name, cases, least, below in (
+            # 12 possible turns: two fallbacks exceed 10% of every possible turn, so the
+            # run stops before taking them all.
+            ("certain", (schelling(),), 2, 12),
+            # 360 possible turns: half of the first 48 turns falling back stops the run
+            # before the 37 fallbacks that would make failure certain.
+            ("early", (schelling(max_steps=30),) * 3, 24, 37),
+        ):
+            with self.subTest(rule=name):
+                error, record = await self.run_until_disqualified(
+                    cases, FunctionModel(text_destination)
+                )
+                self.assertEqual(error.kind, "model_fallbacks")
+                self.assertEqual(record["status"], "failed")
+                self.assertEqual(record["kind"], "model_fallbacks")
+                counts = record["fallbacks"]
+                self.assertEqual(counts["provider"], 0)
+                self.assertEqual(counts["model"], counts["turns"])
+                self.assertGreaterEqual(counts["model"], least)
+                self.assertLess(counts["model"], below)
+
+    def test_runs_that_end_early_judge_fallbacks_against_turns_taken(self) -> None:
+        # A revolution can end worlds early: 2 of 10 taken turns is 20%, although 2 of
+        # 100 possible turns would pass.
+        ledger = FallbackLedger(possible_turns=100)
+        for reason in ("call_error_limit", "usage_limit", *[None] * 8):
+            ledger.record(reason)
+        with self.assertRaises(ExecutionFailure) as failure:
+            ledger.check(final=True)
+        self.assertEqual(failure.exception.kind, "model_fallbacks")
+        ledger.record(None)  # 2 of 11 is still over 10%; the in-progress check waits.
+
+    async def test_provider_fallbacks_leave_the_run_incomplete_for_a_rerun(self) -> None:
+        async def overloaded(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            raise ModelHTTPError(503, "scripted")
+
+        error, record = await self.run_until_disqualified((schelling(),), FunctionModel(overloaded))
+        self.assertEqual(error.kind, "provider_fallbacks")
+        self.assertEqual(record["status"], "incomplete")
+        self.assertEqual(record["fallbacks"]["model"], 0)
+        self.assertGreaterEqual(record["fallbacks"]["provider"], 2)
+
+    async def test_fallbacks_up_to_ten_percent_of_turns_keep_the_score(self) -> None:
+        # Three cases x 4 agents x 3 steps = 36 turns. Three fallbacks (8.3%) keep the
+        # score; a fourth exceeds 3.6, i.e. 10%.
+        self.assertEqual((await self.run_with_failed_turns(3)).total_score, 0)
+        with self.assertRaises(BenchmarkRunFailure) as failure, self.assertLogs():
+            await self.run_with_failed_turns(4)
+        self.assertEqual(failure.exception.kind, "model_fallbacks")
+
+    async def run_with_failed_turns(self, fallbacks: int) -> BenchmarkResult:
+        """Stay on every turn except the first `fallbacks` turns, which fall back."""
+        failing: set[str] = set()
+        failed_turns = 0
+
+        async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal failed_turns
+            agent = info.instructions or ""
+            # A request that carries a user prompt starts the agent's next turn.
+            if any(isinstance(part, UserPromptPart) for part in messages[-1].parts):
+                failing.discard(agent)
+                if failed_turns < fallbacks:
+                    failing.add(agent)
+                    failed_turns += 1
+            if agent in failing:
+                return ModelResponse(parts=[ToolCallPart("move", {"destination": "x"})])
+            return await stay(messages, info)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = BenchmarkConfig(
+                model=selection(), cases=(schelling(),) * 3, output_directory=Path(directory)
+            )
+            runner = BenchmarkRunner(
+                config, model_factory=lambda _: streaming_model(FunctionModel(script))
+            )
+            return await runner.run()
 
     async def test_failed_and_cancelled_cases_close_their_sandboxes(self) -> None:
         for kind in ("schelling", "civil-violence"):

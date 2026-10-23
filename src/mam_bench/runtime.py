@@ -23,6 +23,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, ModelSelection
 from mam_bench.kludge import OpenAIFixedArrayTransformer, VLLMChatModel, vllm_settings
+from mam_bench.qualification import FallbackLedger
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,8 @@ class CaseRuntime:
     settings: AgentSettings
     writer: ArtifactWriter
     context_window_tokens: int
+    # A benchmark run shares one ledger across its cases; standalone cases have none.
+    fallbacks: FallbackLedger | None = None
 
 
 class VLLMSettings(BaseSettings):

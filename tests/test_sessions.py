@@ -379,7 +379,7 @@ class AgentSessionsTests(SandboxTestCase):
                         await runtime.run(
                             "a", "go", deps=None, usage_limits=UsageLimits(request_limit=limit)
                         ),
-                        Stopped("usage_limit" if limit == 1 else "call_error_limit"),
+                        Stopped("usage_limit" if limit == 1 else "provider_error_limit"),
                     )
                     self.assertEqual(calls, min(limit, 3))
                     self.assertEqual(runtime.usage.requests, calls)
@@ -459,7 +459,7 @@ class AgentSessionsTests(SandboxTestCase):
                         result = await runtime.run("a", "go", deps=None)
                         self.assertEqual(
                             result,
-                            Stopped("call_error_limit")
+                            Stopped("provider_error_limit")
                             if failures == 3
                             else Completed("recovered"),
                         )

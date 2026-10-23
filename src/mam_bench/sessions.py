@@ -68,7 +68,10 @@ async def stream_responses(
 
 
 class _CallErrorLimitReached(Exception):
-    pass
+    def __init__(self, *, provider: bool) -> None:
+        # Provider requests caused most of the failures, rather than the model's calls.
+        self.provider = provider
+        super().__init__("provider" if provider else "model")
 
 
 class _CallErrors[DepsT](AbstractCapability[DepsT]):
@@ -77,7 +80,11 @@ class _CallErrors[DepsT](AbstractCapability[DepsT]):
     def __init__(self, history: Sequence[ModelMessage]) -> None:
         self._seen = self._tool_failures(history)
         self._count = 0
+        self._provider_count = 0
         self._requests_before = 0
+
+    def _limit(self) -> _CallErrorLimitReached:
+        return _CallErrorLimitReached(provider=2 * self._provider_count > self._count)
 
     @staticmethod
     def _tool_failures(messages: Sequence[ModelMessage]) -> set[tuple[datetime | None, str]]:
@@ -102,7 +109,7 @@ class _CallErrors[DepsT](AbstractCapability[DepsT]):
         self._count += len(failures - self._seen)
         self._seen.update(failures)
         if self._count >= 3:
-            raise _CallErrorLimitReached
+            raise self._limit()
         self._requests_before = ctx.usage.requests
         return request_context
 
@@ -127,6 +134,7 @@ class _CallErrors[DepsT](AbstractCapability[DepsT]):
         if ctx.usage.requests == self._requests_before:
             ctx.usage.requests += 1
         self._count += 1
+        self._provider_count += 1
         logger.warning(
             "request.failed session=%s failures=%d exception=%s status=%s error=%s body=%r",
             ctx.conversation_id,
@@ -152,7 +160,7 @@ class _CallErrors[DepsT](AbstractCapability[DepsT]):
         request = ModelRequest(parts=parts)
         if self._count >= 3:
             ctx.messages.append(request)
-            raise _CallErrorLimitReached(str(error)) from error
+            raise self._limit() from error
         return ModelRequestNode(request)
 
 
@@ -390,8 +398,8 @@ end the turn; successful calls do not reset this failure count.
                             ),
                             toolsets=[self._board_tools(session_id, observation)],
                         )
-                except _CallErrorLimitReached:
-                    outcome = "call_error_limit"
+                except _CallErrorLimitReached as limit:
+                    outcome = "provider_error_limit" if limit.provider else "call_error_limit"
                     logger.info("turn.stop session=%s reason=%s", session_id, outcome)
                     turn: Completed[OutputDataT] | Stopped = Stopped(outcome)
                 except UsageLimitExceeded:

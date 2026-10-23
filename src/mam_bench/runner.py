@@ -14,6 +14,7 @@ from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import BenchmarkConfig, ModelSelection
 from mam_bench.diagnostics import ExecutionFailure, failure_trace
 from mam_bench.model_setup import resolve_model_setup
+from mam_bench.qualification import FallbackLedger
 from mam_bench.runtime import CaseRuntime, create_model
 from mam_bench.simulations.civil_violence.results import EvaluationResult as CivilViolenceResult
 from mam_bench.simulations.civil_violence.simulation import CivilViolenceSim
@@ -43,7 +44,8 @@ class BenchmarkRunFailure(RuntimeError):
     def __init__(self, case_index: int | None, kind: str) -> None:
         self.case_index, self.kind = case_index, kind
         location = "setup/finalization" if case_index is None else f"case {case_index + 1}"
-        super().__init__(f"Benchmark incomplete: {location} failed ({kind}); no final total.")
+        outcome = "failed" if kind == "model_fallbacks" else "incomplete"
+        super().__init__(f"Benchmark {outcome}: {location} failed ({kind}); no final total.")
 
 
 class BenchmarkRunner:
@@ -72,6 +74,9 @@ class BenchmarkRunner:
         writer: ArtifactWriter | None = None
         case_writer: ArtifactWriter | None = None
         case_index: int | None = None
+        fallbacks = FallbackLedger(
+            sum(case.max_steps * case.controlled_agent_count for case in self.config.cases)
+        )
         try:
             writer = ArtifactWriter(self.output_directory)
             if on_output_directory is not None:
@@ -88,7 +93,11 @@ class BenchmarkRunner:
                     self.output_directory / "cases" / f"{case_index + 1:03d}"
                 )
                 runtime = CaseRuntime(
-                    model, setup.selection.settings, case_writer, setup.context_window_tokens
+                    model,
+                    setup.selection.settings,
+                    case_writer,
+                    setup.context_window_tokens,
+                    fallbacks,
                 )
                 simulation = (
                     SchellingSim(settings)
@@ -108,6 +117,7 @@ class BenchmarkRunner:
                 if on_case is not None:
                     on_case(case_index, result)
             case_index, case_writer = None, None
+            fallbacks.check(final=True)
             result = BenchmarkResult(model=setup.selection, cases=tuple(self.results))
             writer.write("benchmark.json", result)
             return result
@@ -120,10 +130,12 @@ class BenchmarkRunner:
             trace = failure_trace(error)
             logger.error("benchmark.failed case=%s kind=%s trace=%s", case_index, kind, trace)
             failure: dict[str, object] = {
-                "status": "incomplete",
+                # A model that cannot play fails; other failures are rerun.
+                "status": "failed" if kind == "model_fallbacks" else "incomplete",
                 "case": None if case_index is None else case_index + 1,
                 "kind": kind,
                 "completed_cases": len(self.results),
+                "fallbacks": fallbacks.summary(),
                 "error": str(error),
                 "traceback": trace,
             }

@@ -118,3 +118,13 @@ negative values, without averaging or additional weights. In the shipped suite,
 each goal pair shares a seed, so their null-policy scores cancel and the total
 equals the sum of raw scores. Compare totals only for the same suite and
 scoring version.
+
+A model-controlled turn that ends without a valid action falls back. Fallbacks
+caused mostly by failed provider requests are provider fallbacks; all others are
+model fallbacks. A run with model fallbacks above 10% of its turns **fails**:
+the model cannot play the benchmark, and the run gets no score, not even the
+zero that the null policy itself would earn.
+A run with provider fallbacks above 10% is **incomplete** and should be rerun.
+The run also stops early when its failure is certain (fallbacks above 10% of
+every possible turn) or when half of its first 48 turns fall back. See
+[artifacts and failures](artifacts-and-failures.md) for the recorded counts.

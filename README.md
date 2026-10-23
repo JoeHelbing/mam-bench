@@ -53,7 +53,9 @@ shipped suite contains six cases in three matched-seed goal pairs:
 Each case produces a signed score, plus the score of a null-policy world in
 which the model never acts. The **Combined Benchmark Score** sums every case's
 adjusted score (score minus null-policy score; six cases in the shipped suite),
-including negative ones, so a model that never acts totals zero. One invocation
+including negative ones, so never acting is worth exactly zero. A model that
+cannot act, however, does not get that zero: a run in which more than 10% of
+model turns fall back fails with no score. One invocation
 evaluates **one model**; compare totals only when the suite and scoring version
 are identical.
 Model responses and resulting trajectories can still vary between runs. See

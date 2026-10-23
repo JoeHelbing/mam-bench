@@ -203,7 +203,7 @@ class TelemetryTests(SandboxTestCase):
                 with collect_telemetry(root):
                     self.assertEqual(
                         await sessions.run("stream-error", "Respond.", deps=None),
-                        Stopped("call_error_limit"),
+                        Stopped("provider_error_limit"),
                     )
                 self.assertEqual(sessions.usage.requests, 3)
                 logs = (root / "telemetry/logs.jsonl").read_text()

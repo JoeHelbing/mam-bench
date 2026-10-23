@@ -1,0 +1,68 @@
+name: Restack PRs
+
+# When a PR squash-merges into dev, rebase any open PR that was stacked on it
+# so it carries only its own commits on top of dev.
+
+on:
+  pull_request:
+    branches: [dev]
+    types: [closed]
+
+permissions: {}
+
+concurrency:
+  group: restack-pr
+  cancel-in-progress: false
+
+jobs:
+  restack:
+    if: github.event.pull_request.merged
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        id: app-token
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: dev
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Rebase PRs stacked on the merged PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          MERGED_NUMBER: ${{ github.event.pull_request.number }}
+          MERGED_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${APP_SLUG}[bot]@users.noreply.github.com"
+          # The merged branch may already be deleted; its PR ref keeps the commits.
+          git fetch -q origin "refs/pull/${MERGED_NUMBER}/head"
+          merged_tip=$(git rev-parse FETCH_HEAD)
+
+          gh pr list --state open --limit 100 --json number,headRefName,baseRefName,isCrossRepository |
+            jq -r --arg old "$MERGED_REF" '.[]
+              | select((.isCrossRepository | not) and (.baseRefName == "dev" or .baseRefName == $old))
+              | "\(.number) \(.headRefName) \(.baseRefName)"' |
+            while read -r number head base; do
+              # Stacked means the PR shares commits with the merged branch that
+              # dev lacks (squash merges never put them on dev).
+              fork=$(git merge-base "origin/$head" "$merged_tip") || continue
+              git merge-base --is-ancestor "$fork" origin/dev && continue
+
+              old_head=$(git rev-parse "origin/$head")
+              if ! git rebase -q --onto origin/dev "$fork" "$old_head"; then
+                git rebase --abort
+                gh pr comment "$number" --body "Could not auto-rebase onto \`dev\` after #${MERGED_NUMBER} merged (conflicts). Rebase by hand: \`git rebase --onto origin/dev ${fork} ${head}\`"
+                continue
+              fi
+              if [ "$base" != dev ]; then
+                gh pr edit "$number" --base dev
+              fi
+              git push -q --force-with-lease="${head}:${old_head}" origin "HEAD:refs/heads/${head}"
+              echo "Restacked #${number} (${head}) onto dev"
+            done

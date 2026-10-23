@@ -53,7 +53,9 @@ shipped suite contains six cases in three matched-seed goal pairs:
 Each case produces a signed score, plus the score of a null-policy world in
 which the model never acts. The **Combined Benchmark Score** sums every case's
 adjusted score (score minus null-policy score; six cases in the shipped suite),
-including negative ones, so a model that never acts totals zero. One invocation
+including negative ones, so never acting is worth exactly zero. A model that
+cannot act, however, does not get that zero: a run in which more than 10% of
+model turns fall back fails with no score. One invocation
 evaluates **one model**; compare totals only when the suite and scoring version
 are identical.
 Model responses and resulting trajectories can still vary between runs. See
@@ -148,6 +150,13 @@ uv run --no-sync main.py --model .scratch/model.yaml --output results/default
 endpoint support, data-use terms, and pricing before running all six cases.
 Each invocation creates a new output directory and does not overwrite a
 previous run. See [artifacts and failures](docs/artifacts-and-failures.md) for the saved records and failure behavior.
+
+An incomplete run, such as one stopped by a persistent provider error, can be
+resumed. Only its unfinished cases run again, in the same directory:
+
+```bash
+uv run --no-sync main.py --resume results/default/<run-directory>
+```
 
 Each CLI run uses Pydantic AI's `Agent.instrument_all()` to capture agent
 conversations, reasoning, tool calls/results, and usage. OpenTelemetry writes

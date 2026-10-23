@@ -11,7 +11,13 @@ from yaml import YAMLError
 
 from mam_bench.config import DEFAULT_SUITE, load_benchmark_config
 from mam_bench.diagnostics import configure_logging
-from mam_bench.runner import BenchmarkResult, BenchmarkRunFailure, BenchmarkRunner, CaseResult
+from mam_bench.runner import (
+    BenchmarkResult,
+    BenchmarkRunFailure,
+    BenchmarkRunner,
+    CaseResult,
+    load_incomplete_run,
+)
 from mam_bench.telemetry import collect_telemetry
 
 
@@ -24,21 +30,34 @@ def format_case(index: int, result: CaseResult) -> str:
 
 def main(arguments: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--model", required=True, type=Path, help="YAML selecting one language model"
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--model", type=Path, help="YAML selecting one language model")
+    source.add_argument(
+        "--resume",
+        type=Path,
+        metavar="RUN",
+        help="run directory of an incomplete run; reruns only its unfinished cases",
     )
-    parser.add_argument(
-        "--suite", type=Path, default=DEFAULT_SUITE, help="complete replacement case list"
-    )
-    parser.add_argument("--output", type=Path, default=Path("results"))
+    parser.add_argument("--suite", type=Path, help="complete replacement case list")
+    parser.add_argument("--output", type=Path, help="parent of new run directories")
     args = parser.parse_args(arguments)
+    if args.resume is not None and (args.suite is not None or args.output is not None):
+        parser.error("--resume reuses the run's saved suite and directory")
     try:
-        config = load_benchmark_config(args.model, args.suite, output_directory=args.output)
+        config = (
+            load_incomplete_run(args.resume)
+            if args.resume is not None
+            else load_benchmark_config(
+                args.model,
+                args.suite or DEFAULT_SUITE,
+                output_directory=args.output or Path("results"),
+            )
+        )
     except (ValueError, OSError, YAMLError) as error:
         print(error, file=sys.stderr)
         return 2
     configure_logging(config.log_level)
-    runner = BenchmarkRunner(config)
+    runner = BenchmarkRunner(config, resume=args.resume)
 
     async def run_benchmark() -> BenchmarkResult:
         # Collection and its trace context belong to the benchmark's async task.
@@ -65,6 +84,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
             # Setup refusals carry the provider's own reason; show it, not just the kind.
             print(error.__cause__, file=sys.stderr)
         return 1
+    except ValueError as error:
+        # Only a refused resume raises before the run starts; the run is unchanged.
+        print(error, file=sys.stderr)
+        return 2
     print(f"Model: {result.model.model}")
     print(f"Combined Benchmark Score: {result.total_score:+.6f}")
     return 0

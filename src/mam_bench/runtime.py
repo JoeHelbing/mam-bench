@@ -10,6 +10,7 @@ from typing import cast
 import anthropic
 import httpx2 as httpx
 import openai
+from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 from openai.types.shared import ReasoningEffort
 from pydantic import Field, SecretStr
@@ -33,6 +34,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, ModelSelection
 from mam_bench.kludge import OpenAIFixedArrayTransformer, VLLMChatModel, vllm_settings
+from mam_bench.qualification import FallbackLedger
+
+# Each provider client retries HTTP 408/409/429, server errors, and connection
+# failures itself with exponential backoff (0.5 s doubling to 8 s, honoring
+# Retry-After), about 80-100 s per request, before a session-level retry.
+PROVIDER_MAX_RETRIES = 16
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +52,8 @@ class CaseRuntime:
     settings: AgentSettings
     writer: ArtifactWriter
     context_window_tokens: int
+    # A benchmark run shares one ledger across its cases; standalone cases have none.
+    fallbacks: FallbackLedger | None = None
 
 
 class VLLMSettings(BaseSettings):
@@ -145,7 +154,10 @@ def create_model(selection: ModelSelection) -> Model:
         return AnthropicModel(
             selection.model,
             provider=AnthropicProvider(
-                http_client=anthropic.DefaultAsyncHttpxClient(event_hooks=hooks)
+                anthropic_client=AsyncAnthropic(
+                    max_retries=PROVIDER_MAX_RETRIES,
+                    http_client=anthropic.DefaultAsyncHttpxClient(event_hooks=hooks),
+                )
             ),
             settings=anthropic_settings,
         )
@@ -163,7 +175,12 @@ def create_model(selection: ModelSelection) -> Model:
             openai_settings["openai_reasoning_effort"] = cast(ReasoningEffort, effort)
         return OpenAIResponsesModel(
             selection.model,
-            provider=OpenAIProvider(http_client=openai.DefaultAsyncHttpxClient(event_hooks=hooks)),
+            provider=OpenAIProvider(
+                openai_client=AsyncOpenAI(
+                    max_retries=PROVIDER_MAX_RETRIES,
+                    http_client=openai.DefaultAsyncHttpxClient(event_hooks=hooks),
+                )
+            ),
             profile=profile,
             settings=openai_settings,
         )
@@ -178,9 +195,12 @@ def create_model(selection: ModelSelection) -> Model:
             selection.model,
             profile=profile,
             provider=VLLMProvider(
-                base_url=selection.base_url,
-                api_key=VLLMSettings().api_key.get_secret_value(),
-                http_client=openai.DefaultAsyncHttpxClient(event_hooks=hooks),
+                openai_client=AsyncOpenAI(
+                    base_url=selection.base_url,
+                    api_key=VLLMSettings().api_key.get_secret_value(),
+                    max_retries=PROVIDER_MAX_RETRIES,
+                    http_client=openai.DefaultAsyncHttpxClient(event_hooks=hooks),
+                )
             ),
             settings=vllm_settings(selection, request_settings),
         )
@@ -215,6 +235,7 @@ def create_model(selection: ModelSelection) -> Model:
                     base_url=settings.base_url,
                     api_key=settings.api_key.get_secret_value(),
                     default_headers={"X-Title": "MAM-Bench"},
+                    max_retries=PROVIDER_MAX_RETRIES,
                     http_client=openai.DefaultAsyncHttpxClient(event_hooks=hooks),
                 )
             ),

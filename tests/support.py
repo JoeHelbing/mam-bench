@@ -36,6 +36,7 @@ from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import AgentSettings, ModelSelection
 from mam_bench.runtime import CaseRuntime
 from mam_bench.sandboxes import ModalSettings
+from mam_bench.sessions import PROVIDER_RETRY_DELAYS
 from mam_bench.simulations.civil_violence.settings import CivilViolenceSettings
 from mam_bench.simulations.schelling.settings import SchellingSettings
 
@@ -84,6 +85,8 @@ class SandboxTestCase(unittest.IsolatedAsyncioTestCase):
         for replacement in (
             patch("pydantic_ai_harness.modal_sandbox.ModalSandboxBackend", backend),
             patch("pydantic_ai_harness.modal_sandbox.ModalSandbox.destroy", destroy),
+            # Keep the retry count but skip the real backoff waits.
+            patch("mam_bench.sessions.PROVIDER_RETRY_DELAYS", (0.0,) * len(PROVIDER_RETRY_DELAYS)),
             patch.dict(
                 os.environ, MODAL_TOKEN_ID="offline-id", MODAL_TOKEN_SECRET="offline-secret"
             ),
@@ -140,14 +143,14 @@ def selection() -> ModelSelection:
 
 
 @contextmanager
-def served_model() -> Generator[None]:
+def served_model(context_window: int = 260_000) -> Generator[None]:
     """Serve real offline discovery requests for scripted benchmark runs."""
 
     def respond(request: httpx.Request) -> httpx.Response:
         assert (request.method, request.url.path) == ("GET", "/v1/models")
         return httpx.Response(
             200,
-            json={"data": [{"id": "scripted", "max_model_len": 260_000}]},
+            json={"data": [{"id": "scripted", "max_model_len": context_window}]},
         )
 
     def client(**_: object) -> AsyncOpenAI:

@@ -259,18 +259,21 @@ class ModelControlledAgent(SimulationAgent):
             observation=view,
         )
         if isinstance(turn, Stopped):
-            fallback = self.fallback_action()
+            action = self.fallback_action()
             runtime.writer.append(
                 "turns.jsonl",
                 {
                     "step": simulation.steps + 1,
                     "agent_id": self.agent_id,
                     "reason": turn.reason,
-                    "fallback": {"action": type(fallback).__name__, **asdict(fallback)},
+                    "fallback": {"action": type(action).__name__, **asdict(action)},
                 },
             )
-            return fallback
-        return turn.value
+        else:
+            action = turn.value
+        if runtime.fallbacks is not None:
+            runtime.fallbacks.record(turn.reason if isinstance(turn, Stopped) else None)
+        return action
 
 
 async def _act_citizen(

@@ -22,7 +22,12 @@ from pydantic_ai.usage import RequestUsage
 from mam_bench.config import AgentSettings, BenchmarkConfig
 from mam_bench.diagnostics import ExecutionFailure
 from mam_bench.runner import BenchmarkRunner
-from mam_bench.sessions import AgentSessions, Completed, Stopped, stream_responses
+from mam_bench.sessions import (
+    PROVIDER_RETRY_DELAYS,
+    AgentSessions,
+    Completed,
+    stream_responses,
+)
 from mam_bench.telemetry import collect_telemetry
 from support import (
     SandboxTestCase,
@@ -200,12 +205,10 @@ class TelemetryTests(SandboxTestCase):
                     Agent(model, capabilities=[ProcessEventStream(stream_responses)]),
                     context_window_tokens=260_000,
                 )
-                with collect_telemetry(root):
-                    self.assertEqual(
-                        await sessions.run("stream-error", "Respond.", deps=None),
-                        Stopped("call_error_limit"),
-                    )
-                self.assertEqual(sessions.usage.requests, 3)
+                with collect_telemetry(root), self.assertRaises(ExecutionFailure) as failure:
+                    await sessions.run("stream-error", "Respond.", deps=None)
+                self.assertEqual(failure.exception.kind, "provider")
+                self.assertEqual(sessions.usage.requests, len(PROVIDER_RETRY_DELAYS) + 1)
                 logs = (root / "telemetry/logs.jsonl").read_text()
                 self.assertIn("UPSTREAM_STREAM_FAILURE", logs)
                 self.assertIn("502", logs)

@@ -44,10 +44,32 @@ selected Model. It produces one score contribution to the Benchmark Run.
 _Avoid_: simulation type, benchmark run
 
 **Benchmark Run**:
-One start-to-finish execution of the Benchmark Suite against exactly one
-explicitly selected Model. A successful run produces one Combined Benchmark
-Score; a failed run retains partial artifacts without a final score.
+One execution of the Benchmark Suite against exactly one explicitly selected
+Model, in one or more Run Attempts. A successful run produces one Combined
+Benchmark Score. A failed run, whose model cannot play, and an incomplete run,
+stopped by a provider error that outlasted its retries or another execution
+failure, retain partial artifacts without a final score. Only an incomplete run
+can be resumed.
 _Avoid_: individual test case, multi-model campaign
+
+**Run Attempt**:
+One invocation that works on a Benchmark Run. The first attempt starts it; each
+resume reruns only the Test Cases the run has not completed, with the same
+Benchmark Suite and model serving setup. Every completed Test Case records the
+attempt, and so the source commit, that produced it.
+_Avoid_: retry, rerun, new run
+
+**Fallback**:
+A model-controlled turn that ends without a valid action, so the simulation
+applies its fallback action. Provider errors never cause a Fallback: they are
+retried, and exhausted retries stop the run as incomplete.
+_Avoid_: error, failure, null action, provider fallback
+
+**Failed Run**:
+A Benchmark Run disqualified because Fallbacks exceed 10% of its turns, or half
+of its first 48 turns: the Model cannot play the benchmark. It has no score, not
+even zero.
+_Avoid_: zero-score run, low score, incomplete run
 
 **Model Interaction Protocol**:
 The Benchmark Simulation's rules for what model agents observe, which tools they

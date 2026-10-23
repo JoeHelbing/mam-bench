@@ -265,6 +265,7 @@ to stay. Exhaustion means stay.
             observation=view,
         )
         if isinstance(turn, Stopped):
+            action: Action = Stay()
             runtime.writer.append(
                 "turns.jsonl",
                 {
@@ -274,5 +275,8 @@ to stay. Exhaustion means stay.
                     "fallback": {"action": "stay"},
                 },
             )
-            return Stay()
-        return turn.value
+        else:
+            action = turn.value
+        if runtime.fallbacks is not None:
+            runtime.fallbacks.record(turn.reason if isinstance(turn, Stopped) else None)
+        return action

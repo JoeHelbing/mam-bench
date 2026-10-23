@@ -35,8 +35,18 @@ from pydantic_ai_harness.modal_sandbox import ModalSandboxBackend
 from mam_bench.communication import MessageBoard
 from mam_bench.config import AgentSettings
 from mam_bench.diagnostics import ExecutionFailure
-from mam_bench.sessions import AgentSessions, Completed, Stopped
+from mam_bench.sessions import PROVIDER_RETRY_DELAYS, AgentSessions, Completed, Stopped
 from support import OfflineSandbox, SandboxTestCase
+
+
+def _transient_errors() -> list[Exception]:
+    return [
+        ModelHTTPError(408, "scripted"),
+        ModelHTTPError(409, "scripted"),
+        ModelHTTPError(429, "scripted"),
+        ModelHTTPError(503, "scripted"),
+        APIConnectionError(request=httpx.Request("POST", "https://provider.example.test/v1")),
+    ]
 
 
 def _response(
@@ -347,15 +357,9 @@ class AgentSessionsTests(SandboxTestCase):
         self.assertEqual(await sessions.run("a", "go", deps=None), Completed("stayed"))
         self.assertEqual(calls, 3)
 
-    async def test_transient_errors_use_the_request_budget_and_reset_next_turn(self) -> None:
-        errors = [
-            ModelHTTPError(408, "scripted"),
-            ModelHTTPError(409, "scripted"),
-            ModelHTTPError(429, "scripted"),
-            ModelHTTPError(503, "scripted"),
-            APIConnectionError(request=httpx.Request("POST", "https://provider.example.test/v1")),
-        ]
-        for error in errors:
+    async def test_transient_errors_retry_within_the_request_budget_without_strikes(self) -> None:
+        retries = len(PROVIDER_RETRY_DELAYS)
+        for error in _transient_errors():
             for limit in (1, 25):
                 with self.subTest(error=error, limit=limit):
                     calls = 0
@@ -364,7 +368,7 @@ class AgentSessionsTests(SandboxTestCase):
                         messages: list[ModelMessage],
                         info: AgentInfo,
                         failure: Exception = error,
-                        max_failures: int = min(limit, 3),
+                        max_failures: int = min(limit, retries),
                     ) -> ModelResponse:
                         nonlocal calls
                         calls += 1
@@ -375,20 +379,46 @@ class AgentSessionsTests(SandboxTestCase):
                     runtime = AgentSessions(
                         Agent(FunctionModel(model)), context_window_tokens=260_000
                     )
+                    # Every retry still spends one request from the turn's allowance.
                     self.assertEqual(
                         await runtime.run(
                             "a", "go", deps=None, usage_limits=UsageLimits(request_limit=limit)
                         ),
-                        Stopped("usage_limit" if limit == 1 else "call_error_limit"),
+                        Stopped("usage_limit") if limit == 1 else Completed("recovered"),
                     )
-                    self.assertEqual(calls, min(limit, 3))
+                    self.assertEqual(calls, 1 if limit == 1 else retries + 1)
                     self.assertEqual(runtime.usage.requests, calls)
                     self.assertEqual(
                         await runtime.run("a", "next", deps=None), Completed("recovered")
                     )
 
+    async def test_provider_errors_that_outlast_retries_stop_the_world(self) -> None:
+        retries = len(PROVIDER_RETRY_DELAYS)
+        for error in _transient_errors():
+            with self.subTest(error=error):
+                calls = 0
+
+                async def model(
+                    messages: list[ModelMessage], info: AgentInfo, failure: Exception = error
+                ) -> ModelResponse:
+                    nonlocal calls
+                    calls += 1
+                    raise failure
+
+                runtime = AgentSessions(Agent(FunctionModel(model)), context_window_tokens=260_000)
+                with self.assertRaises(ExecutionFailure) as failure, self.assertLogs("mam_bench"):
+                    await runtime.run("a", "go", deps=None)
+                self.assertEqual(
+                    failure.exception.kind,
+                    "network" if isinstance(error, APIConnectionError) else "provider",
+                )
+                self.assertEqual(calls, retries + 1)
+                # No fallback: the whole world stops, so the case cannot be scored.
+                with self.assertRaises(ExecutionFailure):
+                    await runtime.run("b", "other", deps=None)
+
     async def test_stream_errors_are_bounded_and_partial_calls_are_not_executed(self) -> None:
-        for failures in (1, 3):
+        for failures in (1, len(PROVIDER_RETRY_DELAYS)):
             for partial in (False, True):
                 with self.subTest(failures=failures, partial=partial):
                     calls = 0
@@ -457,13 +487,8 @@ class AgentSessionsTests(SandboxTestCase):
                             context_window_tokens=260_000,
                         )
                         result = await runtime.run("a", "go", deps=None)
-                        self.assertEqual(
-                            result,
-                            Stopped("call_error_limit")
-                            if failures == 3
-                            else Completed("recovered"),
-                        )
-                        self.assertEqual(calls, 3 if failures == 3 else 2)
+                        self.assertEqual(result, Completed("recovered"))
+                        self.assertEqual(calls, failures + 1)
                         self.assertEqual(runtime.usage.requests, calls)
                         self.assertEqual((await runtime.board.read("b")).content, "")
                         _assert_complete_tool_history(list(runtime.history("a")))
@@ -474,7 +499,7 @@ class AgentSessionsTests(SandboxTestCase):
                             await runtime.run("b", "other", deps=None), Completed("recovered")
                         )
 
-    async def test_api_and_tool_failures_share_a_budget_across_successes(self) -> None:
+    async def test_api_errors_do_not_use_the_tool_failure_budget(self) -> None:
         calls = 0
 
         async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -482,23 +507,22 @@ class AgentSessionsTests(SandboxTestCase):
             calls += 1
             _assert_complete_tool_history(messages)
             match calls:
-                case 1 | 5:
+                case 1 | 3:
                     return _response(ToolCallPart("post_message", {"text": ""}, f"bad-{calls}"))
-                case 2:
-                    return _response(ToolCallPart("post_message", {"text": "saved"}, "post"))
-                case 3:
+                case 2 | 4:
                     raise ModelAPIError("scripted", "unavailable")
-                case 4:
-                    return _response(ToolCallPart("read_messages", {}, "read"))
+                case 5:
+                    return _response(ToolCallPart("post_message", {"text": "saved"}, "post"))
                 case _:
                     return _response(TextPart("recovered"))
 
         runtime = AgentSessions(
             Agent(FunctionModel(model), retries=5), context_window_tokens=260_000
         )
-        self.assertEqual(await runtime.run("a", "go", deps=None), Stopped("call_error_limit"))
-        self.assertEqual(calls, 5)
-        self.assertEqual(runtime.usage.requests, 5)
+        # Two failed tool calls and two API errors: only the tool calls are strikes.
+        self.assertEqual(await runtime.run("a", "go", deps=None), Completed("recovered"))
+        self.assertEqual(calls, 6)
+        self.assertEqual(runtime.usage.requests, 6)
         _assert_complete_tool_history(list(runtime.history("a")))
         self.assertEqual((await runtime.board.read("b")).content.count("saved"), 1)
         self.assertEqual(await runtime.run("a", "next", deps=None), Completed("recovered"))

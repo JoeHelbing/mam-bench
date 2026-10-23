@@ -125,6 +125,26 @@ class MainTests(SandboxTestCase):
             )
             self.assertIn("SECRET-PROVIDER", records)
 
+    def test_startup_probe_refusal_prints_the_provider_reason(self) -> None:
+        async def refuse(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            raise ModelHTTPError(400, "offline", "reasoning.effort: Invalid option")
+
+        def runner(config: BenchmarkConfig, resume: Path | None = None) -> BenchmarkRunner:
+            return BenchmarkRunner(
+                config, model_factory=lambda _: FunctionModel(refuse), resume=resume
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            errors = io.StringIO()
+            with (
+                patch("main.BenchmarkRunner", side_effect=runner),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(errors),
+            ):
+                self.assertEqual(main.main(self.files(Path(directory))), 1)
+            self.assertIn("Provider refused the startup request", errors.getvalue())
+            self.assertIn("reasoning.effort: Invalid option", errors.getvalue())
+
     def test_invalid_model_with_default_suite_does_not_claim_suite_is_deferred(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -1,6 +1,7 @@
 """Serving preflight through real discovery responses, without inference calls."""
 
 import json
+import logging
 import os
 import unittest
 from unittest.mock import patch
@@ -43,9 +44,13 @@ def router(**settings: object) -> ModelSelection:
     {"OPENROUTER_API_KEY": "offline-test-key", "UNUSED_OFFLINE_TEST_KEY": "offline-test-key"},
 )
 class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
-    async def discover(self, selected: ModelSelection, payload: object) -> ResolvedModelSetup:
+    async def discover(
+        self, selected: ModelSelection, payload: object, catalog: list[object] | None = None
+    ) -> ResolvedModelSetup:
         # Exercise SDK HTTP serialization and application response parsing.
         def respond(request: httpx.Request) -> httpx.Response:
+            if selected.runtime == "openrouter" and request.url.path == "/v1/models":
+                return httpx.Response(200, json={"data": catalog or []})
             expected = (
                 "/v1/models" if selected.runtime == "vllm" else "/v1/models/vendor/model/endpoints"
             )
@@ -244,15 +249,6 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
                 "compaction",
             ),
             (
-                "partial knowledge still rejects",
-                [
-                    endpoint(supported_parameters=["tools", "tool_choice", "max_tokens"]),
-                    endpoint(tag="provider/region", supported_parameters=None),
-                ],
-                router(temperature=0.5),
-                "temperature",
-            ),
-            (
                 "required unsupported",
                 [endpoint(supports_tool_choice={"auto": True, "required": False})],
                 router(tool_choice="required"),
@@ -280,26 +276,32 @@ class ModelSetupTests(unittest.IsolatedAsyncioTestCase):
                     "completion",
                 )
             )
-        for settings in (
-            {"temperature": 1.0},
-            {"top_p": 0.95},
-            {"top_k": 20},
-            {"reasoning_effort": "medium"},
-            {"reasoning_effort": "none"},
-        ):
-            scenarios.append(
-                (
-                    f"unsupported explicit setting {settings}",
-                    [endpoint(supported_parameters=["tools", "tool_choice", "max_tokens"])],
-                    router(**settings),
-                    "unsupported",
-                )
-            )
         for name, endpoints, selected, error in scenarios:
             with self.subTest(scenario=name), self.assertRaisesRegex(ValueError, error):
                 await self.discover(selected, {"data": {"endpoints": endpoints}})
         with self.assertRaises(ValidationError):
             await self.discover(router(), {"data": {"endpoints": [{"tag": "provider"}]}})
+
+    async def test_router_forwards_explicit_settings_and_records_advertised_efforts(self) -> None:
+        # Endpoint metadata no longer vetoes values; the provider decides at request time.
+        terse = endpoint(supported_parameters=["tools", "tool_choice", "max_tokens"])
+        reasoning = {"supported_efforts": ["max", "high", "low", "none"], "default_effort": "high"}
+        catalog: list[object] = [{"id": "vendor/model", "reasoning": reasoning}]
+        for effort, warned in (("max", False), ("xhigh", True)):
+            with self.subTest(effort=effort), self.assertLogs("mam_bench", "INFO") as logs:
+                logging.getLogger("mam_bench").info("sentinel")
+                setup = await self.discover(
+                    router(temperature=1.0, top_k=20, reasoning_effort=effort),
+                    {"data": {"endpoints": [terse]}},
+                    catalog,
+                )
+                self.assertEqual(setup.selection.settings.reasoning_effort, effort)
+                self.assertEqual(setup.metadata["advertised_reasoning"], reasoning)
+                self.assertEqual(
+                    any("reasoning_effort.unadvertised" in line for line in logs.output), warned
+                )
+        setup = await self.discover(router(), {"data": {"endpoints": [endpoint()]}})
+        self.assertIsNone(setup.metadata["advertised_reasoning"])
 
     async def test_vllm_preflight_checks_identity_context_and_generation_budgets(self) -> None:
         scenarios = (

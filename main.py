@@ -80,6 +80,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 f"Failed case: {config.cases[error.case_index].model_dump_json()}", file=sys.stderr
             )
         print(error, file=sys.stderr)
+        if error.case_index is None and error.__cause__ is not None:
+            # Setup refusals carry the provider's own reason; show it, not just the kind.
+            print(error.__cause__, file=sys.stderr)
         return 1
     except ValueError as error:
         # Only a refused resume raises before the run starts; the run is unchanged.

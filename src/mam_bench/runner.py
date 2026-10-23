@@ -15,7 +15,7 @@ from pydantic_ai.models import Model
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.config import BenchmarkConfig, ModelSelection
 from mam_bench.diagnostics import ExecutionFailure, failure_trace
-from mam_bench.model_setup import ResolvedModelSetup, resolve_model_setup
+from mam_bench.model_setup import ResolvedModelSetup, probe_request, resolve_model_setup
 from mam_bench.qualification import FallbackLedger
 from mam_bench.runtime import CaseRuntime, create_model
 from mam_bench.simulations.civil_violence.results import EvaluationResult as CivilViolenceResult
@@ -211,6 +211,7 @@ class BenchmarkRunner:
                 for index, result in enumerate(self.results):
                     on_case(index, result)
             model = self.model_factory(setup.selection)
+            await probe_request(model, setup.selection.settings)
             for case_index, settings in enumerate(self.config.cases[first:], start=first):
                 case_writer = ArtifactWriter(
                     self.output_directory / "cases" / f"{case_index + 1:03d}"

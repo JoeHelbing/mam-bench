@@ -1,10 +1,18 @@
 """Provider construction and settings shared by every simulation."""
 
+import hashlib
+import json
+import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import cast
 
+import anthropic
+import httpx2 as httpx
+import openai
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
+from openai.types.shared import ReasoningEffort
 from pydantic import Field, SecretStr
 from pydantic_ai.models import Model
 from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
@@ -12,7 +20,9 @@ from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModel
 from pydantic_ai.models.openrouter import (
     OpenRouterModel,
     OpenRouterModelSettings,
+    OpenRouterReasoning,
 )
+from pydantic_ai.profiles.anthropic import AnthropicEffort
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -30,6 +40,8 @@ from mam_bench.qualification import FallbackLedger
 # failures itself with exponential backoff (0.5 s doubling to 8 s, honoring
 # Retry-After), about 80-100 s per request, before a session-level retry.
 PROVIDER_MAX_RETRIES = 16
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -76,6 +88,33 @@ class OpenRouterSettings(BaseSettings):
     api_key: SecretStr = Field(min_length=1)
 
 
+def _wire_recorder() -> Callable[[httpx.Request], Awaitable[None]]:
+    """Log each distinct request body once; conversation content stays in traces."""
+    seen: set[str] = set()
+
+    async def record(request: httpx.Request) -> None:
+        try:
+            body = json.loads(request.content)
+        except ValueError:
+            return
+        if not isinstance(body, dict):
+            return
+        shape = json.dumps(
+            {
+                k: v
+                for k, v in cast(dict[str, object], body).items()
+                if k not in ("messages", "input")
+            },
+            sort_keys=True,
+        )
+        key = hashlib.sha256(shape.encode()).hexdigest()
+        if key not in seen:
+            seen.add(key)
+            logger.info("request.wire method=%s url=%s body=%s", request.method, request.url, shape)
+
+    return record
+
+
 def create_model(selection: ModelSelection) -> Model:
     """Apply shared request overrides; sessions own action and summary output caps."""
 
@@ -90,10 +129,11 @@ def create_model(selection: ModelSelection) -> Model:
         request_settings["temperature"] = agent_settings.temperature
     if agent_settings.top_p is not None:
         request_settings["top_p"] = agent_settings.top_p
-    if agent_settings.reasoning_effort is not None:
-        request_settings["thinking"] = (
-            False if agent_settings.reasoning_effort == "none" else agent_settings.reasoning_effort
-        )
+    if (effort := agent_settings.reasoning_effort) is not None:
+        # Unified thinking only switches reasoning; each runtime's native field
+        # below carries the configured effort verbatim for the provider to judge.
+        request_settings["thinking"] = effort != "none"
+    hooks = {"request": [_wire_recorder()]}
     if agent_settings.top_k is not None:
         request_settings["extra_body"] = {"top_k": agent_settings.top_k}
 
@@ -103,32 +143,46 @@ def create_model(selection: ModelSelection) -> Model:
             request_settings["top_k"] = agent_settings.top_k
         if agent_settings.tool_choice is not None:
             request_settings["tool_choice"] = agent_settings.tool_choice
+        anthropic_settings = AnthropicModelSettings(
+            **request_settings,
+            anthropic_cache=True,
+            anthropic_cache_instructions=True,
+            anthropic_cache_tool_definitions=True,
+        )
+        if effort is not None and effort != "none":
+            anthropic_settings["anthropic_effort"] = cast(AnthropicEffort, effort)
         return AnthropicModel(
             selection.model,
             provider=AnthropicProvider(
-                anthropic_client=AsyncAnthropic(max_retries=PROVIDER_MAX_RETRIES)
+                anthropic_client=AsyncAnthropic(
+                    max_retries=PROVIDER_MAX_RETRIES,
+                    http_client=anthropic.DefaultAsyncHttpxClient(event_hooks=hooks),
+                )
             ),
-            settings=AnthropicModelSettings(
-                **request_settings,
-                anthropic_cache=True,
-                anthropic_cache_instructions=True,
-                anthropic_cache_tool_definitions=True,
-            ),
+            settings=anthropic_settings,
         )
 
     if selection.runtime == "openai":
         if agent_settings.top_k is not None:
             raise ValueError("OpenAI does not support settings.top_k")
         profile["json_schema_transformer"] = OpenAIFixedArrayTransformer
+        openai_settings = OpenAIResponsesModelSettings(
+            **request_settings,
+            openai_store=False,
+            openai_prompt_cache_key=f"mam-bench:{selection.model}",
+        )
+        if effort is not None:
+            openai_settings["openai_reasoning_effort"] = cast(ReasoningEffort, effort)
         return OpenAIResponsesModel(
             selection.model,
-            provider=OpenAIProvider(openai_client=AsyncOpenAI(max_retries=PROVIDER_MAX_RETRIES)),
-            profile=profile,
-            settings=OpenAIResponsesModelSettings(
-                **request_settings,
-                openai_store=False,
-                openai_prompt_cache_key=f"mam-bench:{selection.model}",
+            provider=OpenAIProvider(
+                openai_client=AsyncOpenAI(
+                    max_retries=PROVIDER_MAX_RETRIES,
+                    http_client=openai.DefaultAsyncHttpxClient(event_hooks=hooks),
+                )
             ),
+            profile=profile,
+            settings=openai_settings,
         )
 
     if selection.runtime == "vllm":
@@ -145,6 +199,7 @@ def create_model(selection: ModelSelection) -> Model:
                     base_url=selection.base_url,
                     api_key=VLLMSettings().api_key.get_secret_value(),
                     max_retries=PROVIDER_MAX_RETRIES,
+                    http_client=openai.DefaultAsyncHttpxClient(event_hooks=hooks),
                 )
             ),
             settings=vllm_settings(selection, request_settings),
@@ -164,6 +219,8 @@ def create_model(selection: ModelSelection) -> Model:
                 "require_parameters": True,
             },
         )
+        if effort is not None:
+            router_settings["openrouter_reasoning"] = cast(OpenRouterReasoning, {"effort": effort})
         router_settings["openrouter_cache_instructions"] = True
         router_settings["openrouter_cache_messages"] = True
         router_settings["openrouter_cache_tool_definitions"] = True
@@ -179,6 +236,7 @@ def create_model(selection: ModelSelection) -> Model:
                     api_key=settings.api_key.get_secret_value(),
                     default_headers={"X-Title": "MAM-Bench"},
                     max_retries=PROVIDER_MAX_RETRIES,
+                    http_client=openai.DefaultAsyncHttpxClient(event_hooks=hooks),
                 )
             ),
             settings=router_settings,

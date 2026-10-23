@@ -397,7 +397,32 @@ class CivilViolenceTests(SandboxTestCase):
         for role in ("citizen", "police"):
             await check(role)
 
-    async def test_local_null_policy_evaluation_has_identical_worlds_and_zero_score(self) -> None:
+    async def test_null_policy_world_scores_models_that_cannot_act_at_zero(self) -> None:
+        async def text_destination(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            arguments = (
+                {"active": True, "destination": "[1, 2]"}
+                if "active" in str(info.output_tools[0].parameters_json_schema)
+                else {"destination": "[1, 2]", "target_location": None}
+            )
+            return ModelResponse(parts=[ToolCallPart("act", arguments)])
+
+        for role in ("citizen", "police"):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as directory:
+                settings = civil(
+                    controlled_role=role, police_density=0.25 if role == "police" else 0
+                )
+                resources = runtime(Path(directory) / "case", FunctionModel(text_destination))
+                result = await CivilViolenceSim(settings).evaluate(resources)
+                case = resources.writer.directory
+                self.assertTrue(records(case / "turns.jsonl"))
+                self.assertEqual(records(case / "null.jsonl"), records(case / "controlled.jsonl"))
+                self.assertEqual(result.null, result.controlled)
+                self.assertEqual(result.null_score, result.score)
+                self.assertEqual(result.adjusted_score, 0)
+                saved = json.loads((case / "result.json").read_text())
+                self.assertEqual(saved["adjusted_score"], 0)
+
+    async def test_ordinary_equivalent_policy_has_identical_worlds_and_zero_score(self) -> None:
         async def check(role: str) -> None:
             with self.subTest(role=role), tempfile.TemporaryDirectory() as directory:
                 settings = civil(
@@ -504,6 +529,7 @@ class CivilViolenceTests(SandboxTestCase):
                         controlled_agent_ids=(),
                         scored_agent_ids=(1, 2),
                         reference=reference,
+                        null=reference,
                         controlled=controlled,
                     )
                     self.assertAlmostEqual(result.score, direction * expected)

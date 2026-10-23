@@ -16,7 +16,10 @@ from mam_bench.telemetry import collect_telemetry
 
 
 def format_case(index: int, result: CaseResult) -> str:
-    return f"Case {index + 1}: {result.config.model_dump_json()} score={result.score:+.6f}"
+    return (
+        f"Case {index + 1}: {result.config.model_dump_json()} score={result.score:+.6f}"
+        f" null={result.null_score:+.6f} adjusted={result.adjusted_score:+.6f}"
+    )
 
 
 def main(arguments: Sequence[str] | None = None) -> int:

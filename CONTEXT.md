@@ -105,11 +105,29 @@ comparing models within that simulation. Primary Score magnitudes are not
 directly comparable across Benchmark Simulations.
 _Avoid_: overall score, universal score, composite score
 
+**Null Policy**:
+The policy in which every model-controlled identity's turn takes its
+simulation's fallback action, with no model consulted. Each Test Case runs a
+null-policy world from the same seed as its reference and controlled worlds.
+_Avoid_: ordinary-equivalent policy, no-op model, random baseline
+
+**Null-Policy Score**:
+The Test Case score of the Null Policy world against the ordinary reference:
+what a model earns by never acting. It is often nonzero, because identities that
+never act change the world by themselves.
+_Avoid_: zero point, baseline dataset
+
+**Adjusted Score**:
+A Test Case's score minus its Null-Policy Score: the change a model produced
+beyond never acting. A model whose every turn falls back has an Adjusted Score
+of exactly zero.
+_Avoid_: normalized score, improvement percentage
+
 **Combined Benchmark Score**:
-The sum of signed per-test scores across all evaluated simulation, objective,
-condition, and seed variations, with no averaging or additional aggregation
-weights. Gains add and deterioration subtracts; totals are comparable only for
-the same test suite and scoring version.
+The sum of signed per-test Adjusted Scores across all evaluated simulation,
+objective, condition, and seed variations, with no averaging or additional
+aggregation weights. Gains add and deterioration subtracts; totals are
+comparable only for the same test suite and scoring version.
 _Avoid_: absolute goal achievement, percentage improvement over baseline
 
 **Benchmark Suite**:

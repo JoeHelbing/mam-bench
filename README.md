@@ -50,8 +50,10 @@ shipped suite contains six cases in three matched-seed goal pairs:
 | Civil Violence, citizen control (2 cases) | Increase / decrease participation | Ordinary-citizen participation and revolution |
 | Civil Violence, police control (2 cases) | Increase / decrease participation | The same ordinary-citizen outcomes |
 
-Each case produces a signed score. The **Combined Benchmark Score** sums all
-case scores (six in the shipped suite), including negative ones. One invocation
+Each case produces a signed score, plus the score of a null-policy world in
+which the model never acts. The **Combined Benchmark Score** sums every case's
+adjusted score (score minus null-policy score; six cases in the shipped suite),
+including negative ones, so a model that never acts totals zero. One invocation
 evaluates **one model**; compare totals only when the suite and scoring version
 are identical.
 Model responses and resulting trajectories can still vary between runs. See

@@ -28,7 +28,11 @@ from .settings import CivilViolenceSettings
 
 class CivilViolenceSim:
     def __init__(
-        self, settings: CivilViolenceSettings, *, runtime: CaseRuntime | None = None
+        self,
+        settings: CivilViolenceSettings,
+        *,
+        runtime: CaseRuntime | None = None,
+        null_policy: bool = False,
     ) -> None:
         self.settings, self.runtime = settings, runtime
         self.rng = np.random.default_rng(settings.seed)
@@ -61,7 +65,9 @@ class CivilViolenceSim:
             )
         )
         self.scored_agent_ids = tuple(i for i in self.citizens if i not in self.replacement_ids)
-        self.controlled_agent_ids: tuple[int, ...] = self.replacement_ids if runtime else ()
+        self.controlled_agent_ids: tuple[int, ...] = (
+            self.replacement_ids if runtime or null_policy else ()
+        )
         self.agents: dict[int, SimulationAgent] = {}
         for i in self.citizens:
             agent_type = (
@@ -346,6 +352,8 @@ class CivilViolenceSim:
                 },
             )
             reference_outcome = await self.run(runtime.writer, "ordinary")
+            null = CivilViolenceSim(self.settings, null_policy=True)
+            null_outcome = await null.run(runtime.writer, "null")
 
             controlled_outcome = await controlled.run(runtime.writer, "controlled")
             result = EvaluationResult(
@@ -353,6 +361,7 @@ class CivilViolenceSim:
                 controlled_agent_ids=self.replacement_ids,
                 scored_agent_ids=self.scored_agent_ids,
                 reference=reference_outcome,
+                null=null_outcome,
                 controlled=controlled_outcome,
             )
             runtime.writer.write("result.json", result)

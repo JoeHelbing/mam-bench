@@ -50,10 +50,12 @@ class RunnerTests(SandboxTestCase):
             result = await runner.run(on_case=lambda _, case: seen.append(case.config.simulation))
             self.assertEqual(seen, ["schelling", "civil-violence", "schelling"])
             self.assertAlmostEqual(result.cases[0].score, -result.cases[2].score)
-            self.assertAlmostEqual(result.total_score, result.cases[1].score)
+            self.assertAlmostEqual(result.total_score, result.cases[1].adjusted_score)
             assert runner.output_directory is not None
             saved = json.loads((runner.output_directory / "benchmark.json").read_text())
-            self.assertEqual(saved["total_score"], sum(case["score"] for case in saved["cases"]))
+            self.assertEqual(
+                saved["total_score"], sum(case["adjusted_score"] for case in saved["cases"])
+            )
             self.assertTrue((runner.output_directory / "effective-model.json").exists())
             before = {
                 p.relative_to(runner.output_directory): p.read_bytes()
@@ -73,6 +75,19 @@ class RunnerTests(SandboxTestCase):
                     (runner.output_directory / p).read_bytes() == data for p, data in before.items()
                 )
             )
+
+    async def test_total_counts_only_change_beyond_the_null_policy(self) -> None:
+        # A lone case has no matched goal pair to cancel its null-policy score.
+        with tempfile.TemporaryDirectory() as directory:
+            config = BenchmarkConfig(
+                model=selection(), cases=(schelling(),), output_directory=Path(directory)
+            )
+            runner = BenchmarkRunner(
+                config, model_factory=lambda _: streaming_model(FunctionModel(stay))
+            )
+            result = await runner.run()
+            self.assertNotEqual(result.cases[0].score, 0)
+            self.assertEqual(result.total_score, 0)
 
     async def test_failed_and_cancelled_cases_close_their_sandboxes(self) -> None:
         for kind in ("schelling", "civil-violence"):

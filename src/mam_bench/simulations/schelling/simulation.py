@@ -18,7 +18,13 @@ from .settings import SchellingSettings
 
 
 class SchellingSim:
-    def __init__(self, settings: SchellingSettings, *, runtime: CaseRuntime | None = None) -> None:
+    def __init__(
+        self,
+        settings: SchellingSettings,
+        *,
+        runtime: CaseRuntime | None = None,
+        null_policy: bool = False,
+    ) -> None:
         self.settings = settings
         self.runtime = runtime
         self.scheduler = TurnScheduler(
@@ -27,7 +33,7 @@ class SchellingSim:
         self.rng = np.random.default_rng(settings.seed)
         self.board = Board(settings, self.rng)
         self.controlled_agent_ids: tuple[int, ...] = (
-            settings.controlled_agent_ids if runtime else ()
+            settings.controlled_agent_ids if runtime or null_policy else ()
         )
         self.agents: tuple[SimulationAgent, ...] = tuple(
             ModelControlledAgent(self, identity)
@@ -189,6 +195,8 @@ class SchellingSim:
             )
             reference_outcome = await self.run(writer, "ordinary")
             controlled.reference_homophily = reference_outcome.homophily[-1]
+            null = SchellingSim(self.settings, null_policy=True)
+            null_outcome = await null.run(writer, "null")
 
             controlled_outcome = await controlled.run(writer, "controlled")
             result = EvaluationResult(
@@ -196,6 +204,7 @@ class SchellingSim:
                 controlled_agent_ids=ids,
                 scored_agent_ids=scored,
                 reference=reference_outcome,
+                null=null_outcome,
                 controlled=controlled_outcome,
             )
             writer.write("result.json", result)

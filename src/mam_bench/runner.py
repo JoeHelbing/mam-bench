@@ -27,14 +27,14 @@ type CaseResult = SchellingResult | CivilViolenceResult
 
 class BenchmarkResult(BaseModel):
     model_config = ConfigDict(frozen=True)
-    version: Literal["0.1.0"] = "0.1.0"
+    version: Literal["0.2.0"] = "0.2.0"
     model: ModelSelection
     cases: tuple[CaseResult, ...]
 
     @computed_field
     @property
     def total_score(self) -> float:
-        return sum(case.score for case in self.cases)
+        return sum(case.adjusted_score for case in self.cases)
 
 
 class BenchmarkRunFailure(RuntimeError):

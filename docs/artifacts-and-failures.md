@@ -14,10 +14,12 @@
   cases/001/
     config.json
     ordinary.jsonl
+    null.jsonl                   # null-policy world: every selected turn falls back
     controlled.jsonl
     ordinary-outcome.json         # retained even if the controlled world fails
+    null-outcome.json
     controlled-outcome.json
-    result.json                  # one simulation-owned result, including score
+    result.json                  # one simulation-owned result, including scores
     turns.jsonl                  # exhausted-turn reason and fallback, when needed
     failure.json                 # failed case, when storage permits
 ```
@@ -26,8 +28,9 @@ Each trajectory starts with initialization, then appends every completed step
 immediately after settlement. Civil Violence writes one state per full cycle,
 not separate phase snapshots. States contain stable identities, locations,
 simulation-specific state, and intermediate measurements. Case results contain
-the exact settings, scored/controlled identities, both outcomes and termination,
-and calculated scores. Those same result objects feed saved and displayed totals.
+the exact settings, scored/controlled identities, all three outcomes (reference,
+null policy, controlled) and termination, and the raw, null-policy, and adjusted
+scores. Those same result objects feed saved and displayed totals.
 The effective setup records discovered context/capabilities separately from
 requested settings. It does not claim to know unreported endpoint generation
 defaults. Requested sampling and reasoning values are forwarded verbatim; the

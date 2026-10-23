@@ -20,22 +20,14 @@
       "description": "pydantic-ai-harness 0.N pins pydantic-ai-slim==2.N.0, so they can only move together",
       "matchPackageNames": ["pydantic-ai-harness", "pydantic-ai-slim"],
       "groupName": "pydantic-ai"
+    },
+    {
+      "description": "Python versions are bumped by hand",
+      "matchDepNames": ["python"],
+      "enabled": false
     }
   ],
   "customManagers": [
-    {
-      "description": "Python pins outside mise's [tools]; same lookup as the mise manager so updates share one PR",
-      "customType": "regex",
-      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yml$/", "/^mise\\.toml$/"],
-      "matchStrings": [
-        "uv python install (?<currentValue>\\d+\\.\\d+\\.\\d+)",
-        "UV_PYTHON = \"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
-      ],
-      "depNameTemplate": "python",
-      "packageNameTemplate": "python/cpython",
-      "datasourceTemplate": "github-tags",
-      "extractVersionTemplate": "^v(?<version>\\S+)"
-    },
     {
       "description": "Ruff pin in CI; same lookup as the mise manager",
       "customType": "regex",

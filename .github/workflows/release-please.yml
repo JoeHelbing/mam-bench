@@ -25,7 +25,7 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           target-branch: main
-      - name: Queue main-to-dev back-merge
+      - name: Merge main back into dev
         if: ${{ steps.release.outputs.releases_created == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -35,8 +35,11 @@ jobs:
           if [ -z "$pr" ]; then
             pr=$(gh pr create --base dev --head main \
               --title 'chore(release): sync main into dev' \
-              --body 'Sync the release commit back into dev. GitHub will merge this PR after the required checks pass.')
+              --body 'Sync the release commit back into dev. The release workflow merges this PR after the required checks pass.')
           fi
-          if [ "$(gh pr view "$pr" --json autoMergeRequest --jq '.autoMergeRequest != null')" = false ]; then
-            gh pr merge "$pr" --auto --merge
-          fi
+          pr=${pr##*/}
+          # Auto-merge ignores the app's bypass of the squash-only dev ruleset,
+          # so wait for the required checks and merge directly.
+          sleep 30
+          gh pr checks "$pr" --watch --required --fail-fast
+          gh api -X PUT "repos/$GH_REPO/pulls/$pr/merge" -f merge_method=merge

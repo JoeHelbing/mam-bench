@@ -20,7 +20,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
-          version: 0.12.7
+          version: 0.13.3
           enable-cache: true
       - run: uv python install 3.14.7
       - run: uv sync --frozen --no-dev

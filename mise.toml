@@ -6,7 +6,7 @@ UV_PYTHON = "3.14.7"
 [tools]
 python = "3.14.7"
 uv = "0.13.3"
-ruff = "0.17.2"
+ruff = "0.17.3"
 "npm:pyright" = "1.1.414"
 "pipx:jupyterlab" = "4.6.4"
 "pipx:nbdev" = "3.3.25"

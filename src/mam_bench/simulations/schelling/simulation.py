@@ -18,7 +18,13 @@ from .settings import SchellingSettings
 
 
 class SchellingSim:
-    def __init__(self, settings: SchellingSettings, *, runtime: CaseRuntime | None = None) -> None:
+    def __init__(
+        self,
+        settings: SchellingSettings,
+        *,
+        runtime: CaseRuntime | None = None,
+        null_policy: bool = False,
+    ) -> None:
         self.settings = settings
         self.runtime = runtime
         self.scheduler = TurnScheduler(
@@ -27,7 +33,7 @@ class SchellingSim:
         self.rng = np.random.default_rng(settings.seed)
         self.board = Board(settings, self.rng)
         self.controlled_agent_ids: tuple[int, ...] = (
-            settings.controlled_agent_ids if runtime else ()
+            settings.controlled_agent_ids if runtime or null_policy else ()
         )
         self.agents: tuple[SimulationAgent, ...] = tuple(
             ModelControlledAgent(self, identity)
@@ -40,7 +46,6 @@ class SchellingSim:
                 ModelControlledAgent.model_interface(runtime),
                 settings=runtime.settings,
                 context_window_tokens=runtime.context_window_tokens,
-                artifact_directory=runtime.writer.directory,
             )
             if runtime
             else None
@@ -175,27 +180,32 @@ class SchellingSim:
         if self.steps or self.termination is not None or self.runtime is not None:
             raise RuntimeError("evaluation requires a fresh ordinary world")
         controlled = SchellingSim(self.settings, runtime=runtime)
-        writer = runtime.writer
-        ids = self.settings.controlled_agent_ids
-        scored = tuple(i for i in range(self.settings.agent_count) if i not in ids)
-        writer.write(
-            "config.json",
-            {
-                "settings": self.settings.model_dump(mode="json"),
-                "controlled_agent_ids": ids,
-                "scored_agent_ids": scored,
-            },
-        )
-        reference_outcome = await self.run(writer, "ordinary")
-        controlled.reference_homophily = reference_outcome.homophily[-1]
+        assert controlled.sessions is not None
+        async with controlled.sessions:
+            writer = runtime.writer
+            ids = self.settings.controlled_agent_ids
+            scored = tuple(i for i in range(self.settings.agent_count) if i not in ids)
+            writer.write(
+                "config.json",
+                {
+                    "settings": self.settings.model_dump(mode="json"),
+                    "controlled_agent_ids": ids,
+                    "scored_agent_ids": scored,
+                },
+            )
+            reference_outcome = await self.run(writer, "ordinary")
+            controlled.reference_homophily = reference_outcome.homophily[-1]
+            null = SchellingSim(self.settings, null_policy=True)
+            null_outcome = await null.run(writer, "null")
 
-        controlled_outcome = await controlled.run(writer, "controlled")
-        result = EvaluationResult(
-            config=self.settings,
-            controlled_agent_ids=ids,
-            scored_agent_ids=scored,
-            reference=reference_outcome,
-            controlled=controlled_outcome,
-        )
-        writer.write("result.json", result)
-        return result
+            controlled_outcome = await controlled.run(writer, "controlled")
+            result = EvaluationResult(
+                config=self.settings,
+                controlled_agent_ids=ids,
+                scored_agent_ids=scored,
+                reference=reference_outcome,
+                null=null_outcome,
+                controlled=controlled_outcome,
+            )
+            writer.write("result.json", result)
+            return result

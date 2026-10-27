@@ -18,18 +18,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
-          version: 0.12.7
+          version: 0.13.3
           enable-cache: true
       - run: uv python install 3.14.7
       - run: uv sync --frozen --no-dev
       - name: Tests
         run: uv run --no-sync python -m unittest discover -s tests -v
       - name: Ruff
-        run: uvx --from ruff==0.16.5 ruff check src tests main.py && uvx --from ruff==0.16.5 ruff format --check src tests main.py
+        run: uvx --from ruff==0.17.3 ruff check src tests main.py && uvx --from ruff==0.17.3 ruff format --check src tests main.py
       - name: Pyright
-        run: npx --yes pyright@1.1.413 --pythonpath .venv/bin/python
+        run: npx --yes pyright@1.1.414 --pythonpath .venv/bin/python
 
   pr-title:
     name: Conventional PR title

@@ -1,6 +1,5 @@
 import asyncio
 import os
-import unittest
 from unittest.mock import patch
 
 import httpx2 as httpx
@@ -11,10 +10,11 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from mam_bench.config import AgentSettings
 from mam_bench.diagnostics import ExecutionFailure, configure_logging
-from mam_bench.sessions import AgentSessions, Completed
+from mam_bench.sessions import PROVIDER_RETRY_DELAYS, AgentSessions, Completed
+from support import SandboxTestCase
 
 
-class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+class DiagnosticsTests(SandboxTestCase):
     def test_environment_log_level_overrides_config(self) -> None:
         with patch("mam_bench.diagnostics.logging.getLogger") as get_logger:
             with patch.dict(os.environ, {}, clear=True):
@@ -46,20 +46,24 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("CancelledError", log)
         self.assertNotIn("PRIVATE PROMPT", log)
 
-    async def test_http_timeout_is_distinct_and_does_not_log_request(self) -> None:
+    async def test_http_timeout_is_distinct_and_keeps_original_message(self) -> None:
         async def broken(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             raise APITimeoutError(request=httpx.Request("POST", "https://SECRET.invalid"))
 
         runtime = AgentSessions(Agent(FunctionModel(broken)), context_window_tokens=260_000)
+        retries = len(PROVIDER_RETRY_DELAYS)
         with (
             self.assertLogs("mam_bench", level="DEBUG") as captured,
-            self.assertRaises(ExecutionFailure),
+            self.assertRaises(ExecutionFailure) as failure,
         ):
             await runtime.run("actor", "SECRET PROMPT", deps=None)
+        self.assertEqual(failure.exception.kind, "timeout")
+        self.assertEqual(runtime.usage.requests, retries + 1)
         log = "\n".join(captured.output)
+        self.assertIn(f"request.failed session=actor retry={retries}/{retries}", log)
         self.assertIn("scope=http_request", log)
         self.assertIn("APITimeoutError", log)
-        self.assertNotIn("SECRET", log)
+        self.assertIn("Request timed out.", log)
 
     async def test_turn_summary_logs_usage_without_content(self) -> None:
         count = 0

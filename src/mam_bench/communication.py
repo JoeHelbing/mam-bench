@@ -1,13 +1,9 @@
 """A world-owned append-only message board with private unread positions."""
 
-import json
-from dataclasses import asdict, dataclass
-from pathlib import Path
+from dataclasses import dataclass
 
 from anyio import Lock
 from pydantic_ai import ModelRetry
-
-from mam_bench.diagnostics import ExecutionFailure
 
 
 @dataclass(frozen=True)
@@ -27,13 +23,10 @@ class MessagePage:
 class MessageBoard:
     """Publish authored messages and read complete records in chronological pages."""
 
-    def __init__(self, *, archive_path: Path | None = None) -> None:
+    def __init__(self) -> None:
         self._messages: list[Message] = []
         self._cursors: dict[str, int] = {}
         self._lock = Lock()
-        self._archive_path = archive_path
-        if archive_path is not None:
-            archive_path.touch(exist_ok=False)
 
     async def post(self, author_id: str, text: str, *, announcement: bool = False) -> int:
         if not author_id:
@@ -43,14 +36,6 @@ class MessageBoard:
         async with self._lock:
             sequence = len(self._messages)
             message = Message(sequence, author_id, text, announcement)
-            if self._archive_path is not None:
-                try:
-                    with self._archive_path.open("a", encoding="utf-8") as archive:
-                        archive.write(json.dumps(asdict(message)) + "\n")
-                except OSError as error:
-                    raise ExecutionFailure(
-                        "artifact_write", "message board write failed"
-                    ) from error
             self._messages.append(message)
             return sequence
 

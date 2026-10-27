@@ -1,12 +1,19 @@
 import asyncio
-import unittest
+import json
+import tempfile
+from collections.abc import AsyncIterable
 from decimal import Decimal
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from pydantic_ai import Agent, ModelMessage, ToolOutput, UsageLimits
-from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior
+import httpx2 as httpx
+import modal
+from openai import APIConnectionError, APIError, AsyncOpenAI
+from pydantic_ai import Agent, ModelMessage, RunContext, ToolOutput, UsageLimits
+from pydantic_ai.agent import EventStreamHandler
+from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior
 from pydantic_ai.messages import (
+    AgentStreamEvent,
     ModelRequest,
     ModelResponse,
     RetryPromptPart,
@@ -19,13 +26,27 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.usage import RequestUsage
-from pydantic_ai_harness.memory import InMemoryStore, MemoryFile
+from pydantic_ai.workspaces import Workspace
+from pydantic_ai_harness.modal_sandbox import ModalSandboxBackend
 
 from mam_bench.communication import MessageBoard
 from mam_bench.config import AgentSettings
 from mam_bench.diagnostics import ExecutionFailure
-from mam_bench.sessions import AgentSessions, Completed, Stopped
+from mam_bench.sessions import PROVIDER_RETRY_DELAYS, AgentSessions, Completed, Stopped
+from support import OfflineSandbox, SandboxTestCase
+
+
+def _transient_errors() -> list[Exception]:
+    return [
+        ModelHTTPError(408, "scripted"),
+        ModelHTTPError(409, "scripted"),
+        ModelHTTPError(429, "scripted"),
+        ModelHTTPError(503, "scripted"),
+        APIConnectionError(request=httpx.Request("POST", "https://provider.example.test/v1")),
+    ]
 
 
 def _response(
@@ -72,67 +93,32 @@ def _request_text(request: ModelRequest) -> str:
     return "\n".join(rendered)
 
 
-class MemoryModel:
+class FileModel:
     def __init__(self) -> None:
         self.tool_names: set[str] = set()
-        self.memory_blocks: list[str] = []
 
     async def __call__(self, messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         self.tool_names = {tool.name for tool in info.function_tools}
         request = _latest_request(messages)
-        tool_results = [part for part in request.parts if isinstance(part, ToolReturnPart)]
-        retry_parts = [part for part in request.parts if isinstance(part, RetryPromptPart)]
         text = _request_text(request)
-        self.memory_blocks.extend(
-            item.content
-            for part in request.parts
-            if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
-            for item in part.content
-            if isinstance(item, TextContent) and item.content.startswith("<memory>")
-        )
-
-        if "recall" in text:
-            return _response(TextPart("remembered" if "alpha is durable" in text else "empty"))
-        if tool_results:
-            return _response(TextPart("stored"))
-        if retry_parts:
-            return _response(TextPart("protected"))
         if "remember alpha" in text:
             return _response(
-                ToolCallPart(
-                    tool_name="write_memory",
-                    args={"content": "alpha is durable"},
-                    tool_call_id="write-alpha",
-                )
-            )
-        if "remember large" in text:
-            lines = [f"old-{index:03d}-" + "x" * 100 for index in range(300)]
-            lines.append("tail fact")
-            return _response(
-                ToolCallPart(
-                    tool_name="write_memory",
-                    args={"content": "\n".join(lines)},
-                    tool_call_id="write-large",
-                )
-            )
-        if "try deleting main" in text:
-            return _response(
-                ToolCallPart(
-                    tool_name="delete_memory",
-                    args={"file": "MEMORY.md"},
-                    tool_call_id="delete-main",
-                )
+                ToolCallPart("write_file", {"path": "notes.txt", "content": "alpha is durable"})
             )
         if "recall" in text:
-            remembered = "alpha is durable" in text
-            return _response(TextPart("remembered" if remembered else "empty"))
+            return _response(ToolCallPart("read_file", {"path": "notes.txt"}))
+        for part in request.parts:
+            if isinstance(part, ToolReturnPart):
+                return _response(
+                    TextPart(
+                        ("remembered" if "alpha is durable" in str(part.content) else "empty")
+                        if part.tool_name == "read_file"
+                        else "stored"
+                    )
+                )
+            if isinstance(part, RetryPromptPart):
+                return _response(TextPart("empty"))
         return _response(TextPart("ok"))
-
-
-class FailingReadStore(InMemoryStore):
-    async def read(self, path: str, *, max_chars: int) -> MemoryFile | None:
-        del path, max_chars
-        raise OSError("memory unavailable")
 
 
 class CompactionModel:
@@ -169,7 +155,421 @@ class CompactionModel:
         return _response(TextPart(f"normal-{self.normal_requests}"), cost=self.normal_cost)
 
 
-class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
+async def _drain_events(ctx: RunContext[None], events: AsyncIterable[AgentStreamEvent]) -> None:
+    async for _ in events:
+        pass
+
+
+class StreamingAgent(Agent[None, str]):
+    @property
+    def event_stream_handler(self) -> EventStreamHandler[None]:
+        return _drain_events
+
+
+class AgentSessionsTests(SandboxTestCase):
+    async def test_modal_startup_error_preserves_the_original_failure(self) -> None:
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            self.fail("Failed sandbox startup must not reach the model")
+
+        sessions = AgentSessions(Agent(FunctionModel(model)), context_window_tokens=260_000)
+        with (
+            patch("pydantic_ai_harness.modal_sandbox.ModalSandboxBackend", ModalSandboxBackend),
+            patch("modal.App.lookup.aio", AsyncMock(return_value=object())),
+            patch(
+                "modal.Sandbox.create.aio",
+                AsyncMock(side_effect=modal.exception.InvalidError("bad image")),
+            ),
+            patch(
+                "modal.Sandbox.from_name.aio",
+                AsyncMock(side_effect=modal.exception.NotFoundError("missing")),
+            ),
+            self.assertRaises(ExecutionFailure) as caught,
+        ):
+            async with sessions:
+                await sessions.run("a", "go", deps=None)
+        self.assertEqual(caught.exception.kind, "sandbox")
+        self.assertIn("bad image", str(caught.exception.__cause__))
+
+    async def test_cancellation_during_provisioning_waits_and_cleans_up(self) -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def prepare(backend: OfflineSandbox) -> None:
+            entered.set()
+            await release.wait()
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            self.fail("Cancelled preparation must not reach the model")
+
+        sessions = AgentSessions(Agent(FunctionModel(model)), context_window_tokens=260_000)
+
+        async def run() -> None:
+            async with sessions:
+                await sessions.run("a", "go", deps=None)
+
+        with patch.object(OfflineSandbox, "get_sandbox", prepare):
+            task = asyncio.create_task(run())
+            await entered.wait()
+            task.cancel()
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertTrue(self.sandboxes[0].closed)
+
+    async def test_workspace_is_private_persistent_and_observes_only_local_context(self) -> None:
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            instructions = info.instructions or ""
+            self.assertIn("Simulation-specific guidance.", instructions)
+            self.assertEqual(
+                instructions.count("Use read_messages and post_message to coordinate."), 1
+            )
+            self.assertIn("Each turn allows up to 25 model requests.", instructions)
+            names = {tool.name for tool in info.function_tools}
+            self.assertIn("shell", names)
+            self.assertIn("observe", names)
+            self.assertNotIn("delegate_task", names)
+            self.assertNotIn("write_memory", names)
+            latest = _latest_request(messages)
+            if any(isinstance(part, UserPromptPart) for part in latest.parts):
+                return _response(ToolCallPart("observe", {}))
+            result = next(p for p in latest.parts if isinstance(p, ToolReturnPart))
+            return _response(TextPart(str(result.content)))
+
+        sessions = AgentSessions(
+            Agent(FunctionModel(model), instructions="Simulation-specific guidance."),
+            context_window_tokens=260_000,
+        )
+        self.addAsyncCleanup(sessions.aclose)
+        first: dict[str, object] = {"step": 1, "location": [2, 3]}
+        result = await sessions.run("a", "go", deps=None, observation=first)
+        self.assertEqual(result, Completed(str(first)))
+        self.assertEqual(len(self.sandboxes), 1)
+        backend = self.sandboxes[0]
+        workspace = Workspace(backend)
+        await workspace.write_bytes("notes.txt", b"private notes")
+        second: dict[str, object] = {"step": 2, "location": [3, 4]}
+        await sessions.run("a", "again", deps=None, observation=second)
+        self.assertEqual(await workspace.read_bytes("notes.txt"), b"private notes")
+        self.assertEqual(
+            await workspace.read_bytes("observation.json"), b'{"step": 2, "location": [3, 4]}'
+        )
+        await sessions.run("b", "go", deps=None, observation={"step": 1})
+        self.assertEqual(len(self.sandboxes), 2)
+        self.assertFalse(await Workspace(self.sandboxes[1]).exists("notes.txt"))
+        self.assertEqual(backend.options["sandbox_timeout"], 43_200)
+        await sessions.aclose()
+        self.assertTrue(all(value.closed for value in self.sandboxes))
+
+    async def test_python_can_read_its_local_observation(self) -> None:
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            returns = [p for p in _latest_request(messages).parts if isinstance(p, ToolReturnPart)]
+            if returns:
+                self.assertIn("[2, 3]", str(returns[0].content))
+                return _response(TextPart("computed"))
+            return _response(
+                ToolCallPart(
+                    "shell",
+                    {
+                        "command": "python -c 'from observe import observe; "
+                        'print(observe()["location"])\''
+                    },
+                )
+            )
+
+        async with AgentSessions(
+            Agent(FunctionModel(model)), context_window_tokens=260_000
+        ) as sessions:
+            result = await sessions.run(
+                "a", "calculate", deps=None, observation={"location": [2, 3]}
+            )
+        self.assertEqual(result, Completed("computed"))
+        self.assertTrue(self.sandboxes[0].closed)
+
+    async def test_three_tool_failures_accumulate_across_successes_and_reset_next_turn(
+        self,
+    ) -> None:
+        calls = 0
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal calls
+            del info
+            _assert_complete_tool_history(messages)
+            calls += 1
+            match (calls - 1) % 5:
+                case 0:
+                    part = ToolCallPart("post_message", {"text": ""}, "bad-post")
+                case 1 | 3:
+                    part = ToolCallPart("post_message", {"text": "kept"}, "post")
+                case 2:
+                    part = ToolCallPart("post_message", {"text": {"invalid": True}}, "bad-schema")
+                case _:
+                    part = ToolCallPart("read_messages", {"invalid": True}, "bad-read")
+            return _response(part)
+
+        sessions = AgentSessions(
+            Agent(FunctionModel(model), retries=10), context_window_tokens=260_000
+        )
+        for turn in range(2):
+            self.assertEqual(await sessions.run("a", "go", deps=None), Stopped("call_error_limit"))
+            self.assertEqual(calls, (turn + 1) * 5)
+            _assert_complete_tool_history(list(sessions.history("a")))
+        self.assertEqual(sessions.usage.requests, 10)
+        self.assertEqual((await sessions.board.read("b")).content.count("kept"), 4)
+
+    async def test_tool_failure_limit_counts_each_call_in_a_batch_and_isolates_sessions(
+        self,
+    ) -> None:
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            del info
+            _assert_complete_tool_history(messages)
+            return _response(*(ToolCallPart("missing_tool", {}, f"missing-{i}") for i in range(3)))
+
+        sessions = AgentSessions(
+            Agent(FunctionModel(model), retries=10), context_window_tokens=260_000
+        )
+        results = await asyncio.gather(
+            sessions.run("a", "go", deps=None), sessions.run("b", "go", deps=None)
+        )
+        self.assertEqual(results, [Stopped("call_error_limit"), Stopped("call_error_limit")])
+        self.assertEqual(sessions.usage.requests, 2)
+        for identity in ("a", "b"):
+            _assert_complete_tool_history(list(sessions.history(identity)))
+
+    async def test_two_tool_failures_still_allow_a_valid_terminal_action(self) -> None:
+        calls = 0
+
+        async def stay() -> str:
+            return "stayed"
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal calls
+            del messages, info
+            calls += 1
+            return _response(
+                ToolCallPart("post_message", {"text": ""}, f"bad-{calls}")
+                if calls <= 2
+                else ToolCallPart("stay", {})
+            )
+
+        sessions = AgentSessions(
+            Agent(FunctionModel(model), output_type=ToolOutput(stay, name="stay"), retries=5),
+            context_window_tokens=260_000,
+        )
+        self.assertEqual(await sessions.run("a", "go", deps=None), Completed("stayed"))
+        self.assertEqual(calls, 3)
+
+    async def test_transient_errors_retry_within_the_request_budget_without_strikes(self) -> None:
+        retries = len(PROVIDER_RETRY_DELAYS)
+        for error in _transient_errors():
+            for limit in (1, 25):
+                with self.subTest(error=error, limit=limit):
+                    calls = 0
+
+                    async def model(
+                        messages: list[ModelMessage],
+                        info: AgentInfo,
+                        failure: Exception = error,
+                        max_failures: int = min(limit, retries),
+                    ) -> ModelResponse:
+                        nonlocal calls
+                        calls += 1
+                        if calls <= max_failures:
+                            raise failure
+                        return _response(TextPart("recovered"))
+
+                    runtime = AgentSessions(
+                        Agent(FunctionModel(model)), context_window_tokens=260_000
+                    )
+                    # Every retry still spends one request from the turn's allowance.
+                    self.assertEqual(
+                        await runtime.run(
+                            "a", "go", deps=None, usage_limits=UsageLimits(request_limit=limit)
+                        ),
+                        Stopped("usage_limit") if limit == 1 else Completed("recovered"),
+                    )
+                    self.assertEqual(calls, 1 if limit == 1 else retries + 1)
+                    self.assertEqual(runtime.usage.requests, calls)
+                    self.assertEqual(
+                        await runtime.run("a", "next", deps=None), Completed("recovered")
+                    )
+
+    async def test_provider_errors_that_outlast_retries_stop_the_world(self) -> None:
+        retries = len(PROVIDER_RETRY_DELAYS)
+        for error in _transient_errors():
+            with self.subTest(error=error):
+                calls = 0
+
+                async def model(
+                    messages: list[ModelMessage], info: AgentInfo, failure: Exception = error
+                ) -> ModelResponse:
+                    nonlocal calls
+                    calls += 1
+                    raise failure
+
+                runtime = AgentSessions(Agent(FunctionModel(model)), context_window_tokens=260_000)
+                with self.assertRaises(ExecutionFailure) as failure, self.assertLogs("mam_bench"):
+                    await runtime.run("a", "go", deps=None)
+                self.assertEqual(
+                    failure.exception.kind,
+                    "network" if isinstance(error, APIConnectionError) else "provider",
+                )
+                self.assertEqual(calls, retries + 1)
+                # No fallback: the whole world stops, so the case cannot be scored.
+                with self.assertRaises(ExecutionFailure):
+                    await runtime.run("b", "other", deps=None)
+
+    async def test_stream_errors_are_bounded_and_partial_calls_are_not_executed(self) -> None:
+        for failures in (1, len(PROVIDER_RETRY_DELAYS)):
+            for partial in (False, True):
+                with self.subTest(failures=failures, partial=partial):
+                    calls = 0
+                    directory = tempfile.TemporaryDirectory()
+                    self.addCleanup(directory.cleanup)
+
+                    def respond(
+                        request: httpx.Request, failures: int = failures, partial: bool = partial
+                    ) -> httpx.Response:
+                        nonlocal calls
+                        calls += 1
+                        choice: dict[str, object] = {
+                            "index": 0,
+                            "delta": {"content": "recovered"},
+                            "finish_reason": "stop",
+                        }
+                        if calls <= failures:
+                            choice = {
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": f"partial-{calls}",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "post_message",
+                                                "arguments": '{"text":"unexecuted"}',
+                                            },
+                                        }
+                                    ],
+                                },
+                                "finish_reason": None,
+                            }
+                        chunk = {
+                            "id": f"response-{calls}",
+                            "object": "chat.completion.chunk",
+                            "created": 1,
+                            "model": "scripted",
+                            "choices": [choice],
+                        }
+                        content = "data: " + json.dumps(chunk) + "\n\n"
+                        if calls <= failures:
+                            content = (
+                                content if partial else ""
+                            ) + 'data: {"error":{"message":"upstream unavailable","code":503}}\n\n'
+                        else:
+                            content += "data: [DONE]\n\n"
+                        return httpx.Response(
+                            200, headers={"content-type": "text/event-stream"}, content=content
+                        )
+
+                    async with AsyncOpenAI(
+                        api_key="offline-test",
+                        base_url="https://provider.example.test/v1",
+                        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+                        max_retries=0,
+                    ) as client:
+                        runtime = AgentSessions(
+                            StreamingAgent(
+                                OpenAIChatModel(
+                                    "scripted", provider=OpenAIProvider(openai_client=client)
+                                ),
+                                deps_type=type(None),
+                            ),
+                            context_window_tokens=260_000,
+                        )
+                        result = await runtime.run("a", "go", deps=None)
+                        self.assertEqual(result, Completed("recovered"))
+                        self.assertEqual(calls, failures + 1)
+                        self.assertEqual(runtime.usage.requests, calls)
+                        self.assertEqual((await runtime.board.read("b")).content, "")
+                        _assert_complete_tool_history(list(runtime.history("a")))
+                        self.assertEqual(
+                            await runtime.run("a", "next", deps=None), Completed("recovered")
+                        )
+                        self.assertEqual(
+                            await runtime.run("b", "other", deps=None), Completed("recovered")
+                        )
+
+    async def test_api_errors_do_not_use_the_tool_failure_budget(self) -> None:
+        calls = 0
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal calls
+            calls += 1
+            _assert_complete_tool_history(messages)
+            match calls:
+                case 1 | 3:
+                    return _response(ToolCallPart("post_message", {"text": ""}, f"bad-{calls}"))
+                case 2 | 4:
+                    raise ModelAPIError("scripted", "unavailable")
+                case 5:
+                    return _response(ToolCallPart("post_message", {"text": "saved"}, "post"))
+                case _:
+                    return _response(TextPart("recovered"))
+
+        runtime = AgentSessions(
+            Agent(FunctionModel(model), retries=5), context_window_tokens=260_000
+        )
+        # Two failed tool calls and two API errors: only the tool calls are strikes.
+        self.assertEqual(await runtime.run("a", "go", deps=None), Completed("recovered"))
+        self.assertEqual(calls, 6)
+        self.assertEqual(runtime.usage.requests, 6)
+        _assert_complete_tool_history(list(runtime.history("a")))
+        self.assertEqual((await runtime.board.read("b")).content.count("saved"), 1)
+        self.assertEqual(await runtime.run("a", "next", deps=None), Completed("recovered"))
+
+    async def test_permanent_http_errors_still_abort_without_retry(self) -> None:
+        for status in (400, 401, 403, 404, 422):
+            with self.subTest(status=status):
+                calls = 0
+
+                async def model(
+                    messages: list[ModelMessage], info: AgentInfo, status: int = status
+                ) -> ModelResponse:
+                    nonlocal calls
+                    calls += 1
+                    raise ModelHTTPError(status, "scripted", {"message": "invalid setup"})
+
+                runtime = AgentSessions(Agent(FunctionModel(model)), context_window_tokens=260_000)
+                for identity in ("a", "b"):
+                    with self.assertRaises(ExecutionFailure):
+                        await runtime.run(identity, "go", deps=None)
+                self.assertEqual(calls, 1)
+
+    async def test_failed_api_call_retries_without_repeating_completed_tools(self) -> None:
+        calls = 0
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal calls
+            del info
+            _assert_complete_tool_history(messages)
+            calls += 1
+            if calls == 1:
+                return _response(ToolCallPart("post_message", {"text": "saved"}, "post"))
+            if calls == 2:
+                raise APIError(
+                    "stream unavailable",
+                    request=httpx.Request("POST", "https://provider.example.test/v1"),
+                    body={"code": 503},
+                )
+            return _response(TextPart("recovered"))
+
+        runtime = AgentSessions(Agent(FunctionModel(model)), context_window_tokens=260_000)
+        self.assertEqual(await runtime.run("a", "go", deps=None), Completed("recovered"))
+        self.assertEqual(calls, 3)
+        self.assertEqual(runtime.usage.requests, 3)
+        self.assertEqual((await runtime.board.read("b")).content.count("saved"), 1)
+        self.assertEqual(await runtime.run("a", "next", deps=None), Completed("recovered"))
+
     async def test_truncated_tool_call_ends_turn_and_preserves_valid_history(self) -> None:
         calls = 0
         truncate = True
@@ -229,8 +629,8 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(await runtime.run("a", "again", deps=None), Completed("recovered"))
 
-    async def test_private_memory_and_history(self) -> None:
-        model = MemoryModel()
+    async def test_private_files_and_history(self) -> None:
+        model = FileModel()
         runtime = AgentSessions(Agent(FunctionModel(model)), context_window_tokens=260_000)
         self.assertEqual(await runtime.run("a", "remember alpha", deps=None), Completed("stored"))
         self.assertEqual(await runtime.run("a", "recall", deps=None), Completed("remembered"))
@@ -238,13 +638,13 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(runtime.history("a")), len(runtime.history("b")))
         self.assertIn("post_message", model.tool_names)
         self.assertIn("read_messages", model.tool_names)
-        self.assertEqual(runtime.usage.requests, 4)
+        self.assertEqual(runtime.usage.requests, 6)
         snapshot = runtime.usage
         snapshot.requests = 0
-        self.assertEqual(runtime.usage.requests, 4)
+        self.assertEqual(runtime.usage.requests, 6)
 
-    async def test_limit_preserves_memory_and_history_and_resets_per_turn(self) -> None:
-        model = MemoryModel()
+    async def test_limit_preserves_files_and_history_and_resets_per_turn(self) -> None:
+        model = FileModel()
         runtime = AgentSessions(Agent(FunctionModel(model)), context_window_tokens=260_000)
         result = await runtime.run(
             "a", "remember alpha", deps=None, usage_limits=UsageLimits(request_limit=1)
@@ -307,7 +707,6 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
                 compaction_trigger_fraction=0.5,
                 compaction_tail_tokens=20,
                 summary_completion_tokens=16,
-                memory_injection_tokens=100,
             ),
         )
         await runtime.run("a", "A" * 600, deps=None)
@@ -324,15 +723,6 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
                 for part in message.parts
             )
         )
-
-    async def test_memory_store_failure_poisons_runtime(self) -> None:
-        with patch("mam_bench.sessions.InMemoryStore", return_value=FailingReadStore()):
-            runtime = AgentSessions(
-                Agent(FunctionModel(MemoryModel())), context_window_tokens=260_000
-            )
-        for identity in ("a", "b"):
-            with self.assertRaisesRegex(ExecutionFailure, "notebook failed"):
-                await runtime.run(identity, "go", deps=None)
 
     async def test_message_board_pages_and_isolated_cursors(self) -> None:
         board = MessageBoard()
@@ -427,7 +817,6 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
                 compaction_trigger_fraction=0.5,
                 compaction_tail_tokens=20,
                 summary_completion_tokens=16,
-                memory_injection_tokens=100,
             ),
         )
         self.assertEqual(await runtime.run("a", "A" * 600, deps=None), Completed("normal-1"))
@@ -445,7 +834,6 @@ class AgentSessionsTests(unittest.IsolatedAsyncioTestCase):
             compaction_trigger_fraction=0.5,
             compaction_tail_tokens=20,
             summary_completion_tokens=16,
-            memory_injection_tokens=100,
         )
         fallback = CompactionModel(summary_error=ModelAPIError("scripted", "unavailable"))
         runtime = AgentSessions(

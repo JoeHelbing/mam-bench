@@ -91,10 +91,40 @@ score = direction * (100 * (controlled_participation - reference_participation)
 
 Revolution indicators are zero or one. Time to revolution is saved without a
 timing reward. Arrest alone does not reduce participation. A jailed model citizen
-retains its identity, session, memory, and shared-board access, receives an
+retains its identity, session, private workspace, and shared-board access, receives an
 explicit jailed observation, and ends its communication-only turn with `defer`.
 Physical actions retry; ordinary jailed citizens defer automatically.
 
-The Combined Benchmark Score sums every case score, including negative values,
-without averaging or additional weights. Compare totals only for the same suite
-and scoring version.
+Each case also runs a third, null-policy world from the same seed: the selected
+identities are present, but every one of their turns takes the simulation's
+fallback action without consulting the model. Schelling agents stay; Civil
+Violence citizens keep their activity without moving, police stay without
+arresting, and jailed citizens defer. Its outcome is scored against the
+reference with the formula above:
+
+```text
+null_score = score of the null-policy world
+adjusted_score = score - null_score
+```
+
+The null-policy score is what a model earns by never acting. It is often not
+zero: replacing ordinary agents with ones that never act changes the world by
+itself, and that change can favor or oppose the goal. The adjusted score counts
+only what the model changed beyond that. A model whose every turn falls back
+scores exactly zero.
+
+The Combined Benchmark Score sums every case's adjusted score, including
+negative values, without averaging or additional weights. In the shipped suite,
+each goal pair shares a seed, so their null-policy scores cancel and the total
+equals the sum of raw scores. Compare totals only for the same suite and
+scoring version.
+
+A model-controlled turn that ends without a valid action falls back. Provider
+errors never cause a fallback: they are retried for many minutes, and if a
+request still fails, the run stops as incomplete and can be resumed. A run
+whose fallbacks exceed 10% of its turns **fails**: the model cannot play the
+benchmark, and the run gets no score, not even the zero that the null policy
+itself would earn. The run also stops early when its failure is certain
+(fallbacks above 10% of every possible turn) or when half of its first 48 turns
+fall back. See [artifacts and failures](artifacts-and-failures.md) for the retry
+policy and recorded counts.

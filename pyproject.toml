@@ -10,14 +10,14 @@ dependencies = [
     "opentelemetry-instrumentation-logging>=0.65b0",
     "opentelemetry-sdk>=1.44.0",
     "pydantic>=2.13.5",
-    "pydantic-ai-harness>=0.29,<0.30",
-    "pydantic-ai-slim[openai]>=2.38.0",
+    "pydantic-ai-harness[coder,modal]>=0.57,<0.58",
+    "pydantic-ai-slim[anthropic,openai]>=2.57,<2.58",
     "pydantic-settings>=2.15.0",
     "pyyaml>=6.0.3",
 ]
 
 [build-system]
-requires = ["uv_build>=0.12.7,<0.13"]
+requires = ["uv_build>=0.13.3,<0.14"]
 build-backend = "uv_build"
 
 [tool.uv]

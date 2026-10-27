@@ -1,5 +1,6 @@
 """Strict YAML configuration for benchmark runs."""
 
+import re
 from pathlib import Path
 from typing import Annotated, Literal, Self, cast
 
@@ -18,7 +19,8 @@ class AgentSettings(BaseModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
     top_p: float | None = Field(default=None, gt=0, le=1)
     top_k: int | None = Field(default=None, ge=0)
-    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] | None = None
+    # Forwarded verbatim; the provider owns the vocabulary and rejects what it lacks.
+    reasoning_effort: str | None = Field(default=None, min_length=1)
     max_completion_tokens: int | None = Field(default=None, gt=0)
     concurrency: int = Field(default=4, gt=0)
     tool_choice: Literal["required", "auto"] | None = None
@@ -27,7 +29,7 @@ class AgentSettings(BaseModel):
     compaction_trigger_fraction: float = Field(default=0.7, gt=0, lt=1)
     compaction_tail_tokens: int | None = Field(default=None, ge=0)
     summary_completion_tokens: int | None = Field(default=None, gt=0)
-    memory_injection_tokens: int = Field(default=4_000, gt=0)
+    sandbox_timeout_seconds: int = Field(default=43_200, ge=10, le=86_400, strict=True)
 
     def compaction_tail(self, context_window_tokens: int) -> int:
         """Resolve the retained history against the actual serving context."""
@@ -40,21 +42,60 @@ class AgentSettings(BaseModel):
         return tail
 
 
-class OpenRouterModel(BaseModel):
-    """One selected model through the built-in OpenRouter adapter."""
+class RepetitionDetection(BaseModel):
+    """Stop consecutive repeated token patterns on supporting vLLM endpoints."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    runtime: Literal["openrouter"]
-    model: str = Field(min_length=1, pattern=r"^\S+/\S+$")
-    provider: str = Field(min_length=1, pattern=r"^\S(?:.*\S)?$")
+    min_pattern_size: int = Field(default=16, ge=1, strict=True)
+    max_pattern_size: int = Field(default=128, ge=1, strict=True)
+    min_count: int = Field(default=8, ge=2, strict=True)
+
+    @model_validator(mode="after")
+    def validate_pattern_sizes(self) -> Self:
+        if self.min_pattern_size > self.max_pattern_size:
+            raise ValueError("min_pattern_size must not exceed max_pattern_size")
+        return self
+
+
+class ModelSelection(BaseModel):
+    """Validate existing model YAML; native PydanticAI models own requests."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    runtime: Literal["openrouter", "vllm", "openai", "anthropic"]
+    model: str = Field(min_length=1)
     settings: AgentSettings = AgentSettings()
+    provider: str | None = Field(
+        default=None, min_length=1, pattern=r"^\S(?:.*\S)?$", exclude_if=lambda v: v is None
+    )
+    base_url: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    repetition_detection: RepetitionDetection | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
 
     # Derived by preflight, never accepted as user configuration.
     _completion_token_parameter: Literal["max_tokens", "max_completion_tokens"] = PrivateAttr(
         default="max_tokens"
     )
     _required_tool_choice_supported: bool | None = PrivateAttr(default=None)
+
+    @model_validator(mode="after")
+    def validate_connection(self) -> Self:
+        required = {
+            "vllm": {"base_url"},
+            "openrouter": {"provider"},
+        }.get(self.runtime, set())
+        allowed = required | {"runtime", "model", "settings"}
+        if self.runtime == "vllm":
+            allowed.add("repetition_detection")
+        if unexpected := self.model_fields_set - allowed:
+            raise ValueError(f"Unexpected fields for {self.runtime}: {sorted(unexpected)}")
+        if missing := {field for field in required if getattr(self, field) is None}:
+            raise ValueError(f"Missing fields for {self.runtime}: {sorted(missing)}")
+        if self.runtime == "openrouter" and re.fullmatch(r"\S+/\S+", self.model) is None:
+            raise ValueError("OpenRouter model must use vendor/model format")
+        return self
 
     @property
     def completion_token_parameter(self) -> Literal["max_tokens", "max_completion_tokens"]:
@@ -76,41 +117,6 @@ class OpenRouterModel(BaseModel):
         return resolved
 
 
-class RepetitionDetection(BaseModel):
-    """Stop consecutive repeated token patterns on supporting vLLM endpoints."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    min_pattern_size: int = Field(default=16, ge=1, strict=True)
-    max_pattern_size: int = Field(default=128, ge=1, strict=True)
-    min_count: int = Field(default=8, ge=2, strict=True)
-
-    @model_validator(mode="after")
-    def validate_pattern_sizes(self) -> Self:
-        if self.min_pattern_size > self.max_pattern_size:
-            raise ValueError("min_pattern_size must not exceed max_pattern_size")
-        return self
-
-
-class VLLMModel(BaseModel):
-    """One selected model through PydanticAI's native vLLM provider."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    runtime: Literal["vllm"]
-    model: str
-    base_url: str
-    api_key_env: str
-    settings: AgentSettings = AgentSettings()
-    repetition_detection: RepetitionDetection | None = None
-
-
-ModelSelection = Annotated[
-    OpenRouterModel | VLLMModel,
-    Field(discriminator="runtime"),
-]
-
-
 # Both shipped and custom suites use the same discriminated case schema.
 CaseSettings = Annotated[
     SchellingSettings | CivilViolenceSettings, Field(discriminator="simulation")
@@ -120,7 +126,7 @@ CaseSettings = Annotated[
 class BenchmarkConfig(BaseModel):
     """One explicit model and an ordered, fully specified suite."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
     model: ModelSelection
     cases: tuple[CaseSettings, ...] = Field(min_length=1)
     output_directory: Path

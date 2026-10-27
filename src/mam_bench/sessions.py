@@ -1,14 +1,16 @@
-"""Private agent sessions, memory, archives, and bounded individual turns."""
+"""Private agent sessions, workspaces, and bounded individual turns."""
 
 import asyncio
-import hashlib
+import json
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import AsyncIterable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
-from pathlib import Path
+from datetime import datetime
 from time import monotonic
+from types import TracebackType
+from typing import cast
 
 from anyio import Lock
 from openai import APIConnectionError, APIError, APITimeoutError
@@ -21,35 +23,157 @@ from pydantic_ai import (
     UserContent,
     capture_run_messages,
 )
-from pydantic_ai.capabilities import AgentCapability
+from pydantic_ai.agent import ModelRequestNode
+from pydantic_ai.capabilities import AbstractCapability, AgentCapability
+from pydantic_ai.capabilities.abstract import AgentNode, NodeResult
 from pydantic_ai.exceptions import (
     IncompleteToolCall,
     ModelAPIError,
     UnexpectedModelBehavior,
     UsageLimitExceeded,
 )
+from pydantic_ai.messages import (
+    AgentStreamEvent,
+    ModelRequest,
+    ModelResponse,
+    RetryPromptPart,
+    ToolCallPart,
+    ToolReturnPart,
+)
+from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.workspaces import Workspace, WorkspaceError
 from pydantic_ai_harness import (
+    Coder,
     FallbackCompaction,
-    Memory,
     SlidingWindowCompaction,
     SummarizingCompaction,
     TieredCompaction,
+    modal_sandbox,
 )
-from pydantic_ai_harness.memory import (
-    InMemoryStore,
-    MemoryConflictError,
-    MemoryOperationConflictError,
-)
-from pydantic_ai_harness.step_persistence import StepPersistence
 
-from mam_bench.artifacts import AgentMessageArchive
 from mam_bench.communication import MessageBoard, MessagePage
 from mam_bench.config import AgentSettings
 from mam_bench.diagnostics import ExecutionFailure, failure_trace
+from mam_bench.sandboxes import new_workspace
 
 logger = logging.getLogger(__name__)
+
+
+async def stream_responses(
+    _ctx: RunContext[object], _events: AsyncIterable[AgentStreamEvent]
+) -> None:
+    """Enable native streaming without adding a second recorder."""
+
+
+# Waits before each session-level retry of a transient provider error, after the
+# provider client's own retries. Exhausting them stops the world: a provider error
+# never becomes a simulation fallback.
+PROVIDER_RETRY_DELAYS = (15.0, 30.0, 60.0, 120.0, 240.0)
+
+
+class _CallErrorLimitReached(Exception):
+    pass
+
+
+class _CallErrors[DepsT](AbstractCapability[DepsT]):
+    """Bound failed tool calls per turn; retry transient provider errors with backoff."""
+
+    def __init__(self, history: Sequence[ModelMessage]) -> None:
+        self._seen = self._tool_failures(history)
+        self._count = 0
+        self._provider_retries = 0
+        self._requests_before = 0
+
+    @staticmethod
+    def _tool_failures(messages: Sequence[ModelMessage]) -> set[tuple[datetime | None, str]]:
+        return {
+            (message.timestamp, part.tool_call_id)
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if (
+                isinstance(part, RetryPromptPart)
+                and part.tool_name is not None
+                or isinstance(part, ToolReturnPart)
+                and part.outcome == "failed"
+            )
+        }
+
+    async def before_model_request(
+        self, ctx: RunContext[DepsT], request_context: ModelRequestContext
+    ) -> ModelRequestContext:
+        # Settled tool batches retain all replies and accepted effects.
+        failures = self._tool_failures(request_context.messages)
+        self._count += len(failures - self._seen)
+        self._seen.update(failures)
+        if self._count >= 3:
+            raise _CallErrorLimitReached
+        self._requests_before = ctx.usage.requests
+        return request_context
+
+    async def after_model_request(
+        self,
+        ctx: RunContext[DepsT],
+        *,
+        request_context: ModelRequestContext,
+        response: ModelResponse,
+    ) -> ModelResponse:
+        self._provider_retries = 0  # Backoff applies to consecutive failures only.
+        return response
+
+    async def on_node_run_error(
+        self, ctx: RunContext[DepsT], *, node: AgentNode[DepsT], error: Exception
+    ) -> NodeResult[DepsT]:
+        # The node boundary also catches errors while consuming an open stream.
+        if not isinstance(node, ModelRequestNode) or not isinstance(
+            error, (APIError, ModelAPIError)
+        ):
+            raise error
+        detail = error
+        while isinstance(detail.__cause__, (APIError, ModelAPIError)):
+            detail = detail.__cause__
+        status = getattr(detail, "status_code", None)
+        body = getattr(detail, "body", None)
+        if status is None and isinstance(body, dict):
+            status = cast(dict[str, object], body).get("code")
+        if isinstance(status, int) and 400 <= status < 500 and status not in (408, 409, 429):
+            raise error
+        # Native streaming increments only after the stream opens; failed opens count too.
+        if ctx.usage.requests == self._requests_before:
+            ctx.usage.requests += 1
+        if self._provider_retries == len(PROVIDER_RETRY_DELAYS):
+            raise error
+        delay = PROVIDER_RETRY_DELAYS[self._provider_retries]
+        self._provider_retries += 1
+        logger.warning(
+            "request.failed session=%s retry=%d/%d wait_s=%.0f exception=%s status=%s "
+            "error=%s body=%r",
+            ctx.conversation_id,
+            self._provider_retries,
+            len(PROVIDER_RETRY_DELAYS),
+            delay,
+            type(error).__name__,
+            status if isinstance(status, int) else None,
+            error,
+            cast(object, body),
+        )
+        parts: list[ToolReturnPart | RetryPromptPart] = []
+        if ctx.messages and isinstance(last := ctx.messages[-1], ModelResponse):
+            # Partial streamed tool calls were never executed. Pair them before retrying.
+            parts.extend(
+                ToolReturnPart(
+                    tool_name=part.tool_name,
+                    tool_call_id=part.tool_call_id,
+                    content="Provider request failed; this tool call was not executed.",
+                )
+                for part in last.parts
+                if isinstance(part, ToolCallPart)
+            )
+        parts.append(RetryPromptPart(content="Provider request failed. Try again."))
+        await asyncio.sleep(delay)
+        return ModelRequestNode(ModelRequest(parts=parts))
 
 
 class _Compaction[DepsT](FallbackCompaction[DepsT]):
@@ -88,10 +212,26 @@ class Stopped:
 class _SessionState:
     history: list[ModelMessage] = field(default_factory=lambda: list[ModelMessage]())
     lock: Lock = field(default_factory=Lock)
+    workspace: modal_sandbox.ModalSandboxBackend | None = None
+    preparation: asyncio.Task[None] | None = None
 
 
 class AgentSessions[AgentDepsT, OutputDataT]:
-    """Share one model and message board across isolated histories and notebooks."""
+    """Share one model and message board across private histories and sandboxes."""
+
+    INSTRUCTIONS = """
+Use read_messages and post_message to coordinate. Call observe() for your local
+observation. In Python, use from observe import observe; observe() reads the same
+snapshot from observation.json. Your private /workspace files persist across
+your turns in this case. You may save notes, code, and results for later turns.
+Posts are unverified; simulation announcements are marked separately.
+Respond with tool calls, not plain text. Finish code and messaging before
+submitting your action. A valid terminal action ends the turn; other calls in
+the same response are skipped. Invalid actions return retry feedback without
+reserving any part of the action.
+Each turn allows up to 25 model requests. Three failed tool or transient API calls
+end the turn; successful calls do not reset this failure count.
+""".strip()
 
     def __init__(
         self,
@@ -99,23 +239,67 @@ class AgentSessions[AgentDepsT, OutputDataT]:
         *,
         context_window_tokens: int,
         settings: AgentSettings | None = None,
-        artifact_directory: Path | None = None,
     ) -> None:
         self._agent = agent
         self._settings = settings or AgentSettings()
         self._context_window_tokens = context_window_tokens
-        self._store = InMemoryStore()
         self._states: dict[str, _SessionState] = {}
+        self._closed = False
         self._failure: BaseException | None = None
         self._usage = RunUsage()
-        self._archive = None
-        if artifact_directory is not None:
-            artifact_directory.mkdir(parents=True, exist_ok=True)
-            self._archive = AgentMessageArchive(
-                artifact_directory / "agent-messages", media_store=None
-            )
-        self.board = MessageBoard(
-            archive_path=artifact_directory / "message-board.jsonl" if artifact_directory else None
+        self.board = MessageBoard()
+
+    async def __aenter__(self) -> AgentSessions[AgentDepsT, OutputDataT]:
+        self._check_active()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        cleanup = asyncio.create_task(self.aclose())
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            await cleanup
+            raise
+        except Exception:
+            if exc is None:
+                raise
+            logger.exception("sandbox.cleanup_failed while unwinding failed case")
+
+    async def aclose(self) -> None:
+        """Finish provisioning, then destroy every sandbox owned by this case."""
+        self._closed = True
+
+        async def close(state: _SessionState) -> None:
+            if state.preparation is not None:
+                # Creation is shielded from turn cancellation, so retain its eventual ref.
+                await asyncio.gather(state.preparation, return_exceptions=True)
+            if state.workspace is not None and (ref := state.workspace.ref) is not None:
+                await modal_sandbox.ModalSandbox().destroy(ref)
+                state.workspace = None
+
+        results = await asyncio.gather(
+            *(close(s) for s in self._states.values()), return_exceptions=True
+        )
+        failures = [r for r in results if isinstance(r, BaseException)]
+        if failures:
+            raise ExecutionFailure(
+                "sandbox_cleanup", "could not terminate all case sandboxes"
+            ) from failures[0]
+
+    async def _prepare_workspace(self, session_id: str, state: _SessionState) -> None:
+        assert state.workspace is not None
+        await state.workspace.get_sandbox()
+        logger.info("sandbox.ready session=%s ref=%s", session_id, state.workspace.ref)
+        await Workspace(state.workspace).write_text(
+            "observe.py",
+            "import json\nfrom pathlib import Path\n\n"
+            "def observe():\n"
+            '    return json.loads(Path(__file__).with_name("observation.json").read_text())\n',
         )
 
     @property
@@ -130,7 +314,9 @@ class AgentSessions[AgentDepsT, OutputDataT]:
     def history(self, session_id: str) -> tuple[ModelMessage, ...]:
         return tuple(self._state(session_id).history)
 
-    def _board_tools(self, session_id: str) -> FunctionToolset[AgentDepsT]:
+    def _board_tools(
+        self, session_id: str, observation: dict[str, object] | None
+    ) -> FunctionToolset[AgentDepsT]:
         tools: FunctionToolset[AgentDepsT] = FunctionToolset()
 
         async def read_messages() -> MessagePage:
@@ -147,6 +333,15 @@ class AgentSessions[AgentDepsT, OutputDataT]:
             strict=self._settings.strict_parameterless_tools or None,
         )
         tools.add_function(post_message, takes_ctx=False)
+        if observation is not None:
+
+            def observe() -> dict[str, object]:
+                """Read your local observation; in Python use from observe import observe."""
+                return observation
+
+            tools.add_function(
+                observe, takes_ctx=False, strict=self._settings.strict_parameterless_tools or None
+            )
         return tools
 
     async def run(
@@ -158,6 +353,7 @@ class AgentSessions[AgentDepsT, OutputDataT]:
         model_settings: ModelSettings | None = None,
         usage_limits: UsageLimits | None = None,
         capabilities: Sequence[AgentCapability[AgentDepsT]] = (),
+        observation: dict[str, object] | None = None,
     ) -> Completed[OutputDataT] | Stopped:
         """Run a bounded turn; native limit/retry stops preserve the session.
 
@@ -184,31 +380,44 @@ class AgentSessions[AgentDepsT, OutputDataT]:
             )
             with capture_run_messages() as messages:
                 try:
+                    if state.preparation is None:
+                        state.workspace = new_workspace(self._settings.sandbox_timeout_seconds)
+                        state.preparation = asyncio.create_task(
+                            self._prepare_workspace(session_id, state)
+                        )
+                    await asyncio.shield(state.preparation)
+                    assert state.workspace is not None
+                    if observation is not None:
+                        await Workspace(state.workspace).write_text(
+                            "observation.json", json.dumps(observation)
+                        )
                     async with deadline:
                         result = await self._agent.run(
                             user_prompt,
                             conversation_id=session_id,
                             message_history=state.history,
+                            instructions=self.INSTRUCTIONS,
                             deps=deps,
+                            workspace=state.workspace,
                             model_settings=model_settings,
                             usage=usage,
                             usage_limits=usage_limits or UsageLimits(request_limit=25),
                             capabilities=(
-                                *(
-                                    (StepPersistence(store=self._archive, agent_name=session_id),)
-                                    if self._archive is not None
-                                    else ()
-                                ),
+                                _CallErrors[AgentDepsT](state.history),
                                 self._compaction(),
-                                self._memory(session_id),
+                                Coder(sub_agents=False, repo_context=False),
                                 *capabilities,
                             ),
-                            toolsets=[self._board_tools(session_id)],
+                            toolsets=[self._board_tools(session_id, observation)],
                         )
+                except _CallErrorLimitReached:
+                    outcome = "call_error_limit"
+                    logger.info("turn.stop session=%s reason=%s", session_id, outcome)
+                    turn: Completed[OutputDataT] | Stopped = Stopped(outcome)
                 except UsageLimitExceeded:
                     outcome = "usage_limit"
                     logger.info("turn.stop session=%s reason=usage_limit", session_id)
-                    turn: Completed[OutputDataT] | Stopped = Stopped(outcome)
+                    turn = Stopped(outcome)
 
                 except IncompleteToolCall:
                     outcome = "output_token_limit"
@@ -232,7 +441,7 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                         self._failure = ExecutionFailure(
                             "provider", "model returned an unusable response"
                         )
-                        raise self._failure from None
+                        raise self._failure from error
                     logger.info("turn.stop session=%s reason=%s", session_id, outcome)
                     turn = Stopped(outcome)
                 except (APITimeoutError, TimeoutError) as error:
@@ -258,10 +467,16 @@ class AgentSessions[AgentDepsT, OutputDataT]:
                     self._failure = ExecutionFailure("network", "model connection failed")
                     raise self._failure from error
                 except (APIError, ModelAPIError) as error:
+                    logger.error(
+                        "provider.failed session=%s error=%s body=%r",
+                        session_id,
+                        error,
+                        getattr(error, "body", None),
+                    )
                     self._failure = ExecutionFailure("provider", "model request failed")
                     raise self._failure from error
-                except (MemoryConflictError, MemoryOperationConflictError, OSError) as error:
-                    self._failure = ExecutionFailure("memory_store", "notebook failed")
+                except WorkspaceError as error:
+                    self._failure = ExecutionFailure("sandbox", "agent workspace failed")
                     raise self._failure from error
                 except BaseException as error:
                     self._failure = error
@@ -299,16 +514,8 @@ class AgentSessions[AgentDepsT, OutputDataT]:
     def _check_active(self) -> None:
         if self._failure is not None:
             raise self._failure
-
-    def _memory(self, session_id: str) -> Memory[AgentDepsT]:
-        self._state(session_id)
-        return Memory(
-            store=self._store,
-            namespace=f"session-{hashlib.sha256(session_id.encode()).hexdigest()}",
-            agent_name="agent",
-            max_tokens=self._settings.memory_injection_tokens,
-            injection_errors="raise",
-        )
+        if self._closed:
+            raise RuntimeError("agent sessions are closed")
 
     def _compaction(self) -> TieredCompaction[AgentDepsT]:
         settings = self._settings

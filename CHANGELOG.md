@@ -1,5 +1,32 @@
 # Changelog
 
+## [2.0.0](https://github.com/JoeHelbing/mam-bench/compare/v1.0.2...v2.0.0) (2026-10-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **runs:** case results require a `null` outcome and add `null_score` and `adjusted_score`; BenchmarkResult version is 0.2.0 and total_score sums adjusted scores. Cases write null.jsonl and null-outcome.json.
+* **scoring:** case results require a `null` outcome and add `null_score` and `adjusted_score`; BenchmarkResult version is 0.2.0 and total_score sums adjusted scores. Cases write null.jsonl and null-outcome.json.
+* **settings:** Anthropic efforts now go out as output_config.effort instead of PydanticAI's budget mapping; budget-only models may refuse.
+* **agents:** add private Modal workspaces ([#63](https://github.com/JoeHelbing/mam-bench/issues/63))
+
+### Features
+
+* **agents:** add private Modal workspaces ([#63](https://github.com/JoeHelbing/mam-bench/issues/63)) ([0a9d5bb](https://github.com/JoeHelbing/mam-bench/commit/0a9d5bb1253c890744cae2235c72018a563bbb49))
+* **anthropic:** support native API benchmark runs ([#61](https://github.com/JoeHelbing/mam-bench/issues/61)) ([ae2c582](https://github.com/JoeHelbing/mam-bench/commit/ae2c582f74b81d8767a57e72d642a2d9eed69490))
+* **openai:** support native API benchmark runs ([#60](https://github.com/JoeHelbing/mam-bench/issues/60)) ([8550df9](https://github.com/JoeHelbing/mam-bench/commit/8550df930323f2abb0ca194e1e5c67292663eafb))
+* **runs:** fail runs whose model cannot play; retry provider errors instead of falling back ([#69](https://github.com/JoeHelbing/mam-bench/issues/69)) ([2a11516](https://github.com/JoeHelbing/mam-bench/commit/2a11516b1332c9eaf0c7d432988e42df61f006a4))
+* **scoring:** score each case against a null-policy world ([#68](https://github.com/JoeHelbing/mam-bench/issues/68)) ([9be6032](https://github.com/JoeHelbing/mam-bench/commit/9be6032ef50d744a2d326bc4d6ac7ed0d3d5decd))
+* **settings:** let providers judge reasoning_effort and sampling values ([#65](https://github.com/JoeHelbing/mam-bench/issues/65)) ([abf060b](https://github.com/JoeHelbing/mam-bench/commit/abf060ba0dd58dc2ff322690aa4be17369de7eee))
+
+
+### Bug Fixes
+
+* **deps:** update pydantic-ai ([#80](https://github.com/JoeHelbing/mam-bench/issues/80)) ([a041fa6](https://github.com/JoeHelbing/mam-bench/commit/a041fa64cbd2d08ec22f8f95ec4266483db6842c))
+* **models:** isolate client workarounds and document serving fixes ([#53](https://github.com/JoeHelbing/mam-bench/issues/53)) ([0cccf3d](https://github.com/JoeHelbing/mam-bench/commit/0cccf3d1a586c722b62a58b0bcd82362b1520221))
+* recover transient API call failures within turns ([#57](https://github.com/JoeHelbing/mam-bench/issues/57)) ([cac856b](https://github.com/JoeHelbing/mam-bench/commit/cac856b8d237336db234718ca1c09ead7721b097))
+* **runtime:** bring streaming capture changes into dev ([#59](https://github.com/JoeHelbing/mam-bench/issues/59)) ([25baebf](https://github.com/JoeHelbing/mam-bench/commit/25baebf387806388ac80e9f1d48985e6b8f45fa0))
+
 ## [1.0.2](https://github.com/JoeHelbing/mam-bench/compare/v1.0.1...v1.0.2) (2026-10-15)
 
 

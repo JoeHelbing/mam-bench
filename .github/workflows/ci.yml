@@ -27,7 +27,7 @@ jobs:
       - name: Tests
         run: uv run --no-sync python -m unittest discover -s tests -v
       - name: Ruff
-        run: uvx --from ruff==0.16.5 ruff check src tests main.py && uvx --from ruff==0.16.5 ruff format --check src tests main.py
+        run: uvx --from ruff==0.17.2 ruff check src tests main.py && uvx --from ruff==0.17.2 ruff format --check src tests main.py
       - name: Pyright
         run: npx --yes pyright@1.1.414 --pythonpath .venv/bin/python
 

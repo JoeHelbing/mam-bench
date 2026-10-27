@@ -1,9 +1,11 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    "group:allNonMajor"
   ],
   "baseBranchPatterns": ["dev"],
+  "schedule": ["before 6am on monday"],
   "packageRules": [
     {
       "description": "Match uv's exclude-newer window so uv lock can resolve the update",

@@ -33,10 +33,12 @@ from pydantic_ai.exceptions import (
     UsageLimitExceeded,
 )
 from pydantic_ai.messages import (
+    ERROR_OUTCOMES,
     AgentStreamEvent,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
+    RetryFeedbackPart,
+    RetryInfo,
     ToolCallPart,
     ToolReturnPart,
 )
@@ -93,12 +95,7 @@ class _CallErrors[DepsT](AbstractCapability[DepsT]):
             for message in messages
             if isinstance(message, ModelRequest)
             for part in message.parts
-            if (
-                isinstance(part, RetryPromptPart)
-                and part.tool_name is not None
-                or isinstance(part, ToolReturnPart)
-                and part.outcome == "failed"
-            )
+            if isinstance(part, ToolReturnPart) and part.outcome in ERROR_OUTCOMES
         }
 
     async def before_model_request(
@@ -159,7 +156,7 @@ class _CallErrors[DepsT](AbstractCapability[DepsT]):
             error,
             cast(object, body),
         )
-        parts: list[ToolReturnPart | RetryPromptPart] = []
+        parts: list[ToolReturnPart | RetryFeedbackPart] = []
         if ctx.messages and isinstance(last := ctx.messages[-1], ModelResponse):
             # Partial streamed tool calls were never executed. Pair them before retrying.
             parts.extend(
@@ -171,7 +168,12 @@ class _CallErrors[DepsT](AbstractCapability[DepsT]):
                 for part in last.parts
                 if isinstance(part, ToolCallPart)
             )
-        parts.append(RetryPromptPart(content="Provider request failed. Try again."))
+        parts.append(
+            RetryFeedbackPart(
+                content="Provider request failed. Try again.",
+                retry=RetryInfo(cause="model_retry"),
+            )
+        )
         await asyncio.sleep(delay)
         return ModelRequestNode(ModelRequest(parts=parts))
 

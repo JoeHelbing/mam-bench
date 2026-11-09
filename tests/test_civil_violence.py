@@ -823,7 +823,7 @@ class CivilViolenceTests(SandboxTestCase):
             view = observation(messages)
             if identity in planned:
                 target, destination = planned[identity]
-                self.assertIn("RetryPromptPart", str(messages))
+                self.assertIn("outcome='retried'", str(messages))
                 self.assertIn(tuple(destination), sim.legal_destinations(identity))
                 self.assertEqual(
                     [c.location for c in sim.citizens.values() if c.location == tuple(target)],
@@ -889,7 +889,7 @@ class CivilViolenceTests(SandboxTestCase):
             identity = int(cast(str, info.instructions).split("Identity: ")[1].split(".")[0])
             if identity in planned:
                 destination = planned[identity]
-                self.assertIn("RetryPromptPart", str(messages))
+                self.assertIn("outcome='retried'", str(messages))
                 self.assertIn((destination[0], destination[1]), sim.legal_destinations(identity))
                 retried.add(identity)
                 return ModelResponse(
@@ -968,7 +968,7 @@ class CivilViolenceTests(SandboxTestCase):
                         return ModelResponse(
                             parts=[ToolCallPart("act", {"active": True, "destination": None})]
                         )
-                    if "RetryPromptPart" in str(messages):
+                    if "outcome='retried'" in str(messages):
                         targets.pop(identity, None)
                         return ModelResponse(
                             parts=[

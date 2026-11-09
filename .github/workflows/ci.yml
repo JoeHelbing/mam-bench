@@ -11,25 +11,50 @@ permissions:
   contents: read
 
 jobs:
-  checks:
-    name: Tests, Ruff, Pyright
+  tests:
+    name: Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: 0.13.3
+          version: 0.13.6
           enable-cache: true
       - run: uv python install 3.14.7
       - run: uv sync --frozen --no-dev
-      - name: Tests
-        run: uv run --no-sync python -m unittest discover -s tests -v
-      - name: Ruff
-        run: uvx --from ruff==0.17.3 ruff check src tests main.py && uvx --from ruff==0.17.3 ruff format --check src tests main.py
-      - name: Pyright
-        run: npx --yes pyright@1.1.414 --pythonpath .venv/bin/python
+      - run: uv run --no-sync python -m unittest discover -s tests -v
+
+  ruff:
+    name: Ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: 0.13.6
+          enable-cache: true
+      - run: uv python install 3.14.7
+      - run: uv sync --frozen
+      - run: uv run --no-sync ruff check src tests main.py && uv run --no-sync ruff format --check src tests main.py
+
+  pyright:
+    name: Pyright
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: 0.13.6
+          enable-cache: true
+      - run: uv python install 3.14.7
+      - run: uv sync --frozen
+      - run: uv run --no-sync pyright
 
   pr-title:
     name: Conventional PR title

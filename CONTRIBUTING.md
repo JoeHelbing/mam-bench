@@ -8,13 +8,13 @@ Target `dev` for changes. Use a Conventional Commit PR title such as `fix: corre
 
 ## Verification checks
 
-Run commands from the repository root. Use Python 3.14.7 and uv 0.12.7, as pinned
-in [mise.toml](mise.toml). If the environment is not ready, prepare the locked
-runtime dependencies first:
+Run commands from the repository root. Use the Python and uv versions pinned in
+[mise.toml](mise.toml). If the environment is not ready, prepare the locked
+dependencies first:
 
 ```fish
 uv python install 3.14.7
-uv sync --frozen --no-dev
+uv sync --frozen
 ```
 
 For code or test changes, run all of the following before opening or updating a
@@ -25,20 +25,18 @@ PR. These commands match the test, lint, format, and type checks in
 # Run the full offline suite.
 uv run --no-sync python -m unittest discover -s tests -v
 
-# Check lint and formatting with the pinned Ruff version.
-uvx --from ruff==0.16.5 ruff check src tests main.py
-uvx --from ruff==0.16.5 ruff format --check src tests main.py
+# Check lint and formatting.
+uv run --no-sync ruff check src tests main.py
+uv run --no-sync ruff format --check src tests main.py
 
 # Run strict type checking against the project environment; requires Node.js/npm.
-npx --yes pyright@1.1.413 --pythonpath .venv/bin/python
+uv run --no-sync pyright
 
 # Check the patch for whitespace errors.
 git diff --check
 ```
 
-Use installed tools at the same versions if available; `uvx` and `npx` may download
-their pinned tools. The tests use synthetic provider responses and require no
-model credentials or paid inference calls. They are one part of verification;
+The tests use synthetic provider responses and require no model credentials or paid inference calls. They are one part of verification;
 changes to real-input handling also need the
 [artifact-based validation](#end-to-end-validation-with-actual-artifacts) below.
 

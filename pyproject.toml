@@ -10,8 +10,8 @@ dependencies = [
     "opentelemetry-instrumentation-logging>=0.65b0",
     "opentelemetry-sdk>=1.44.0",
     "pydantic>=2.13.5",
-    "pydantic-ai-harness[coder,modal]>=0.57,<0.58",
-    "pydantic-ai-slim[anthropic,openai]>=2.57,<2.58",
+    "pydantic-ai-harness[coder,modal]>=0.64,<0.65",
+    "pydantic-ai-slim[anthropic,openai]>=2.64,<2.65",
     "pydantic-settings>=2.15.0",
     "pyyaml>=6.0.3",
 ]
@@ -42,4 +42,6 @@ typeCheckingMode = "strict"
 [dependency-groups]
 dev = [
     "ipykernel>=7.3.0",
+    "pyright>=1.1.414",
+    "ruff>=0.17.3",
 ]

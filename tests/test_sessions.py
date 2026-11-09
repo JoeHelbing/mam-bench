@@ -14,10 +14,9 @@ from pydantic_ai.agent import EventStreamHandler
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior
 from pydantic_ai.messages import (
     AgentStreamEvent,
+    CompactionPart,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
-    SystemPromptPart,
     TextContent,
     TextPart,
     ThinkingPart,
@@ -76,7 +75,7 @@ def _assert_complete_tool_history(messages: list[ModelMessage]) -> None:
             )
         else:
             for part in message.parts:
-                if isinstance(part, (ToolReturnPart, RetryPromptPart)):
+                if isinstance(part, ToolReturnPart):
                     pending.discard(part.tool_call_id)
     assert not pending, f"Unanswered calls at the end of the turn: {pending}"
 
@@ -116,8 +115,6 @@ class FileModel:
                         else "stored"
                     )
                 )
-            if isinstance(part, RetryPromptPart):
-                return _response(TextPart("empty"))
         return _response(TextPart("ok"))
 
 
@@ -716,10 +713,9 @@ class AgentSessionsTests(SandboxTestCase):
         self.assertEqual(runtime.usage.requests, 3)
         self.assertTrue(
             any(
-                isinstance(part, SystemPromptPart)
-                and "Summary of previous conversation" in part.content
+                isinstance(part, CompactionPart)
+                and "The compacted history is retained." in (part.content or "")
                 for message in runtime.history("a")
-                if isinstance(message, ModelRequest)
                 for part in message.parts
             )
         )

@@ -42,4 +42,6 @@ typeCheckingMode = "strict"
 [dependency-groups]
 dev = [
     "ipykernel>=7.3.0",
+    "pyright>=1.1.414",
+    "ruff>=0.17.3",
 ]

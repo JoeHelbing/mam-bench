@@ -37,7 +37,9 @@ jobs:
         with:
           version: 0.13.6
           enable-cache: true
-      - run: uvx --from ruff==0.17.4 ruff check src tests main.py && uvx --from ruff==0.17.4 ruff format --check src tests main.py
+      - run: uv python install 3.14.7
+      - run: uv sync --frozen
+      - run: uv run --no-sync ruff check src tests main.py && uv run --no-sync ruff format --check src tests main.py
 
   pyright:
     name: Pyright
@@ -51,8 +53,8 @@ jobs:
           version: 0.13.6
           enable-cache: true
       - run: uv python install 3.14.7
-      - run: uv sync --frozen --no-dev
-      - run: npx --yes pyright@1.1.414 --pythonpath .venv/bin/python
+      - run: uv sync --frozen
+      - run: uv run --no-sync pyright
 
   pr-title:
     name: Conventional PR title

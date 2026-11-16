@@ -354,18 +354,8 @@ class SchellingTests(SandboxTestCase):
             expected_draw = ordinary.scheduler.rng(0, "schelling", 10, "movement").random()
             await sim.step()
             self.assertTrue(checked)
-            starts = cast(list[int], initial["agent_locations"])
             assert sim.sessions is not None
-            announcements = (await sim.sessions.board.read("observer")).content.splitlines()
-            self.assertEqual(
-                {line.split("] ", 1)[1] for line in announcements},
-                {
-                    f"Step 1: agent {identity} accepted stay at [{r},{c}]."
-                    for identity in settings.controlled_agent_ids
-                    for r, c in [divmod(starts[identity], settings.board_size)]
-                },
-            )
-            self.assertTrue(all(" announcement by " in line for line in announcements))
+            self.assertEqual((await sim.sessions.board.read("observer")).content, "")
 
     def test_schelling_observation_groups_visible_cells_and_renders_wraparound(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -423,13 +413,39 @@ class SchellingTests(SandboxTestCase):
             sim = SchellingSim(schelling(), runtime=resources)
             origin = sim.agents[0].position
             await sim.step()
-            assert sim.sessions is not None
-            announcements = (await sim.sessions.board.read("observer")).content
-            row, column = divmod(origin, sim.settings.board_size)
-            self.assertIn(
-                f"Step 1: agent 0 accepted stay at [{row},{column}].",
-                announcements,
+            self.assertEqual(sim.agents[0].position, origin)
+
+    async def test_posts_are_step_stamped_and_counted_unread_for_other_agents(self) -> None:
+        unread: dict[tuple[int, int], object] = {}
+        tools: set[str] = set()
+
+        async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            view = observation(messages)
+            identity = cast(list[dict[str, int]], view["model_controlled_agents"])[0]["id"]
+            key = (identity, cast(int, view["step"]))
+            tools.update(tool.name for tool in info.function_tools)
+            if identity == poster and key not in unread and key[1] < 3:
+                unread[key] = view["unread_messages"]
+                return ModelResponse(parts=[ToolCallPart("post_message", {"text": "hello"})])
+            unread[key] = view["unread_messages"]
+            return ModelResponse(parts=[ToolCallPart("move", {"destination": None})])
+
+        with tempfile.TemporaryDirectory() as directory:
+            settings = schelling()
+            poster = settings.controlled_agent_ids[0]
+            sim = SchellingSim(
+                settings, runtime=runtime(Path(directory) / "case", FunctionModel(script))
             )
+            for _ in range(3):
+                await sim.step()
+            assert sim.sessions is not None
+            self.assertIn("search_messages", tools)
+            self.assertRegex(
+                (await sim.sessions.board.search()).content,
+                rf"^\[0 step 1 \S+ by {poster}\] hello\n\[1 step 2 \S+ by {poster}\] hello$",
+            )
+            for identity in settings.controlled_agent_ids:
+                self.assertEqual(unread[identity, 3], 0 if identity == poster else 2)
 
     async def test_json_local_observations_and_exhaustion_retains_identity(self) -> None:
         async def invalid(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:

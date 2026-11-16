@@ -257,7 +257,11 @@ to stay. Exhaustion means stay.
         if sessions is None:
             return Stay()  # Null policy: every turn takes the fallback action.
         assert runtime is not None
-        view = self.observation()
+        # A turn-start snapshot; later posts appear only through the board tools.
+        view = {
+            **self.observation(),
+            "unread_messages": sessions.board.unread(str(self.agent_id)),
+        }
         turn = await sessions.run(
             str(self.agent_id),
             json.dumps(view),

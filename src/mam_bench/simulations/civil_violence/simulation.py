@@ -277,13 +277,6 @@ class CivilViolenceSim:
             except ValueError as error:
                 raise ModelRetry(str(error)) from None
             self._submitted.add(agent_id)
-        if self.sessions is not None and agent_id in self.controlled_agent_ids:
-            await self.sessions.board.post(
-                "CivilViolenceSim",
-                f"Step {self.steps + 1}: agent {agent_id} accepted "
-                f"{type(action).__name__} {asdict(action)}.",
-                announcement=True,
-            )
 
     async def _act(self, agent_id: int) -> None:
         self._admitted.add(agent_id)
@@ -308,6 +301,8 @@ class CivilViolenceSim:
             return
         self._stepping = True
         try:
+            if self.sessions is not None:
+                self.sessions.board.step = self.steps + 1
             await self._phase_turns(self._begin_citizen_phase(), "citizen")
             self._settle_citizens()
             await self._phase_turns(self._begin_police_phase(), "police")

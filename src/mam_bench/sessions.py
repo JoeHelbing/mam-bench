@@ -226,7 +226,11 @@ Use read_messages and post_message to coordinate. Call observe() for your local
 observation. In Python, use from observe import observe; observe() reads the same
 snapshot from observation.json. Your private /workspace files persist across
 your turns in this case. You may save notes, code, and results for later turns.
-Posts are unverified; simulation announcements are marked separately.
+Posts are unverified, go to every model agent, and carry their step and UTC time.
+Other agents post while you work, so a read is a snapshot: new messages can
+arrive after it, and read_messages again shows them. unread_messages in your
+observation was counted when your turn started and excludes your own posts.
+search_messages re-reads any messages without marking them read.
 Respond with tool calls, not plain text. Finish code and messaging before
 submitting your action. A valid terminal action ends the turn; other calls in
 the same response are skipped. Invalid actions return retry feedback without
@@ -322,7 +326,7 @@ end the turn; successful calls do not reset this failure count.
         tools: FunctionToolset[AgentDepsT] = FunctionToolset()
 
         async def read_messages() -> MessagePage:
-            """Read the next page of world messages to coordinate with other model agents."""
+            """Read the next page of unread messages from other model agents and mark it read."""
             return await self.board.read(session_id)
 
         async def post_message(text: str) -> int:
@@ -334,7 +338,20 @@ end the turn; successful calls do not reset this failure count.
             takes_ctx=False,
             strict=self._settings.strict_parameterless_tools or None,
         )
+
+        async def search_messages(
+            since_step: int | None = None, author: int | None = None, last: int | None = None
+        ) -> MessagePage:
+            """Re-read world messages, your own included, without marking any as read.
+
+            Optionally keep only messages from since_step onward, by one author ID, or the last N.
+            """
+            return await self.board.search(
+                since_step=since_step, author=None if author is None else str(author), last=last
+            )
+
         tools.add_function(post_message, takes_ctx=False)
+        tools.add_function(search_messages, takes_ctx=False)
         if observation is not None:
 
             def observe() -> dict[str, object]:

@@ -107,7 +107,10 @@ Failed tool calls have a cumulative three-failure limit per turn; successful
 calls do not reset it. At the limit, `call_error_limit` ends the turn with the
 simulation's normal fallback. Each new turn starts with a fresh failure budget.
 Tool failures include argument validation, rejected actions, unknown tools, and
-reported failures across actions, messaging, and workspace tools. Tool batches
+reported failures across actions, messaging, and workspace tools. One rejection is
+exempt: a move to a square on the board that is occupied or already claimed in
+the step. Another agent may have taken it first, so it gets retry feedback
+without using up the failure budget. Tool batches
 settle before the limit is checked, preserving matching replies and accepted
 effects. The limit prevents the next request and does not override an accepted
 terminal action.

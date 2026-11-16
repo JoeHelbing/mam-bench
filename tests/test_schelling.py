@@ -498,6 +498,28 @@ class SchellingTests(SandboxTestCase):
             self.assertEqual(requests, 2)
             self.assertFalse((resources.writer.directory / "turns.jsonl").exists())
 
+    async def test_moves_to_a_taken_square_do_not_use_up_the_failed_call_limit(self) -> None:
+        requests = 0
+
+        async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal requests
+            view = observation(messages)
+            identity = cast(list[dict[str, int]], view["model_controlled_agents"])[0]["id"]
+            if identity != stubborn:
+                return ModelResponse(parts=[ToolCallPart("move", {"destination": None})])
+            requests += 1
+            # Four tries at an occupied square, more than the three failed calls a turn allows.
+            destination = cast(list[list[int]], view["A_agents"])[0] if requests <= 4 else None
+            return ModelResponse(parts=[ToolCallPart("move", {"destination": destination})])
+
+        with tempfile.TemporaryDirectory() as directory:
+            settings = schelling()
+            stubborn = settings.controlled_agent_ids[0]
+            resources = runtime(Path(directory) / "case", FunctionModel(script))
+            await SchellingSim(settings, runtime=resources).step()
+            self.assertEqual(requests, 5)
+            self.assertFalse((resources.writer.directory / "turns.jsonl").exists())
+
     async def test_json_local_observations_and_exhaustion_retains_identity(self) -> None:
         async def invalid(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             view = observation(messages)

@@ -306,6 +306,9 @@ class NativeProviderTests(SandboxTestCase):
                                     runtime=resources,
                                 )
                             )
+                            # The scripted replies assume the second request is the first
+                            # agent's retry, which only holds with one turn at a time.
+                            sim.scheduler.concurrency = 1
                             before = locations(sim.snapshot())
                             await sim.step()
                             after = locations(sim.snapshot())

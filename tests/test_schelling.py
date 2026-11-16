@@ -109,12 +109,13 @@ class SchellingTests(SandboxTestCase):
                 self.assertEqual(before["agent_locations"], positions)
 
     async def test_ordinary_replacements_match_reference_at_any_concurrency(self) -> None:
-        for concurrency in (1, 4):
+        for concurrency in (1, None):
             with self.subTest(concurrency=concurrency), tempfile.TemporaryDirectory() as directory:
                 settings = schelling(max_steps=5)
-                resources = runtime(Path(directory) / "case", concurrency=concurrency)
+                resources = runtime(Path(directory) / "case")
                 ordinary = SchellingSim(settings)
                 controlled = SchellingSim(settings, runtime=resources)
+                controlled.scheduler.concurrency = concurrency
                 # Replace only decision policies; retain the real controlled scheduling path.
                 controlled.agents = tuple(
                     OrdinaryAgent(controlled, identity)
@@ -144,40 +145,33 @@ class SchellingTests(SandboxTestCase):
                 self.assertEqual(result.score, 0)
 
     async def test_replaying_reference_actions_through_model_tools_scores_zero(self) -> None:
-        for concurrency in (1, 4):
-            with self.subTest(concurrency=concurrency), tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory:
 
-                async def replay(
-                    messages: list[ModelMessage],
-                    info: AgentInfo,
-                    *,
-                    reference_path: Path = Path(directory) / "case" / "ordinary.jsonl",
-                ) -> ModelResponse:
-                    identity = int(
-                        cast(str, info.instructions).split("Identity: ")[1].split(";")[0]
-                    )
-                    step = cast(int, observation(messages)["step"])
-                    states = records(reference_path)
-                    before = states[min(step - 1, len(states) - 1)]
-                    after = states[min(step, len(states) - 1)]
-                    origin = cast(list[int], before["agent_locations"])[identity]
-                    destination = cast(list[int], after["agent_locations"])[identity]
-                    if origin == destination:
-                        return ModelResponse(parts=[ToolCallPart("move", {"destination": None})])
-                    row, column = divmod(destination, 8)
-                    return ModelResponse(
-                        parts=[ToolCallPart("move", {"destination": [row, column]})]
-                    )
+            async def replay(
+                messages: list[ModelMessage],
+                info: AgentInfo,
+                *,
+                reference_path: Path = Path(directory) / "case" / "ordinary.jsonl",
+            ) -> ModelResponse:
+                identity = int(cast(str, info.instructions).split("Identity: ")[1].split(";")[0])
+                step = cast(int, observation(messages)["step"])
+                states = records(reference_path)
+                before = states[min(step - 1, len(states) - 1)]
+                after = states[min(step, len(states) - 1)]
+                origin = cast(list[int], before["agent_locations"])[identity]
+                destination = cast(list[int], after["agent_locations"])[identity]
+                if origin == destination:
+                    return ModelResponse(parts=[ToolCallPart("move", {"destination": None})])
+                row, column = divmod(destination, 8)
+                return ModelResponse(parts=[ToolCallPart("move", {"destination": [row, column]})])
 
-                # Offline replay is a test policy, never an observation exposed to real models.
-                resources = runtime(
-                    Path(directory) / "case", FunctionModel(replay), concurrency=concurrency
-                )
-                result = await SchellingSim(schelling()).evaluate(resources)
-                reference = records(resources.writer.directory / "ordinary.jsonl")
-                controlled = records(resources.writer.directory / "controlled.jsonl")
-                self.assertEqual(controlled[: len(reference)], reference)
-                self.assertEqual(result.score, 0)
+            # Offline replay is a test policy, never an observation exposed to real models.
+            resources = runtime(Path(directory) / "case", FunctionModel(replay))
+            result = await SchellingSim(schelling()).evaluate(resources)
+            reference = records(resources.writer.directory / "ordinary.jsonl")
+            controlled = records(resources.writer.directory / "controlled.jsonl")
+            self.assertEqual(controlled[: len(reference)], reference)
+            self.assertEqual(result.score, 0)
 
     async def test_paired_worlds_artifacts_and_independent_score_replay(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -337,7 +331,7 @@ class SchellingTests(SandboxTestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             settings = schelling()
-            resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
+            resources = runtime(Path(directory) / "case", FunctionModel(script))
             sim = SchellingSim(settings, runtime=resources)
             initial = sim.snapshot()
             initial_rng_state = deepcopy(sim.rng.bit_generator.state)
@@ -446,6 +440,63 @@ class SchellingTests(SandboxTestCase):
             )
             for identity in settings.controlled_agent_ids:
                 self.assertEqual(unread[identity, 3], 0 if identity == poster else 2)
+
+    async def test_board_calls_sent_with_the_action_still_run(self) -> None:
+        requests: dict[tuple[int, int], int] = {}
+
+        async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            view = observation(messages)
+            identity = cast(list[dict[str, int]], view["model_controlled_agents"])[0]["id"]
+            key = (identity, cast(int, view["step"]))
+            requests[key] = requests.get(key, 0) + 1
+            move = ToolCallPart("move", {"destination": None})
+            if key == (poster, 1):
+                return ModelResponse(parts=[ToolCallPart("post_message", {"text": "sent"}), move])
+            if key == (reader, 2):
+                return ModelResponse(parts=[ToolCallPart("read_messages", {}), move])
+            return ModelResponse(parts=[move])
+
+        with tempfile.TemporaryDirectory() as directory:
+            settings = schelling()
+            poster, reader = settings.controlled_agent_ids[:2]
+            sim = SchellingSim(
+                settings, runtime=runtime(Path(directory) / "case", FunctionModel(script))
+            )
+            await sim.step()
+            await sim.step()
+            assert sim.sessions is not None
+            self.assertRegex(
+                (await sim.sessions.board.search()).content, rf"^\[0 step 1 \S+ by {poster}\] sent$"
+            )
+            # The read happened, and its result stays in the reader's history for later turns.
+            self.assertEqual(sim.sessions.board.unread(str(reader)), 0)
+            self.assertIn(f"by {poster}] sent", str(sim.sessions.history(str(reader))))
+            self.assertEqual(set(requests.values()), {1})
+
+    async def test_rejected_post_sent_with_the_action_does_not_cost_the_turn(self) -> None:
+        requests = 0
+
+        async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal requests
+            view = observation(messages)
+            identity = cast(list[dict[str, int]], view["model_controlled_agents"])[0]["id"]
+            move = ToolCallPart("move", {"destination": None})
+            if identity != poster:
+                return ModelResponse(parts=[move])
+            requests += 1
+            if requests == 1:
+                # The move is accepted, but the empty post makes the model answer again.
+                return ModelResponse(parts=[ToolCallPart("post_message", {"text": ""}), move])
+            return ModelResponse(parts=[move])
+
+        with tempfile.TemporaryDirectory() as directory:
+            settings = schelling()
+            poster = settings.controlled_agent_ids[0]
+            resources = runtime(Path(directory) / "case", FunctionModel(script))
+            sim = SchellingSim(settings, runtime=resources)
+            await sim.step()
+            self.assertEqual(requests, 2)
+            self.assertFalse((resources.writer.directory / "turns.jsonl").exists())
 
     async def test_json_local_observations_and_exhaustion_retains_identity(self) -> None:
         async def invalid(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:

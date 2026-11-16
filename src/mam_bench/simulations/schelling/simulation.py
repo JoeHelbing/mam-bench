@@ -27,9 +27,7 @@ class SchellingSim:
     ) -> None:
         self.settings = settings
         self.runtime = runtime
-        self.scheduler = TurnScheduler(
-            settings.seed, runtime.settings.concurrency if runtime else 1
-        )
+        self.scheduler = TurnScheduler(settings.seed)
         self.rng = np.random.default_rng(settings.seed)
         self.board = Board(settings, self.rng)
         self.controlled_agent_ids: tuple[int, ...] = (
@@ -78,6 +76,10 @@ class SchellingSim:
 
     async def reserve_action(self, agent_id: int, action: Action) -> None:
         """Claim an action as soon as it is ready; only settlement moves agents."""
+        if self._stepping and agent_id in self._admitted and agent_id in self._submitted:
+            # The first accepted action stands. A repeat arrives when another call in
+            # the same response failed and the model had to answer again.
+            return
         if not self._stepping or agent_id not in self._admitted or agent_id in self._submitted:
             raise ModelRetry("identity has no available turn")
         async with self._lock:

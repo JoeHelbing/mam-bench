@@ -236,7 +236,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_agent_budget_and_sampling_settings_validate(self) -> None:
         for settings in (
-            {"concurrency": 0},
+            {"concurrency": 4},  # Retired: every controlled turn in a step runs at once.
             {"timeout_seconds": 0},
             {"compaction_tail_tokens": -1},
             {"temperature": 3},

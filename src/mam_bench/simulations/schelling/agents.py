@@ -185,7 +185,7 @@ to stay. Exhaustion means stay.
             output_type=[ToolOutput(_move, name="move")],
             instructions=ModelControlledAgent.INSTRUCTIONS,
             retries=5,
-            end_strategy="early",
+            end_strategy="graceful",
             capabilities=[ProcessEventStream(stream_responses)],
         )
         interface.instructions(_identity)

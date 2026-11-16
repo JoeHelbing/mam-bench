@@ -36,9 +36,7 @@ class CivilViolenceSim:
     ) -> None:
         self.settings, self.runtime = settings, runtime
         self.rng = np.random.default_rng(settings.seed)
-        self.scheduler = TurnScheduler(
-            settings.seed, concurrency=runtime.settings.concurrency if runtime else 1
-        )
+        self.scheduler = TurnScheduler(settings.seed)
         positions = self.rng.permutation(settings.board_size**2)
         self.citizens = {
             i: Citizen(
@@ -259,6 +257,10 @@ class CivilViolenceSim:
 
     async def reserve_action(self, agent_id: int, action: Action) -> None:
         """Validate a whole action before claiming any resource, for either policy."""
+        if agent_id in self._admitted and agent_id in self._submitted:
+            # The first accepted action stands. A repeat arrives when another call in
+            # the same response failed and the model had to answer again.
+            return
         if agent_id not in self._admitted or agent_id in self._submitted:
             raise ModelRetry("identity has no available turn in this phase")
         async with self._lock:

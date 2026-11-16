@@ -1,4 +1,4 @@
-"""Bounded concurrent turns with addressed randomness and staged cohorts."""
+"""Concurrent turns with addressed randomness and staged cohorts."""
 
 import asyncio
 import hashlib
@@ -10,8 +10,9 @@ import numpy as np
 class TurnScheduler:
     """Address turn randomness and admit new work as soon as a turn finishes."""
 
-    def __init__(self, seed: int, concurrency: int = 1) -> None:
-        if seed < 0 or concurrency < 1:
+    def __init__(self, seed: int, concurrency: int | None = None) -> None:
+        # No limit by default: a whole cohort runs at once so agents can talk mid-step.
+        if seed < 0 or (concurrency is not None and concurrency < 1):
             raise ValueError("seed must be nonnegative and concurrency must be positive")
         self.seed = seed
         self.concurrency = concurrency
@@ -59,7 +60,7 @@ class TurnScheduler:
             for cohort in cohorts:
                 queue = iter(cohort)
                 while True:
-                    while len(active) < self.concurrency:
+                    while self.concurrency is None or len(active) < self.concurrency:
                         identity = next(queue, None)
                         if identity is None:
                             break

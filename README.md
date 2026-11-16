@@ -197,7 +197,7 @@ routes differ. Larger served context remains available to the benchmark.
 Setup rejects request overrides that violate known constraints. Unknown parameter
 capabilities are left to the native provider and endpoint. Omitted generation
 settings remain unset; setup does not invent output reservations or silently
-reduce requested limits. Compaction, retained history, sandbox lifetime, concurrency, and
+reduce requested limits. Compaction, retained history, sandbox lifetime, and
 timeouts remain benchmark settings. Compaction uses the discovered context and
 the configured trigger fraction (default 70%); token estimates and unknown
 endpoint output defaults cannot guarantee that every request fits.

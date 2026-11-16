@@ -793,28 +793,6 @@ class AgentSessionsTests(SandboxTestCase):
         self.assertEqual(runtime.usage.tool_calls, 26)
         self.assertIn("25", (await runtime.board.read("b")).content)
 
-    async def test_terminal_tool_takes_precedence_over_other_calls(self) -> None:
-        async def stay() -> str:
-            return "stayed"
-
-        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            del messages, info
-            return _response(
-                ToolCallPart("post_message", {"text": "must skip"}, "post"),
-                ToolCallPart("stay", {}, "stay"),
-            )
-
-        runtime = AgentSessions(
-            Agent(
-                FunctionModel(model),
-                output_type=ToolOutput(stay, name="stay"),
-                end_strategy="early",
-            ),
-            context_window_tokens=260_000,
-        )
-        self.assertEqual(await runtime.run("a", "go", deps=None), Completed("stayed"))
-        self.assertEqual((await runtime.board.read("b")).content, "")
-
     async def test_tool_only_text_exhaustion_is_normal_stop(self) -> None:
         async def stay() -> str:
             return "stay"

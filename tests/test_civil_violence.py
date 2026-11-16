@@ -112,7 +112,7 @@ class CivilViolenceTests(SandboxTestCase):
             )
 
         with tempfile.TemporaryDirectory() as directory:
-            resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
+            resources = runtime(Path(directory) / "case", FunctionModel(script))
             sim = CivilViolenceSim(civil(threshold=10_000), runtime=resources)
             released_id = sim.controlled_agent_ids[0]
             citizen = sim.citizens[released_id]
@@ -284,9 +284,7 @@ class CivilViolenceTests(SandboxTestCase):
                         arguments["destination"] = list(action.destination)
                     return ModelResponse(parts=[ToolCallPart("act", arguments)])
 
-                resources = runtime(
-                    Path(directory) / "case", FunctionModel(ordinary_policy), concurrency=1
-                )
+                resources = runtime(Path(directory) / "case", FunctionModel(ordinary_policy))
                 settings = civil(
                     controlled_role=role,
                     citizen_density=0.5,
@@ -296,6 +294,7 @@ class CivilViolenceTests(SandboxTestCase):
                 )
                 reference = CivilViolenceSim(settings)
                 sim = CivilViolenceSim(settings, runtime=resources)
+                sim.scheduler.concurrency = 1  # Ordinary choices depend on turn order.
                 self.assertEqual(reference.snapshot(), sim.snapshot())
                 jailed_before: set[int] = set()
                 saw_release = False
@@ -372,9 +371,7 @@ class CivilViolenceTests(SandboxTestCase):
                 )
                 sim = CivilViolenceSim(
                     settings,
-                    runtime=runtime(
-                        Path(directory) / "case", FunctionModel(script), concurrency=16
-                    ),
+                    runtime=runtime(Path(directory) / "case", FunctionModel(script)),
                 )
                 order = sorted(sim.replacement_ids)
                 sim.scheduler.rng(0, role, 0, "_order_selected").shuffle(order)
@@ -478,9 +475,7 @@ class CivilViolenceTests(SandboxTestCase):
                         ]
                     )
 
-                resources = runtime(
-                    Path(directory) / "case", FunctionModel(ordinary_policy), concurrency=1
-                )
+                resources = runtime(Path(directory) / "case", FunctionModel(ordinary_policy))
                 result = await CivilViolenceSim(settings).evaluate(resources)
                 ordinary = records(resources.writer.directory / "ordinary.jsonl")
                 controlled = records(resources.writer.directory / "controlled.jsonl")
@@ -598,7 +593,7 @@ class CivilViolenceTests(SandboxTestCase):
             )
 
         with tempfile.TemporaryDirectory() as directory:
-            resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
+            resources = runtime(Path(directory) / "case", FunctionModel(script))
             sim = CivilViolenceSim(civil(threshold=10_000), runtime=resources)
             jailed_id = sim.controlled_agent_ids[0]
             citizen = sim.citizens[jailed_id]
@@ -695,7 +690,7 @@ class CivilViolenceTests(SandboxTestCase):
                         arguments["destination"] = list(destination)
                     return ModelResponse(parts=[ToolCallPart("act", arguments)])
 
-                resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
+                resources = runtime(Path(directory) / "case", FunctionModel(script))
                 settings = civil(
                     controlled_role=role,
                     citizen_density=0.5,
@@ -753,7 +748,7 @@ class CivilViolenceTests(SandboxTestCase):
                     citizen_density=0.25,
                     police_density=16 / 144,
                 ),
-                runtime=runtime(Path(directory) / "case", FunctionModel(script), concurrency=1),
+                runtime=runtime(Path(directory) / "case", FunctionModel(script)),
             )
             await sim.step()
             self.assertTrue(planned)
@@ -868,7 +863,7 @@ class CivilViolenceTests(SandboxTestCase):
             )
 
         with tempfile.TemporaryDirectory() as directory:
-            resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
+            resources = runtime(Path(directory) / "case", FunctionModel(script))
             sim = CivilViolenceSim(
                 civil(controlled_role="police", citizen_density=0.5, police_density=0.25, seed=2),
                 runtime=resources,
@@ -913,7 +908,7 @@ class CivilViolenceTests(SandboxTestCase):
             )
 
         with tempfile.TemporaryDirectory() as directory:
-            resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
+            resources = runtime(Path(directory) / "case", FunctionModel(script))
             sim = CivilViolenceSim(
                 civil(controlled_role="police", citizen_density=0.5, police_density=0.25, seed=2),
                 runtime=resources,
@@ -990,7 +985,7 @@ class CivilViolenceTests(SandboxTestCase):
                         ]
                     )
 
-                resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
+                resources = runtime(Path(directory) / "case", FunctionModel(script))
                 sim = CivilViolenceSim(
                     civil(
                         controlled_role=role,

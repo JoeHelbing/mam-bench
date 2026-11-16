@@ -669,7 +669,7 @@ class AgentSessionsTests(SandboxTestCase):
         self.assertIn("one", page.content)
         self.assertIn("two", page.content)
 
-    async def test_retry_exhaustion_preserves_session_and_provider_behavior_aborts(self) -> None:
+    async def test_exhausted_tool_retries_preserve_session_and_provider_aborts(self) -> None:
         invalid = True
 
         async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -681,7 +681,9 @@ class AgentSessionsTests(SandboxTestCase):
         runtime = AgentSessions(
             Agent(FunctionModel(model), retries=2), context_window_tokens=260_000
         )
-        self.assertEqual(await runtime.run("a", "go", deps=None), Stopped("retry_exhaustion"))
+        # pydantic-ai 2.66 returns an exhausted tool's error to the model instead of ending
+        # the run, so the turn now stops at the three-failure limit on the same request.
+        self.assertEqual(await runtime.run("a", "go", deps=None), Stopped("call_error_limit"))
         self.assertEqual(runtime.usage.requests, 3)
         invalid = False
         self.assertEqual(await runtime.run("a", "again", deps=None), Completed("recovered"))

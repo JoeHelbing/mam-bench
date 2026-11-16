@@ -6,7 +6,7 @@ UV_PYTHON = "3.14.7"
 [tools]
 python = "3.14.7"
 uv = "0.13.6"
-"pipx:jupyterlab" = "4.6.5"
+"pipx:jupyterlab" = "4.6.6"
 "pipx:nbdev" = "3.3.28"
 
 [tasks.setup]

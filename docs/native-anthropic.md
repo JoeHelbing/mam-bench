@@ -42,7 +42,7 @@ artifacts without a final score.
 Optional overrides belong under `settings`, using the existing model YAML
 format. Use `reasoning_effort` to choose the model's thinking mode,
 `max_completion_tokens` and `summary_completion_tokens` for explicit generation
-limits, and `concurrency` or `timeout_seconds` for session execution controls.
+limits, and `timeout_seconds` for the turn deadline.
 Choose limits appropriate for the selected model and intended evaluation.
 The example leaves these overrides unset. Omitted output settings use native provider
 defaults. PydanticAI supplies model context metadata; unknown context stops setup.

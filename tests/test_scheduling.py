@@ -20,6 +20,26 @@ class TurnSchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(accepted[:2]), {1, 2})
         self.assertEqual(set(accepted[2:]), {3, 4})
 
+    async def test_a_whole_cohort_runs_at_once_by_default(self) -> None:
+        scheduler = TurnScheduler(seed=5)
+        together = asyncio.Barrier(16)
+        ordinary_started_after: list[int] = []
+        done = 0
+
+        async def act(identity: int) -> None:
+            nonlocal done
+            if identity < 16:
+                # Passes only if all 16 selected turns are in flight together.
+                await asyncio.wait_for(together.wait(), 1)
+                done += 1
+            else:
+                ordinary_started_after.append(done)
+
+        await scheduler.run(
+            step=0, phase="citizen", selected=range(16), ordinary=range(16, 20), act=act
+        )
+        self.assertEqual(ordinary_started_after, [16] * 4)
+
     async def test_admission_ignores_caller_order_and_rejects_overlap(self) -> None:
         scheduler = TurnScheduler(seed=77, concurrency=3)
 

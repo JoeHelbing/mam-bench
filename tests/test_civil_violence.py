@@ -112,7 +112,7 @@ class CivilViolenceTests(SandboxTestCase):
             )
 
         with tempfile.TemporaryDirectory() as directory:
-            resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
+            resources = runtime(Path(directory) / "case", FunctionModel(script))
             sim = CivilViolenceSim(civil(threshold=10_000), runtime=resources)
             released_id = sim.controlled_agent_ids[0]
             citizen = sim.citizens[released_id]
@@ -284,9 +284,7 @@ class CivilViolenceTests(SandboxTestCase):
                         arguments["destination"] = list(action.destination)
                     return ModelResponse(parts=[ToolCallPart("act", arguments)])
 
-                resources = runtime(
-                    Path(directory) / "case", FunctionModel(ordinary_policy), concurrency=1
-                )
+                resources = runtime(Path(directory) / "case", FunctionModel(ordinary_policy))
                 settings = civil(
                     controlled_role=role,
                     citizen_density=0.5,
@@ -296,6 +294,7 @@ class CivilViolenceTests(SandboxTestCase):
                 )
                 reference = CivilViolenceSim(settings)
                 sim = CivilViolenceSim(settings, runtime=resources)
+                sim.scheduler.concurrency = 1  # Ordinary choices depend on turn order.
                 self.assertEqual(reference.snapshot(), sim.snapshot())
                 jailed_before: set[int] = set()
                 saw_release = False
@@ -372,9 +371,7 @@ class CivilViolenceTests(SandboxTestCase):
                 )
                 sim = CivilViolenceSim(
                     settings,
-                    runtime=runtime(
-                        Path(directory) / "case", FunctionModel(script), concurrency=16
-                    ),
+                    runtime=runtime(Path(directory) / "case", FunctionModel(script)),
                 )
                 order = sorted(sim.replacement_ids)
                 sim.scheduler.rng(0, role, 0, "_order_selected").shuffle(order)
@@ -478,9 +475,7 @@ class CivilViolenceTests(SandboxTestCase):
                         ]
                     )
 
-                resources = runtime(
-                    Path(directory) / "case", FunctionModel(ordinary_policy), concurrency=1
-                )
+                resources = runtime(Path(directory) / "case", FunctionModel(ordinary_policy))
                 result = await CivilViolenceSim(settings).evaluate(resources)
                 ordinary = records(resources.writer.directory / "ordinary.jsonl")
                 controlled = records(resources.writer.directory / "controlled.jsonl")
@@ -598,7 +593,7 @@ class CivilViolenceTests(SandboxTestCase):
             )
 
         with tempfile.TemporaryDirectory() as directory:
-            resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
+            resources = runtime(Path(directory) / "case", FunctionModel(script))
             sim = CivilViolenceSim(civil(threshold=10_000), runtime=resources)
             jailed_id = sim.controlled_agent_ids[0]
             citizen = sim.citizens[jailed_id]
@@ -695,7 +690,7 @@ class CivilViolenceTests(SandboxTestCase):
                         arguments["destination"] = list(destination)
                     return ModelResponse(parts=[ToolCallPart("act", arguments)])
 
-                resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
+                resources = runtime(Path(directory) / "case", FunctionModel(script))
                 settings = civil(
                     controlled_role=role,
                     citizen_density=0.5,
@@ -753,7 +748,7 @@ class CivilViolenceTests(SandboxTestCase):
                     citizen_density=0.25,
                     police_density=16 / 144,
                 ),
-                runtime=runtime(Path(directory) / "case", FunctionModel(script), concurrency=1),
+                runtime=runtime(Path(directory) / "case", FunctionModel(script)),
             )
             await sim.step()
             self.assertTrue(planned)
@@ -823,7 +818,7 @@ class CivilViolenceTests(SandboxTestCase):
             view = observation(messages)
             if identity in planned:
                 target, destination = planned[identity]
-                self.assertIn("RetryPromptPart", str(messages))
+                self.assertIn("outcome='retried'", str(messages))
                 self.assertIn(tuple(destination), sim.legal_destinations(identity))
                 self.assertEqual(
                     [c.location for c in sim.citizens.values() if c.location == tuple(target)],
@@ -868,7 +863,7 @@ class CivilViolenceTests(SandboxTestCase):
             )
 
         with tempfile.TemporaryDirectory() as directory:
-            resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
+            resources = runtime(Path(directory) / "case", FunctionModel(script))
             sim = CivilViolenceSim(
                 civil(controlled_role="police", citizen_density=0.5, police_density=0.25, seed=2),
                 runtime=resources,
@@ -889,7 +884,7 @@ class CivilViolenceTests(SandboxTestCase):
             identity = int(cast(str, info.instructions).split("Identity: ")[1].split(".")[0])
             if identity in planned:
                 destination = planned[identity]
-                self.assertIn("RetryPromptPart", str(messages))
+                self.assertIn("outcome='retried'", str(messages))
                 self.assertIn((destination[0], destination[1]), sim.legal_destinations(identity))
                 retried.add(identity)
                 return ModelResponse(
@@ -913,7 +908,7 @@ class CivilViolenceTests(SandboxTestCase):
             )
 
         with tempfile.TemporaryDirectory() as directory:
-            resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
+            resources = runtime(Path(directory) / "case", FunctionModel(script))
             sim = CivilViolenceSim(
                 civil(controlled_role="police", citizen_density=0.5, police_density=0.25, seed=2),
                 runtime=resources,
@@ -968,7 +963,7 @@ class CivilViolenceTests(SandboxTestCase):
                         return ModelResponse(
                             parts=[ToolCallPart("act", {"active": True, "destination": None})]
                         )
-                    if "RetryPromptPart" in str(messages):
+                    if "outcome='retried'" in str(messages):
                         targets.pop(identity, None)
                         return ModelResponse(
                             parts=[
@@ -990,7 +985,7 @@ class CivilViolenceTests(SandboxTestCase):
                         ]
                     )
 
-                resources = runtime(Path(directory) / "case", FunctionModel(script), concurrency=1)
+                resources = runtime(Path(directory) / "case", FunctionModel(script))
                 sim = CivilViolenceSim(
                     civil(
                         controlled_role=role,
@@ -1022,6 +1017,56 @@ class CivilViolenceTests(SandboxTestCase):
                         )
                     )
                 self.assertFalse((resources.writer.directory / "turns.jsonl").exists())
+
+    async def test_arrest_target_claimed_by_a_peer_does_not_use_up_failed_calls(self) -> None:
+        first: int | None = None
+        claimed: list[int] = []
+        rival_requests: dict[int, int] = {}
+
+        async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal first
+            identity = int(cast(str, info.instructions).split("Identity: ")[1].split(".")[0])
+            targets = cast(
+                list[list[int]], observation(messages)["eligible_target_locations_if_staying"]
+            )
+            if first is None and targets:
+                first = identity
+                claimed[:] = targets[0]
+                return ModelResponse(
+                    parts=[ToolCallPart("act", {"destination": None, "target_location": claimed})]
+                )
+            while first is None or len(sim.eligible_targets(first)) == len(targets):
+                if identity == first or not targets:
+                    break
+                await asyncio.sleep(0)  # Until the first officer's claim is accepted.
+            if identity != first and claimed in targets:
+                rival_requests[identity] = rival_requests.get(identity, 0) + 1
+                if rival_requests[identity] <= 4:
+                    # Four tries at the claimed citizen, more than the three failed calls allowed.
+                    return ModelResponse(
+                        parts=[
+                            ToolCallPart("act", {"destination": None, "target_location": claimed})
+                        ]
+                    )
+            return ModelResponse(
+                parts=[ToolCallPart("act", {"destination": None, "target_location": None})]
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            resources = runtime(Path(directory) / "case", FunctionModel(script))
+            sim = CivilViolenceSim(
+                civil(
+                    controlled_role="police",
+                    citizen_density=0.5,
+                    police_density=0.25,
+                    threshold=-10_000,
+                ),
+                runtime=resources,
+            )
+            await sim.step()
+            self.assertTrue(rival_requests)
+            self.assertEqual(set(rival_requests.values()), {5})
+            self.assertFalse((resources.writer.directory / "turns.jsonl").exists())
 
     async def test_act_missing_required_activity_retries_then_falls_back(self) -> None:
         async def missing(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:

@@ -251,7 +251,11 @@ class ModelControlledAgent(SimulationAgent):
         if sessions is None:
             return self.fallback_action()  # Null policy: every turn takes the fallback action.
         assert runtime is not None
-        view = self.observation()
+        # A turn-start snapshot; later posts appear only through the board tools.
+        view = {
+            **self.observation(),
+            "unread_messages": sessions.board.unread(str(self.agent_id)),
+        }
         turn = await sessions.run(
             str(self.agent_id),
             json.dumps(view),
@@ -325,7 +329,7 @@ def _model_interface(
         output_type=outputs,
         instructions=instructions,
         retries=5,
-        end_strategy="early",
+        end_strategy="graceful",
         capabilities=[ProcessEventStream(stream_responses)],
     )
     interface.instructions(_identity)

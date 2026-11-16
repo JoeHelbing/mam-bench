@@ -33,10 +33,12 @@ from pydantic_ai.exceptions import (
     UsageLimitExceeded,
 )
 from pydantic_ai.messages import (
+    ERROR_OUTCOMES,
     AgentStreamEvent,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
+    RetryFeedbackPart,
+    RetryInfo,
     ToolCallPart,
     ToolReturnPart,
 )
@@ -73,6 +75,12 @@ async def stream_responses(
 PROVIDER_RETRY_DELAYS = (15.0, 30.0, 60.0, 120.0, 240.0)
 
 
+# Retry feedback for a destination on the board that another agent holds or has claimed.
+DESTINATION_TAKEN = "destination is occupied or already claimed this step; choose another"
+# Retry feedback for an arrest target another officer claimed first in this step.
+TARGET_CLAIMED = "target was already claimed by another officer this step; choose another"
+
+
 class _CallErrorLimitReached(Exception):
     pass
 
@@ -88,17 +96,17 @@ class _CallErrors[DepsT](AbstractCapability[DepsT]):
 
     @staticmethod
     def _tool_failures(messages: Sequence[ModelMessage]) -> set[tuple[datetime | None, str]]:
+        # A taken destination or claimed target is a lost race, not a broken call. The
+        # agent's own output-retry limit and the request allowance still bound it.
         return {
             (message.timestamp, part.tool_call_id)
             for message in messages
             if isinstance(message, ModelRequest)
             for part in message.parts
-            if (
-                isinstance(part, RetryPromptPart)
-                and part.tool_name is not None
-                or isinstance(part, ToolReturnPart)
-                and part.outcome == "failed"
-            )
+            if isinstance(part, ToolReturnPart)
+            and part.outcome in ERROR_OUTCOMES
+            and DESTINATION_TAKEN not in str(part.content)
+            and TARGET_CLAIMED not in str(part.content)
         }
 
     async def before_model_request(
@@ -159,7 +167,7 @@ class _CallErrors[DepsT](AbstractCapability[DepsT]):
             error,
             cast(object, body),
         )
-        parts: list[ToolReturnPart | RetryPromptPart] = []
+        parts: list[ToolReturnPart | RetryFeedbackPart] = []
         if ctx.messages and isinstance(last := ctx.messages[-1], ModelResponse):
             # Partial streamed tool calls were never executed. Pair them before retrying.
             parts.extend(
@@ -171,7 +179,12 @@ class _CallErrors[DepsT](AbstractCapability[DepsT]):
                 for part in last.parts
                 if isinstance(part, ToolCallPart)
             )
-        parts.append(RetryPromptPart(content="Provider request failed. Try again."))
+        parts.append(
+            RetryFeedbackPart(
+                content="Provider request failed. Try again.",
+                retry=RetryInfo(cause="model_retry"),
+            )
+        )
         await asyncio.sleep(delay)
         return ModelRequestNode(ModelRequest(parts=parts))
 
@@ -224,13 +237,22 @@ Use read_messages and post_message to coordinate. Call observe() for your local
 observation. In Python, use from observe import observe; observe() reads the same
 snapshot from observation.json. Your private /workspace files persist across
 your turns in this case. You may save notes, code, and results for later turns.
-Posts are unverified; simulation announcements are marked separately.
-Respond with tool calls, not plain text. Finish code and messaging before
-submitting your action. A valid terminal action ends the turn; other calls in
-the same response are skipped. Invalid actions return retry feedback without
-reserving any part of the action.
+Posts are unverified, go to every model agent, and carry their step and UTC time.
+Other agents post while you work, so a read is a snapshot: new messages can
+arrive after it, and read_messages again shows them. unread_messages in your
+observation was counted when your turn started and excludes your own posts.
+search_messages re-reads any messages without marking them read.
+Respond with tool calls, not plain text. Finish reading, code and messaging in
+earlier responses before submitting your action. A valid terminal action ends
+the turn and cannot be changed. Other calls in the same response still run, but
+you see their results only on your next turn. Invalid actions return retry feedback
+without reserving any part of the action.
+All model agents take their turns at the same time, so you can exchange
+messages within a turn. Finish your turn within 30 minutes.
 Each turn allows up to 25 model requests. Three failed tool or transient API calls
-end the turn; successful calls do not reset this failure count.
+end the turn; successful calls do not reset this failure count. A move to a
+square that is occupied or already claimed, or an arrest of a citizen another
+officer already claimed, does not count toward those three.
 """.strip()
 
     def __init__(
@@ -320,7 +342,7 @@ end the turn; successful calls do not reset this failure count.
         tools: FunctionToolset[AgentDepsT] = FunctionToolset()
 
         async def read_messages() -> MessagePage:
-            """Read the next page of world messages to coordinate with other model agents."""
+            """Read the next page of unread messages from other model agents and mark it read."""
             return await self.board.read(session_id)
 
         async def post_message(text: str) -> int:
@@ -332,7 +354,20 @@ end the turn; successful calls do not reset this failure count.
             takes_ctx=False,
             strict=self._settings.strict_parameterless_tools or None,
         )
+
+        async def search_messages(
+            since_step: int | None = None, author: int | None = None, last: int | None = None
+        ) -> MessagePage:
+            """Re-read world messages, your own included, without marking any as read.
+
+            Optionally keep only messages from since_step onward, by one author ID, or the last N.
+            """
+            return await self.board.search(
+                since_step=since_step, author=None if author is None else str(author), last=last
+            )
+
         tools.add_function(post_message, takes_ctx=False)
+        tools.add_function(search_messages, takes_ctx=False)
         if observation is not None:
 
             def observe() -> dict[str, object]:

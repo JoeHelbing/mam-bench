@@ -9,12 +9,12 @@ corrections are documented in docs/vllm-serving-workarounds.md for operators
 to apply in their own vLLM environment.
 """
 
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types.shared import ReasoningEffort
 from pydantic_ai._json_schema import JsonSchema
-from pydantic_ai.messages import FinishReason, ModelResponse
+from pydantic_ai.messages import FinishReason
 from pydantic_ai.models.openai import (
     OpenAIChatModel,
     OpenAIChatModelSettings,
@@ -86,40 +86,25 @@ class _VLLMStreamedResponse(OpenAIStreamedResponse):
 class VLLMChatModel(OpenAIChatModel):
     """Accept vLLM's repetition stop while preserving its real cause.
 
-    The native OpenAI adapter rejects finish_reason='repetition'. Translate it
-    to its existing incomplete-output path, then restore the vendor cause in
-    provider_details. Keep strict validation for every other finish reason.
+    The native OpenAI adapter leaves finish_reason='repetition' unmapped. Route
+    it to the existing incomplete-output path and record the vendor cause in
+    provider_details.
     Evidence: docs/research-issue-log.md, R12; original fix 1716471.
-    Remove when the native adapter accepts and preserves vLLM repetition stops.
+    Remove when the native adapter maps vLLM repetition stops and keeps their cause.
     """
 
     @property
     def _streamed_response_cls(self) -> type[OpenAIStreamedResponse]:
         return _VLLMStreamedResponse
 
-    def _process_response(self, response: ChatCompletion | str) -> ModelResponse:
-        repetition = isinstance(response, ChatCompletion) and any(
-            str(choice.finish_reason) == "repetition" for choice in response.choices
-        )
-        if isinstance(response, ChatCompletion) and repetition:
-            response = response.model_copy(
-                update={
-                    "choices": [
-                        choice.model_copy(update={"finish_reason": "length"})
-                        if str(choice.finish_reason) == "repetition"
-                        else choice
-                        for choice in response.choices
-                    ]
-                }
-            )
-        result = super()._process_response(response)
-        if repetition:
-            result.provider_details = {
-                **(result.provider_details or {}),
-                "finish_reason": "repetition",
-                "stop_reason": "repetition_detected",
-            }
-        return result
+    def _map_finish_reason(self, key: str) -> FinishReason | None:
+        return "length" if key == "repetition" else super()._map_finish_reason(key)
+
+    def _process_provider_details(self, response: ChatCompletion) -> dict[str, Any] | None:
+        details = super()._process_provider_details(response)
+        if details and details.get("finish_reason") == "repetition":
+            details["stop_reason"] = "repetition_detected"
+        return details
 
 
 def vllm_settings(selection: ModelSelection, settings: ModelSettings) -> OpenAIChatModelSettings:

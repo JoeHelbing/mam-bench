@@ -9,9 +9,9 @@ from pydantic_ai import ModelRetry
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.runtime import CaseRuntime
 from mam_bench.scheduling import TurnScheduler
-from mam_bench.sessions import AgentSessions
+from mam_bench.sessions import DESTINATION_TAKEN, AgentSessions
 
-from .agents import Action, ModelControlledAgent, Move, OrdinaryAgent, SimulationAgent, Stay
+from .agents import Action, ModelControlledAgent, Move, OrdinaryAgent, SimulationAgent
 from .board import Board
 from .results import EvaluationResult, Outcome
 from .settings import SchellingSettings
@@ -27,9 +27,7 @@ class SchellingSim:
     ) -> None:
         self.settings = settings
         self.runtime = runtime
-        self.scheduler = TurnScheduler(
-            settings.seed, runtime.settings.concurrency if runtime else 1
-        )
+        self.scheduler = TurnScheduler(settings.seed)
         self.rng = np.random.default_rng(settings.seed)
         self.board = Board(settings, self.rng)
         self.controlled_agent_ids: tuple[int, ...] = (
@@ -78,6 +76,10 @@ class SchellingSim:
 
     async def reserve_action(self, agent_id: int, action: Action) -> None:
         """Claim an action as soon as it is ready; only settlement moves agents."""
+        if self._stepping and agent_id in self._admitted and agent_id in self._submitted:
+            # The first accepted action stands. A repeat arrives when another call in
+            # the same response failed and the model had to answer again.
+            return
         if not self._stepping or agent_id not in self._admitted or agent_id in self._submitted:
             raise ModelRetry("identity has no available turn")
         async with self._lock:
@@ -89,19 +91,9 @@ class SchellingSim:
                     raise ModelRetry("destination coordinates are outside the board")
                 destination = action.row * size + action.column
                 if destination not in self.available:
-                    raise ModelRetry("destination must be an unclaimed beginning-of-step vacancy")
+                    raise ModelRetry(DESTINATION_TAKEN)
                 self._moves[agent_id] = destination
             self._submitted.add(agent_id)
-        if self.sessions is not None and agent_id in self.controlled_agent_ids:
-            action_text = action.model_dump_json()
-            if isinstance(action, Stay):
-                r, c = divmod(int(self.board.locations[agent_id]), self.settings.board_size)
-                action_text = f"stay at [{r},{c}]"
-            await self.sessions.board.post(
-                "SchellingSim",
-                f"Step {self.steps + 1}: agent {agent_id} accepted {action_text}.",
-                announcement=True,
-            )
 
     async def _act(self, identity: int) -> None:
         self._admitted.add(identity)
@@ -118,6 +110,8 @@ class SchellingSim:
         try:
             self._vacancies = set(int(p) for p in np.flatnonzero(self.board.cells.ravel() == 0))
             self._moves, self._submitted, self._admitted = {}, set(), set()
+            if self.sessions is not None:
+                self.sessions.board.step = self.steps + 1
             selected = self.settings.controlled_agent_ids
             await self.scheduler.run(
                 step=self.steps,

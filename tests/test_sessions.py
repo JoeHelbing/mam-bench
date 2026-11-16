@@ -14,10 +14,9 @@ from pydantic_ai.agent import EventStreamHandler
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior
 from pydantic_ai.messages import (
     AgentStreamEvent,
+    CompactionPart,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
-    SystemPromptPart,
     TextContent,
     TextPart,
     ThinkingPart,
@@ -76,7 +75,7 @@ def _assert_complete_tool_history(messages: list[ModelMessage]) -> None:
             )
         else:
             for part in message.parts:
-                if isinstance(part, (ToolReturnPart, RetryPromptPart)):
+                if isinstance(part, ToolReturnPart):
                     pending.discard(part.tool_call_id)
     assert not pending, f"Unanswered calls at the end of the turn: {pending}"
 
@@ -116,8 +115,6 @@ class FileModel:
                         else "stored"
                     )
                 )
-            if isinstance(part, RetryPromptPart):
-                return _response(TextPart("empty"))
         return _response(TextPart("ok"))
 
 
@@ -672,7 +669,7 @@ class AgentSessionsTests(SandboxTestCase):
         self.assertIn("one", page.content)
         self.assertIn("two", page.content)
 
-    async def test_retry_exhaustion_preserves_session_and_provider_behavior_aborts(self) -> None:
+    async def test_exhausted_tool_retries_preserve_session_and_provider_aborts(self) -> None:
         invalid = True
 
         async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -684,7 +681,9 @@ class AgentSessionsTests(SandboxTestCase):
         runtime = AgentSessions(
             Agent(FunctionModel(model), retries=2), context_window_tokens=260_000
         )
-        self.assertEqual(await runtime.run("a", "go", deps=None), Stopped("retry_exhaustion"))
+        # pydantic-ai 2.66 returns an exhausted tool's error to the model instead of ending
+        # the run, so the turn now stops at the three-failure limit on the same request.
+        self.assertEqual(await runtime.run("a", "go", deps=None), Stopped("call_error_limit"))
         self.assertEqual(runtime.usage.requests, 3)
         invalid = False
         self.assertEqual(await runtime.run("a", "again", deps=None), Completed("recovered"))
@@ -716,27 +715,52 @@ class AgentSessionsTests(SandboxTestCase):
         self.assertEqual(runtime.usage.requests, 3)
         self.assertTrue(
             any(
-                isinstance(part, SystemPromptPart)
-                and "Summary of previous conversation" in part.content
+                isinstance(part, CompactionPart)
+                and "The compacted history is retained." in (part.content or "")
                 for message in runtime.history("a")
-                if isinstance(message, ModelRequest)
                 for part in message.parts
             )
         )
 
     async def test_message_board_pages_and_isolated_cursors(self) -> None:
         board = MessageBoard()
+        board.step = 3
         for index in range(12):
-            self.assertEqual(
-                await board.post("writer", str(index) + "x" * 3990, announcement=index == 0), index
-            )
+            self.assertEqual(await board.post("writer", str(index) + "x" * 3990), index)
         first = await board.read("a")
         second = await board.read("a")
         self.assertLessEqual(len(first.content), 40000)
         self.assertTrue(first.more_available)
         self.assertFalse(second.more_available)
-        self.assertIn("announcement by writer", first.content)
+        self.assertRegex(first.content, r"^\[0 step 3 \d\d:\d\d:\d\d by writer\] 0x")
         self.assertEqual(await board.read("b"), first)
+        self.assertEqual((await board.read("a")).content, "")
+
+    async def test_message_board_unread_skips_own_posts_and_search_leaves_them_unread(self) -> None:
+        board = MessageBoard()
+        board.step = 1
+        await board.post("a", "from a")
+        await board.post("b", "from b")
+        board.step = 2
+        await board.post("a", "later a")
+        await board.post("c", "from c")
+
+        self.assertEqual(board.unread("a"), 2)
+        found = await board.search(since_step=2)
+        self.assertRegex(
+            found.content, r"^\[2 step 2 \S+ by a\] later a\n\[3 step 2 \S+ by c\] from c$"
+        )
+        self.assertIn("from b", (await board.search(author="b")).content)
+        self.assertRegex((await board.search(last=1)).content, r"^\[3 .*from c$")
+        self.assertEqual(board.unread("a"), 2)
+
+        page = await board.read("a")
+        self.assertNotIn("by a]", page.content)
+        self.assertEqual(page.content.count("\n"), 1)
+        self.assertFalse(page.more_available)
+        self.assertEqual(board.unread("a"), 0)
+        await board.post("a", "own again")
+        self.assertEqual(board.unread("a"), 0)
         self.assertEqual((await board.read("a")).content, "")
 
     async def test_default_request_limit_stops_successful_read_loop_at_25(self) -> None:
@@ -770,28 +794,6 @@ class AgentSessionsTests(SandboxTestCase):
         self.assertEqual(runtime.usage.requests, 2)
         self.assertEqual(runtime.usage.tool_calls, 26)
         self.assertIn("25", (await runtime.board.read("b")).content)
-
-    async def test_terminal_tool_takes_precedence_over_other_calls(self) -> None:
-        async def stay() -> str:
-            return "stayed"
-
-        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            del messages, info
-            return _response(
-                ToolCallPart("post_message", {"text": "must skip"}, "post"),
-                ToolCallPart("stay", {}, "stay"),
-            )
-
-        runtime = AgentSessions(
-            Agent(
-                FunctionModel(model),
-                output_type=ToolOutput(stay, name="stay"),
-                end_strategy="early",
-            ),
-            context_window_tokens=260_000,
-        )
-        self.assertEqual(await runtime.run("a", "go", deps=None), Completed("stayed"))
-        self.assertEqual((await runtime.board.read("b")).content, "")
 
     async def test_tool_only_text_exhaustion_is_normal_stop(self) -> None:
         async def stay() -> str:

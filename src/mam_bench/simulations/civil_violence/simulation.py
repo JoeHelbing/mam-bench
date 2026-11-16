@@ -10,7 +10,7 @@ from pydantic_ai import ModelRetry
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.runtime import CaseRuntime
 from mam_bench.scheduling import TurnScheduler
-from mam_bench.sessions import AgentSessions
+from mam_bench.sessions import DESTINATION_TAKEN, AgentSessions
 
 from .agents import (
     Action,
@@ -179,8 +179,10 @@ class CivilViolenceSim:
         if destination is None:
             return
         if agent_id in self.controlled_agent_ids:
+            if not all(0 <= axis < self.settings.board_size for axis in destination):
+                raise ValueError("destination coordinates are outside the board")
             if destination not in self._vacancies or destination in self._moves.values():
-                raise ValueError("destination must be an unclaimed phase-start vacancy")
+                raise ValueError(DESTINATION_TAKEN)
         elif destination not in self.legal_destinations(agent_id):
             raise ValueError("destination must be an unclaimed adjacent phase-start vacancy")
 

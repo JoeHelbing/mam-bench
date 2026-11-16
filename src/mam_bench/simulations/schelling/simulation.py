@@ -9,7 +9,7 @@ from pydantic_ai import ModelRetry
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.runtime import CaseRuntime
 from mam_bench.scheduling import TurnScheduler
-from mam_bench.sessions import AgentSessions
+from mam_bench.sessions import DESTINATION_TAKEN, AgentSessions
 
 from .agents import Action, ModelControlledAgent, Move, OrdinaryAgent, SimulationAgent
 from .board import Board
@@ -91,7 +91,7 @@ class SchellingSim:
                     raise ModelRetry("destination coordinates are outside the board")
                 destination = action.row * size + action.column
                 if destination not in self.available:
-                    raise ModelRetry("destination must be an unclaimed beginning-of-step vacancy")
+                    raise ModelRetry(DESTINATION_TAKEN)
                 self._moves[agent_id] = destination
             self._submitted.add(agent_id)
 

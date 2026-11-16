@@ -75,6 +75,10 @@ async def stream_responses(
 PROVIDER_RETRY_DELAYS = (15.0, 30.0, 60.0, 120.0, 240.0)
 
 
+# Retry feedback for a destination on the board that another agent holds or has claimed.
+DESTINATION_TAKEN = "destination is occupied or already claimed this step; choose another"
+
+
 class _CallErrorLimitReached(Exception):
     pass
 
@@ -90,12 +94,16 @@ class _CallErrors[DepsT](AbstractCapability[DepsT]):
 
     @staticmethod
     def _tool_failures(messages: Sequence[ModelMessage]) -> set[tuple[datetime | None, str]]:
+        # A taken destination is a lost race or an unseen cell, not a broken call. The
+        # agent's own output-retry limit and the request allowance still bound it.
         return {
             (message.timestamp, part.tool_call_id)
             for message in messages
             if isinstance(message, ModelRequest)
             for part in message.parts
-            if isinstance(part, ToolReturnPart) and part.outcome in ERROR_OUTCOMES
+            if isinstance(part, ToolReturnPart)
+            and part.outcome in ERROR_OUTCOMES
+            and DESTINATION_TAKEN not in str(part.content)
         }
 
     async def before_model_request(
@@ -238,7 +246,8 @@ without reserving any part of the action.
 All model agents take their turns at the same time, so you can exchange
 messages within a turn. Finish your turn within 30 minutes.
 Each turn allows up to 25 model requests. Three failed tool or transient API calls
-end the turn; successful calls do not reset this failure count.
+end the turn; successful calls do not reset this failure count. A move to a
+square that is occupied or already claimed does not count toward those three.
 """.strip()
 
     def __init__(

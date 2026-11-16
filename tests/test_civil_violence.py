@@ -1018,6 +1018,56 @@ class CivilViolenceTests(SandboxTestCase):
                     )
                 self.assertFalse((resources.writer.directory / "turns.jsonl").exists())
 
+    async def test_arrest_target_claimed_by_a_peer_does_not_use_up_failed_calls(self) -> None:
+        first: int | None = None
+        claimed: list[int] = []
+        rival_requests: dict[int, int] = {}
+
+        async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal first
+            identity = int(cast(str, info.instructions).split("Identity: ")[1].split(".")[0])
+            targets = cast(
+                list[list[int]], observation(messages)["eligible_target_locations_if_staying"]
+            )
+            if first is None and targets:
+                first = identity
+                claimed[:] = targets[0]
+                return ModelResponse(
+                    parts=[ToolCallPart("act", {"destination": None, "target_location": claimed})]
+                )
+            while first is None or len(sim.eligible_targets(first)) == len(targets):
+                if identity == first or not targets:
+                    break
+                await asyncio.sleep(0)  # Until the first officer's claim is accepted.
+            if identity != first and claimed in targets:
+                rival_requests[identity] = rival_requests.get(identity, 0) + 1
+                if rival_requests[identity] <= 4:
+                    # Four tries at the claimed citizen, more than the three failed calls allowed.
+                    return ModelResponse(
+                        parts=[
+                            ToolCallPart("act", {"destination": None, "target_location": claimed})
+                        ]
+                    )
+            return ModelResponse(
+                parts=[ToolCallPart("act", {"destination": None, "target_location": None})]
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            resources = runtime(Path(directory) / "case", FunctionModel(script))
+            sim = CivilViolenceSim(
+                civil(
+                    controlled_role="police",
+                    citizen_density=0.5,
+                    police_density=0.25,
+                    threshold=-10_000,
+                ),
+                runtime=resources,
+            )
+            await sim.step()
+            self.assertTrue(rival_requests)
+            self.assertEqual(set(rival_requests.values()), {5})
+            self.assertFalse((resources.writer.directory / "turns.jsonl").exists())
+
     async def test_act_missing_required_activity_retries_then_falls_back(self) -> None:
         async def missing(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             return ModelResponse(parts=[ToolCallPart("act", {"destination": None})])

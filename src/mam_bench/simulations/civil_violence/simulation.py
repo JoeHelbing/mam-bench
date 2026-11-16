@@ -10,7 +10,7 @@ from pydantic_ai import ModelRetry
 from mam_bench.artifacts import ArtifactWriter
 from mam_bench.runtime import CaseRuntime
 from mam_bench.scheduling import TurnScheduler
-from mam_bench.sessions import DESTINATION_TAKEN, AgentSessions
+from mam_bench.sessions import DESTINATION_TAKEN, TARGET_CLAIMED, AgentSessions
 
 from .agents import (
     Action,
@@ -239,6 +239,8 @@ class CivilViolenceSim:
             None,
         )
         if target_location is not None and target_id is None:
+            if any(self.citizens[t].location == target_location for t in self._targets.values()):
+                raise ValueError(TARGET_CLAIMED)
             raise ValueError("target square must hold an unclaimed adjacent active citizen")
         self._submitted.add(agent_id)
         if target_id is not None:

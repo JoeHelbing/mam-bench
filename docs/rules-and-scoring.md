@@ -10,7 +10,7 @@ limits; unreported endpoint defaults remain unknown.
 
 Both worlds start from the same seed and use the same staged turn mechanism:
 selected replacement identities decide first, then the remaining ordinary agents.
-Agent turns overlap up to the configured concurrency limit. Each ready action is
+All agent turns in a cohort run at the same time. Each ready action is
 validated and claimed immediately; a slow agent or one retrying an invalid action
 does not hold priority over others. Conflicting claims succeed in arrival order.
 Ordinary decisions see earlier reservations. Within each phase, physical actions

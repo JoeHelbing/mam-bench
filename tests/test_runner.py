@@ -414,9 +414,7 @@ class RunnerTests(SandboxTestCase):
                 failed_case_started = True
 
             config = BenchmarkConfig(
-                model=selection().model_copy(
-                    update={"settings": AgentSettings(concurrency=2, timeout_seconds=4)}
-                ),
+                model=selection().model_copy(update={"settings": AgentSettings(timeout_seconds=4)}),
                 cases=(schelling(max_steps=1), failed_case, schelling()),
                 output_directory=Path(directory),
             )
@@ -429,7 +427,8 @@ class RunnerTests(SandboxTestCase):
             ):
                 await runner.run(on_case=completed)
             self.assertEqual(failure.exception.case_index, 1)
-            self.assertEqual(len(admitted), 2)
+            # The whole controlled cohort is in flight when the first turn fails.
+            self.assertGreaterEqual(len(admitted), 2)
             self.assertTrue(sibling_cancelled.is_set())
             self.assertEqual(len(runner.results), 1)
             root = runner.output_directory

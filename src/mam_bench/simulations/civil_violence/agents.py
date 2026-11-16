@@ -329,7 +329,7 @@ def _model_interface(
         output_type=outputs,
         instructions=instructions,
         retries=5,
-        end_strategy="early",
+        end_strategy="graceful",
         capabilities=[ProcessEventStream(stream_responses)],
     )
     interface.instructions(_identity)

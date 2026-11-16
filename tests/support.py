@@ -253,7 +253,7 @@ def streaming_model(model: FunctionModel) -> FunctionModel:
 def runtime(path: Path, model: FunctionModel | None = None, **settings: object) -> CaseRuntime:
     return CaseRuntime(
         streaming_model(model or FunctionModel(stay)),
-        AgentSettings.model_validate({"concurrency": 2, "timeout_seconds": 5, **settings}),
+        AgentSettings.model_validate({"timeout_seconds": 5, **settings}),
         ArtifactWriter(path),
         context_window_tokens=260_000,
     )

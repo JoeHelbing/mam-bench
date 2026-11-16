@@ -281,7 +281,6 @@ class NativeProviderTests(SandboxTestCase):
                                         "settings": AgentSettings(
                                             max_completion_tokens=1024,
                                             timeout_seconds=5,
-                                            concurrency=1,
                                         )
                                     }
                                 )

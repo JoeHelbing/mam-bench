@@ -231,10 +231,12 @@ Other agents post while you work, so a read is a snapshot: new messages can
 arrive after it, and read_messages again shows them. unread_messages in your
 observation was counted when your turn started and excludes your own posts.
 search_messages re-reads any messages without marking them read.
-Respond with tool calls, not plain text. Finish code and messaging before
-submitting your action. A valid terminal action ends the turn; other calls in
-the same response are skipped. Invalid actions return retry feedback without
-reserving any part of the action.
+Respond with tool calls, not plain text. A valid terminal action ends the turn
+and cannot be changed. Other calls in the same response still run, but you see
+their results only on your next turn. Invalid actions return retry feedback
+without reserving any part of the action.
+All model agents take their turns at the same time, so you can exchange
+messages within a turn. Finish your turn within 30 minutes.
 Each turn allows up to 25 model requests. Three failed tool or transient API calls
 end the turn; successful calls do not reset this failure count.
 """.strip()

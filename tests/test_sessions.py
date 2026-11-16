@@ -722,17 +722,43 @@ class AgentSessionsTests(SandboxTestCase):
 
     async def test_message_board_pages_and_isolated_cursors(self) -> None:
         board = MessageBoard()
+        board.step = 3
         for index in range(12):
-            self.assertEqual(
-                await board.post("writer", str(index) + "x" * 3990, announcement=index == 0), index
-            )
+            self.assertEqual(await board.post("writer", str(index) + "x" * 3990), index)
         first = await board.read("a")
         second = await board.read("a")
         self.assertLessEqual(len(first.content), 40000)
         self.assertTrue(first.more_available)
         self.assertFalse(second.more_available)
-        self.assertIn("announcement by writer", first.content)
+        self.assertRegex(first.content, r"^\[0 step 3 \d\d:\d\d:\d\d by writer\] 0x")
         self.assertEqual(await board.read("b"), first)
+        self.assertEqual((await board.read("a")).content, "")
+
+    async def test_message_board_unread_skips_own_posts_and_search_leaves_them_unread(self) -> None:
+        board = MessageBoard()
+        board.step = 1
+        await board.post("a", "from a")
+        await board.post("b", "from b")
+        board.step = 2
+        await board.post("a", "later a")
+        await board.post("c", "from c")
+
+        self.assertEqual(board.unread("a"), 2)
+        found = await board.search(since_step=2)
+        self.assertRegex(
+            found.content, r"^\[2 step 2 \S+ by a\] later a\n\[3 step 2 \S+ by c\] from c$"
+        )
+        self.assertIn("from b", (await board.search(author="b")).content)
+        self.assertRegex((await board.search(last=1)).content, r"^\[3 .*from c$")
+        self.assertEqual(board.unread("a"), 2)
+
+        page = await board.read("a")
+        self.assertNotIn("by a]", page.content)
+        self.assertEqual(page.content.count("\n"), 1)
+        self.assertFalse(page.more_available)
+        self.assertEqual(board.unread("a"), 0)
+        await board.post("a", "own again")
+        self.assertEqual(board.unread("a"), 0)
         self.assertEqual((await board.read("a")).content, "")
 
     async def test_default_request_limit_stops_successful_read_loop_at_25(self) -> None:

@@ -285,9 +285,9 @@ _Avoid_: segregation index, satisfaction
 
 **Message Board**:
 The append-only ordered communication surface shared by model-controlled agents in
-one controlled world. Agent posts are unverified free text, simulation announcements are
-distinguished from agent posts, and each agent has an independent unread
-position.
+one controlled world. It holds only agent posts: unverified free text stamped with
+step and time. Each agent has an independent unread position, which skips its own
+posts, and can search the whole board without moving that position.
 _Avoid_: Public Document, shared notebook, controller
 
 **Private Workspace**:
@@ -313,11 +313,6 @@ The maximum number of successful function-tool calls available to one
 model-controlled agent during an Agent Turn. Failed calls are handled through
 model retries; an accepted terminal action ends the turn.
 _Avoid_: attempt count, token budget, request count
-
-**Reservation Record**:
-An authoritative Message Board entry written when a model-controlled agent
-atomically claims a beginning-of-round vacancy.
-_Avoid_: actor post, move result, proposal
 
 **Execution Failure**:
 A provider, network, timeout, memory, compaction, persistence, or simulation

@@ -1,6 +1,6 @@
 [project]
 name = "mam-bench"
-version = "2.0.0"
+version = "3.0.0"
 description = "Evaluate model-controlled agents in multi-agent simulations"
 license = "Apache-2.0"
 requires-python = ">=3.14"

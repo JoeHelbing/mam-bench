@@ -1,5 +1,27 @@
 # Changelog
 
+## [3.0.0](https://github.com/JoeHelbing/mam-bench/compare/v2.0.0...v3.0.0) (2026-11-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* **turns:** run all turns at once and deliver posts sent with the action ([#97](https://github.com/JoeHelbing/mam-bench/issues/97))
+* **board:** drop announcements, stamp posts, add search and unread count ([#96](https://github.com/JoeHelbing/mam-bench/issues/96))
+
+### Features
+
+* **board:** drop announcements, stamp posts, add search and unread count ([#96](https://github.com/JoeHelbing/mam-bench/issues/96)) ([f49a8d9](https://github.com/JoeHelbing/mam-bench/commit/f49a8d9c757dd7f96ad15549ecd61866c71215aa))
+* **turns:** run all turns at once and deliver posts sent with the action ([#97](https://github.com/JoeHelbing/mam-bench/issues/97)) ([6264108](https://github.com/JoeHelbing/mam-bench/commit/62641080819a41da52df946817e6fe0837b60b7b))
+
+
+### Bug Fixes
+
+* **deps:** update pydantic-ai ([#100](https://github.com/JoeHelbing/mam-bench/issues/100)) ([b7b3a08](https://github.com/JoeHelbing/mam-bench/commit/b7b3a0887c6542ac18c38d6c6fe8b91db82a3f55))
+* **deps:** update pydantic-ai ([#90](https://github.com/JoeHelbing/mam-bench/issues/90)) ([c37c5c0](https://github.com/JoeHelbing/mam-bench/commit/c37c5c040986dd0bb777419c898b061422e32d35))
+* **turns:** restore guidance to finish other calls before acting ([#99](https://github.com/JoeHelbing/mam-bench/issues/99)) ([518d95a](https://github.com/JoeHelbing/mam-bench/commit/518d95a2fa7910e68f549bb92761ed7a8fdc9967))
+* **turns:** stop counting arrests of a claimed citizen as failed calls ([#101](https://github.com/JoeHelbing/mam-bench/issues/101)) ([56f692c](https://github.com/JoeHelbing/mam-bench/commit/56f692c2492b1303ca8200cfd0ce2374825c9ab6))
+* **turns:** stop counting moves to a taken square as failed calls ([#98](https://github.com/JoeHelbing/mam-bench/issues/98)) ([a5875df](https://github.com/JoeHelbing/mam-bench/commit/a5875dffefac4145abd191c6f8e06c2919d545ff))
+
 ## [2.0.0](https://github.com/JoeHelbing/mam-bench/compare/v1.0.2...v2.0.0) (2026-10-27)
 
 

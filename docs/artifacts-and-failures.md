@@ -97,11 +97,12 @@ retried in two layers:
 A request that still fails after the last wait stops the world and the run as
 incomplete: `kind: provider` (or `network` or `timeout`), with no total.
 [Resume](#resuming-an-incomplete-run) it, or start a new run, perhaps on another
-provider. Each failed request still counts toward
-the turn's 25-request allowance, so a turn that exhausts the allowance while
-retrying ends with `usage_limit`. Incomplete streamed tool calls receive an
-explicit not-executed reply before retrying. Failed requests log their exception
-type, status code, and retry wait.
+provider. Failed requests still appear in recorded request counts, but transient
+retries do not consume the model's 25-request allowance (so a provider error
+never converts into a `usage_limit` fallback); total transient retries within
+one turn are capped at 25 before stopping the run as incomplete. Incomplete
+streamed tool calls receive an explicit not-executed reply before retrying.
+Failed requests log their exception type, status code, and retry wait.
 
 Failed tool calls have a cumulative three-failure limit per turn; successful
 calls do not reset it. At the limit, `call_error_limit` ends the turn with the

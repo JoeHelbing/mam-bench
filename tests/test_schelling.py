@@ -11,7 +11,7 @@ import numpy as np
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from mam_bench.simulations.schelling.agents import ModelControlledAgent, OrdinaryAgent
+from mam_bench.simulations.schelling.agents import ModelControlledAgent, Move, OrdinaryAgent
 from mam_bench.simulations.schelling.results import EvaluationResult, Outcome
 from mam_bench.simulations.schelling.simulation import SchellingSim
 from support import SandboxTestCase, observation, records, runtime, schelling
@@ -480,22 +480,40 @@ class SchellingTests(SandboxTestCase):
             nonlocal requests
             view = observation(messages)
             identity = cast(list[dict[str, int]], view["model_controlled_agents"])[0]["id"]
-            move = ToolCallPart("move", {"destination": None})
             if identity != poster:
-                return ModelResponse(parts=[move])
+                return ModelResponse(parts=[ToolCallPart("move", {"destination": None})])
             requests += 1
             if requests == 1:
                 # The move is accepted, but the empty post makes the model answer again.
-                return ModelResponse(parts=[ToolCallPart("post_message", {"text": ""}), move])
-            return ModelResponse(parts=[move])
+                return ModelResponse(
+                    parts=[
+                        ToolCallPart("post_message", {"text": ""}),
+                        ToolCallPart("move", {"destination": first_dest}),
+                    ]
+                )
+            # Even if the retry submits a different action, the first accepted action stands.
+            return ModelResponse(parts=[ToolCallPart("move", {"destination": None})])
 
         with tempfile.TemporaryDirectory() as directory:
             settings = schelling()
             poster = settings.controlled_agent_ids[0]
             resources = runtime(Path(directory) / "case", FunctionModel(script))
             sim = SchellingSim(settings, runtime=resources)
+            vacancy = int(np.flatnonzero(sim.board.cells.ravel() == 0)[0])
+            first_dest = list(divmod(vacancy, settings.board_size))
+            recorded: list[object] = []
+            original_choose = sim.agents[poster].choose_action
+
+            async def spy() -> object:
+                chosen = await original_choose()
+                recorded.append(chosen)
+                return chosen
+
+            sim.agents[poster].choose_action = spy  # type: ignore[method-assign]
             await sim.step()
             self.assertEqual(requests, 2)
+            self.assertEqual(int(sim.board.locations[poster]), vacancy)
+            self.assertEqual(recorded, [Move(row=first_dest[0], column=first_dest[1])])
             self.assertFalse((resources.writer.directory / "turns.jsonl").exists())
 
     async def test_moves_to_a_taken_square_do_not_use_up_the_failed_call_limit(self) -> None:

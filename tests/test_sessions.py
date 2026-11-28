@@ -354,7 +354,7 @@ class AgentSessionsTests(SandboxTestCase):
         self.assertEqual(await sessions.run("a", "go", deps=None), Completed("stayed"))
         self.assertEqual(calls, 3)
 
-    async def test_transient_errors_retry_within_the_request_budget_without_strikes(self) -> None:
+    async def test_transient_errors_retry_without_spending_request_budget_or_strikes(self) -> None:
         retries = len(PROVIDER_RETRY_DELAYS)
         for error in _transient_errors():
             for limit in (1, 25):
@@ -365,7 +365,7 @@ class AgentSessionsTests(SandboxTestCase):
                         messages: list[ModelMessage],
                         info: AgentInfo,
                         failure: Exception = error,
-                        max_failures: int = min(limit, retries),
+                        max_failures: int = retries,
                     ) -> ModelResponse:
                         nonlocal calls
                         calls += 1
@@ -376,18 +376,39 @@ class AgentSessionsTests(SandboxTestCase):
                     runtime = AgentSessions(
                         Agent(FunctionModel(model)), context_window_tokens=260_000
                     )
-                    # Every retry still spends one request from the turn's allowance.
+                    # Transient provider retries never convert into a usage_limit fallback.
                     self.assertEqual(
                         await runtime.run(
                             "a", "go", deps=None, usage_limits=UsageLimits(request_limit=limit)
                         ),
-                        Stopped("usage_limit") if limit == 1 else Completed("recovered"),
+                        Completed("recovered"),
                     )
-                    self.assertEqual(calls, 1 if limit == 1 else retries + 1)
+                    self.assertEqual(calls, retries + 1)
                     self.assertEqual(runtime.usage.requests, calls)
                     self.assertEqual(
                         await runtime.run("a", "next", deps=None), Completed("recovered")
                     )
+
+    async def test_session_instructions_match_timeout_and_retry_contract(self) -> None:
+        seen: list[str] = []
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            seen.append(info.instructions or "")
+            return _response(TextPart("ok"))
+
+        for settings, expected_timeout in (
+            (AgentSettings(), "60 minutes"),
+            (AgentSettings(timeout_seconds=900.0), "15 minutes"),
+            (AgentSettings(timeout_seconds=45.0), "45 seconds"),
+        ):
+            with self.subTest(expected_timeout=expected_timeout):
+                seen.clear()
+                runtime = AgentSessions(
+                    Agent(FunctionModel(model)), context_window_tokens=260_000, settings=settings
+                )
+                self.assertEqual(await runtime.run("a", "go", deps=None), Completed("ok"))
+                self.assertIn(f"Finish your turn within {expected_timeout}.", seen[0])
+                self.assertNotIn("transient API", seen[0])
 
     async def test_provider_errors_that_outlast_retries_stop_the_world(self) -> None:
         retries = len(PROVIDER_RETRY_DELAYS)

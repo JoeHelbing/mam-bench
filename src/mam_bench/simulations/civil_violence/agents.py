@@ -57,8 +57,9 @@ participation) + 100 * (controlled revolution - reference revolution)).
 Revolution is 1 if a world reaches at least 95% participation at the end of a
 step, otherwise 0. A favorable difference of 0.05 earns 5 participation points;
 a favorable revolution difference adds 100 points. Scores are signed and unclamped.
-Each world stops independently at its first revolution or after step 30.
-Revolution on step 30 counts; reaching it earlier earns no extra points.
+Each world stops independently at its first revolution or after the configured
+maximum step. Revolution on the final step counts; reaching it earlier earns no
+extra points.
 
 Board and turns
 Each cell holds at most one person, and the board wraps at its edges. You see
@@ -107,18 +108,22 @@ class SimulationAgent:
         if location is None:
             return []
         simulation = self.simulation
-        occupied = {
-            c.location: {"agent_id": c.agent_id, "role": "citizen", "active": c.active}
-            for c in simulation.citizens.values()
-            if c.location is not None
-        } | {
-            p.location: {"agent_id": p.agent_id, "role": "police"}
-            for p in simulation.police.values()
-        }
-        return [
-            {"location": point, **occupied.get(point, {"agent_id": None, "role": "vacant"})}
-            for point in simulation.neighborhood(location, radius)
-        ]
+        cells: list[dict[str, object]] = []
+        for point in simulation.neighborhood(location, radius):
+            if (citizen := simulation.citizen_at(point)) is not None:
+                cells.append(
+                    {
+                        "location": point,
+                        "agent_id": citizen.agent_id,
+                        "role": "citizen",
+                        "active": citizen.active,
+                    }
+                )
+            elif (officer := simulation.police_at(point)) is not None:
+                cells.append({"location": point, "agent_id": officer.agent_id, "role": "police"})
+            else:
+                cells.append({"location": point, "agent_id": None, "role": "vacant"})
+        return cells
 
     async def choose_action(self) -> Action:
         raise NotImplementedError
@@ -143,12 +148,17 @@ class CitizenAgent(SimulationAgent):
         if citizen.location is None:
             return Defer()
         destinations = simulation.legal_destinations(self.agent_id)
-        nearby = set(simulation.neighborhood(citizen.location, simulation.settings.vision_radius))
-        active = 1 + sum(c.active and c.location in nearby for c in simulation.citizens.values())
-        inactive = 1 + sum(
-            not c.active and c.location in nearby for c in simulation.citizens.values()
-        )
-        police = sum(p.location in nearby for p in simulation.police.values())
+        active = 1
+        inactive = 1
+        police = 0
+        for point in simulation.neighborhood(citizen.location, simulation.settings.vision_radius):
+            if (other := simulation.citizen_at(point)) is not None:
+                if other.active:
+                    active += 1
+                else:
+                    inactive += 1
+            elif simulation.police_at(point) is not None:
+                police += 1
         x = -citizen.private_preference + active**2 / inactive - simulation.settings.threshold
         sigmoid = 1 / (1 + exp(-x)) if x >= 0 else exp(x) / (1 + exp(x))
         probability = sigmoid - (1 - exp(-2.3 * police / active))
@@ -284,31 +294,29 @@ async def _act_citizen(
     ctx: RunContext[ModelControlledAgent],
     active: StrictBool,
     destination: tuple[StrictInt, StrictInt] | None,
-) -> CitizenAction:
+) -> Action:
     """Choose activity and destination [row, column] together; null means stay."""
     if ctx.deps.location is None:
         raise ModelRetry("jailed citizens must defer")
-    action = CitizenAction(active, destination)
-    await ctx.deps.simulation.reserve_action(ctx.deps.agent_id, action)
-    return action
+    return await ctx.deps.simulation.reserve_action(
+        ctx.deps.agent_id, CitizenAction(active, destination)
+    )
 
 
 async def _act_police(
     ctx: RunContext[ModelControlledAgent],
     destination: tuple[StrictInt, StrictInt] | None,
     target_location: tuple[StrictInt, StrictInt] | None,
-) -> PoliceAction:
+) -> Action:
     """Move first, then arrest at target square [row, column]; null declines either."""
-    action = PoliceAction(target_location, destination)
-    await ctx.deps.simulation.reserve_action(ctx.deps.agent_id, action)
-    return action
+    return await ctx.deps.simulation.reserve_action(
+        ctx.deps.agent_id, PoliceAction(target_location, destination)
+    )
 
 
-async def _defer(ctx: RunContext[ModelControlledAgent]) -> Defer:
+async def _defer(ctx: RunContext[ModelControlledAgent]) -> Action:
     """End a jailed citizen's communication-only turn."""
-    action = Defer()
-    await ctx.deps.simulation.reserve_action(ctx.deps.agent_id, action)
-    return action
+    return await ctx.deps.simulation.reserve_action(ctx.deps.agent_id, Defer())
 
 
 def _identity(ctx: RunContext[ModelControlledAgent]) -> str:

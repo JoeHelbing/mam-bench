@@ -110,8 +110,7 @@ async def _move(
         if row < 0 or column < 0:
             raise ModelRetry("coordinates must be nonnegative")
         action = Move(row=row, column=column)
-    await ctx.deps.simulation.reserve_action(ctx.deps.agent_id, action)
-    return action
+    return await ctx.deps.simulation.reserve_action(ctx.deps.agent_id, action)
 
 
 def _type_label(agent_type: int) -> str:

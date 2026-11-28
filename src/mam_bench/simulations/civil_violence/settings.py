@@ -18,7 +18,7 @@ class CivilViolenceSettings(BaseModel):
     threshold: float
     private_preference_mean: float
     private_preference_std: float = Field(ge=0)
-    max_jail_term: int = Field(strict=True, ge=0)
+    max_jail_term: int = Field(strict=True, ge=1)
     seed: int = Field(strict=True, ge=0)
     max_steps: int = Field(strict=True, ge=1)
     controlled_agent_count: Literal[16]

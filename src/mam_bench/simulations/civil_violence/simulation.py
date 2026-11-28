@@ -2,6 +2,7 @@
 
 from asyncio import Lock
 from dataclasses import asdict
+from functools import cache
 from typing import Literal
 
 import numpy as np
@@ -24,6 +25,21 @@ from .agents import (
 )
 from .results import Citizen, Coordinate, EvaluationResult, Outcome, Police
 from .settings import CivilViolenceSettings
+
+
+@cache
+def _torus_neighborhood(size: int, location: Coordinate, radius: int) -> tuple[Coordinate, ...]:
+    bound = min(radius, size)
+    return tuple(
+        sorted(
+            {
+                ((location[0] + dr) % size, (location[1] + dc) % size)
+                for dr in range(-bound, bound + 1)
+                for dc in range(-bound, bound + 1)
+            }
+            - {location}
+        )
+    )
 
 
 class CivilViolenceSim:
@@ -95,12 +111,17 @@ class CivilViolenceSim:
         self._admitted: set[int] = set()
         self._phase: str | None = None
         self._phase_locations: dict[int, Coordinate] = {}
+        self._citizen_at: dict[Coordinate, Citizen] = {}
+        self._police_at: dict[Coordinate, Police] = {}
         self._vacancies: set[Coordinate] = set()
         self._moves: dict[int, Coordinate] = {}
+        self._claimed_moves: set[Coordinate] = set()
         self._activities: dict[int, bool] = {}
         self._targets: dict[int, int] = {}
+        self._claimed_targets: set[int] = set()
         self._custody: tuple[int, ...] = ()
         self._submitted: set[int] = set()
+        self._actions: dict[int, Action] = {}
 
     @property
     def participating_count(self) -> int:
@@ -122,24 +143,30 @@ class CivilViolenceSim:
         }
 
     def neighborhood(self, location: Coordinate, radius: int) -> tuple[Coordinate, ...]:
-        size = self.settings.board_size
-        return tuple(
-            sorted(
-                {
-                    ((location[0] + dr) % size, (location[1] + dc) % size)
-                    for dr in range(-min(radius, size), min(radius, size) + 1)
-                    for dc in range(-min(radius, size), min(radius, size) + 1)
-                }
-                - {location}
-            )
+        return _torus_neighborhood(self.settings.board_size, location, radius)
+
+    def _occupancy(self) -> tuple[dict[Coordinate, Citizen], dict[Coordinate, Police]]:
+        if self._phase is not None:
+            return self._citizen_at, self._police_at
+        return (
+            {c.location: c for c in self.citizens.values() if c.location is not None},
+            {p.location: p for p in self.police.values()},
         )
+
+    def citizen_at(self, location: Coordinate) -> Citizen | None:
+        return self._occupancy()[0].get(location)
+
+    def police_at(self, location: Coordinate) -> Police | None:
+        return self._occupancy()[1].get(location)
 
     def _begin_phase(self, phase: str) -> None:
         self._phase = phase
-        self._phase_locations = {
-            c.agent_id: c.location for c in self.citizens.values() if c.location is not None
-        } | {p.agent_id: p.location for p in self.police.values()}
-        occupied = set(self._phase_locations.values())
+        self._citizen_at = {c.location: c for c in self.citizens.values() if c.location is not None}
+        self._police_at = {p.location: p for p in self.police.values()}
+        self._phase_locations = {c.agent_id: loc for loc, c in self._citizen_at.items()} | {
+            p.agent_id: loc for loc, p in self._police_at.items()
+        }
+        occupied = set(self._citizen_at) | set(self._police_at)
         self._vacancies = {
             (r, c)
             for r in range(self.settings.board_size)
@@ -147,9 +174,12 @@ class CivilViolenceSim:
             if (r, c) not in occupied
         }
         self._moves = {}
+        self._claimed_moves = set()
         self._activities = {}
         self._targets = {}
+        self._claimed_targets = set()
         self._submitted = set()
+        self._actions = {}
 
     def _begin_citizen_phase(self) -> tuple[int, ...]:
         self._begin_phase("citizen")
@@ -158,11 +188,12 @@ class CivilViolenceSim:
                 continue
             if citizen.jail_remaining > 0:
                 citizen.jail_remaining -= 1
-            elif self._vacancies:
+            if citizen.jail_remaining == 0 and self._vacancies:
                 choices = sorted(self._vacancies)
                 release = self.scheduler.rng(self.steps, "citizen", citizen.agent_id, "release")
                 citizen.location = choices[int(release.integers(len(choices)))]
                 citizen.active = False
+                self._citizen_at[citizen.location] = citizen
                 self._phase_locations[citizen.agent_id] = citizen.location
                 self._vacancies.remove(citizen.location)
         self._custody = tuple(c.agent_id for c in self.citizens.values() if c.location is None)
@@ -170,8 +201,7 @@ class CivilViolenceSim:
 
     def legal_destinations(self, agent_id: int) -> tuple[Coordinate, ...]:
         adjacent = self.neighborhood(self._phase_locations[agent_id], 1)
-        claimed = set(self._moves.values())
-        return tuple(p for p in adjacent if p in self._vacancies and p not in claimed)
+        return tuple(p for p in adjacent if p in self._vacancies and p not in self._claimed_moves)
 
     def _validate_move(self, agent_id: int, destination: Coordinate | None) -> None:
         if agent_id in self._submitted:
@@ -181,7 +211,7 @@ class CivilViolenceSim:
         if agent_id in self.controlled_agent_ids:
             if not all(0 <= axis < self.settings.board_size for axis in destination):
                 raise ValueError("destination coordinates are outside the board")
-            if destination not in self._vacancies or destination in self._moves.values():
+            if destination not in self._vacancies or destination in self._claimed_moves:
                 raise ValueError(DESTINATION_TAKEN)
         elif destination not in self.legal_destinations(agent_id):
             raise ValueError("destination must be an unclaimed adjacent phase-start vacancy")
@@ -196,6 +226,7 @@ class CivilViolenceSim:
         self._activities[agent_id] = active
         if destination is not None:
             self._moves[agent_id] = destination
+            self._claimed_moves.add(destination)
 
     def _settle_citizens(self) -> None:
         for agent_id, active in self._activities.items():
@@ -213,11 +244,15 @@ class CivilViolenceSim:
         adjacent = self.neighborhood(
             location if location is not None else self._phase_locations[agent_id], 1
         )
-        claimed = set(self._targets.values())
+        citizens_at, _ = self._occupancy()
         return tuple(
-            c.agent_id
-            for c in self.citizens.values()
-            if c.active and c.location in adjacent and c.agent_id not in claimed
+            sorted(
+                citizen.agent_id
+                for point in adjacent
+                if (citizen := citizens_at.get(point)) is not None
+                and citizen.active
+                and citizen.agent_id not in self._claimed_targets
+            )
         )
 
     def _reserve_police_action(
@@ -245,26 +280,29 @@ class CivilViolenceSim:
         self._submitted.add(agent_id)
         if target_id is not None:
             self._targets[agent_id] = target_id
+            self._claimed_targets.add(target_id)
         if destination is not None:
             self._moves[agent_id] = destination
+            self._claimed_moves.add(destination)
 
     def _settle_police(self) -> None:
         for target_id in self._targets.values():
             citizen = self.citizens[target_id]
             citizen.location = None
+            citizen.active = False
             jail = self.scheduler.rng(self.steps, "police", target_id, "jail")
-            citizen.jail_remaining = int(jail.integers(self.settings.max_jail_term + 1))
+            citizen.jail_remaining = int(jail.integers(1, self.settings.max_jail_term + 1))
         for agent_id, destination in self._moves.items():
             self.police[agent_id].location = destination
         self.steps += 1
         self._phase = None
 
-    async def reserve_action(self, agent_id: int, action: Action) -> None:
+    async def reserve_action(self, agent_id: int, action: Action) -> Action:
         """Validate a whole action before claiming any resource, for either policy."""
         if agent_id in self._admitted and agent_id in self._submitted:
             # The first accepted action stands. A repeat arrives when another call in
             # the same response failed and the model had to answer again.
-            return
+            return self._actions[agent_id]
         if agent_id not in self._admitted or agent_id in self._submitted:
             raise ModelRetry("identity has no available turn in this phase")
         async with self._lock:
@@ -283,6 +321,8 @@ class CivilViolenceSim:
             except ValueError as error:
                 raise ModelRetry(str(error)) from None
             self._submitted.add(agent_id)
+            self._actions[agent_id] = action
+            return action
 
     async def _act(self, agent_id: int) -> None:
         self._admitted.add(agent_id)

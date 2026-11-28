@@ -7,6 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import cast
 
+from pydantic import ValidationError
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -66,7 +67,14 @@ class CivilViolenceTests(SandboxTestCase):
             for j, officer in enumerate(sim.police.values()):
                 officer.location = (3 + j // 8, j % 8)
             await sim.step()
-            self.assertEqual(sim.citizens[0].active, expected)
+            # Activation during the citizen phase leaves the citizen active or arrested.
+            self.assertEqual(
+                any(
+                    c.agent_id == 0 and (c.active or c.location is None)
+                    for c in sim.citizens.values()
+                ),
+                expected,
+            )
 
         # C/A = 1/2: unrounded risk leaves exp(-1.15)=0.317 activation probability.
         # Rounding that ratio to zero would incorrectly activate seed 3.
@@ -82,7 +90,13 @@ class CivilViolenceTests(SandboxTestCase):
                 officer.location = (3 + j // 8, j % 8)
             next(iter(sim.police.values())).location = (2, 2)
             await sim.step()
-            self.assertEqual(sim.citizens[0].active, expected)
+            self.assertEqual(
+                any(
+                    c.agent_id == 0 and (c.active or c.location is None)
+                    for c in sim.citizens.values()
+                ),
+                expected,
+            )
 
     async def test_released_ordinary_citizens_choose_activity_and_never_overlap(self) -> None:
         sim = CivilViolenceSim(civil(threshold=10_000))
@@ -135,9 +149,11 @@ class CivilViolenceTests(SandboxTestCase):
             self.assertTrue(citizen.active)
 
     async def test_arrests_are_unique_adjacent_and_jail_term_endpoints_are_inclusive(self) -> None:
+        with self.assertRaises(ValidationError):
+            civil(max_jail_term=0)
         terms: set[int] = set()
-        for seed in range(4):
-            sim = CivilViolenceSim(civil(police_density=0.25, max_jail_term=1, seed=seed))
+        for seed in range(6):
+            sim = CivilViolenceSim(civil(police_density=0.25, max_jail_term=2, seed=seed))
             for citizen in sim.citizens.values():
                 citizen.active = True
             origins = {i: c.location for i, c in sim.citizens.items()}
@@ -145,16 +161,34 @@ class CivilViolenceTests(SandboxTestCase):
             jailed = [c for c in sim.citizens.values() if c.location is None]
             self.assertTrue(jailed)
             self.assertLessEqual(len(jailed), len(sim.police))
+            arrested_terms = {c.agent_id: c.jail_remaining for c in jailed}
             for citizen in jailed:
                 terms.add(citizen.jail_remaining)
-                self.assertTrue(citizen.active)
+                self.assertFalse(citizen.active)
                 self.assertTrue(
                     any(
                         origins[citizen.agent_id] in sim.neighborhood(p.location, 1)
                         for p in sim.police.values()
                     )
                 )
-        self.assertEqual(terms, {0, 1})
+            # Term k stays jailed for k completed steps (releases at start of step 1+k).
+            for citizen in sim.citizens.values():
+                if citizen.location is not None:
+                    citizen.active = False
+            sim.settings = civil(police_density=0.25, max_jail_term=2, threshold=10_000, seed=seed)
+            await sim.step()
+            for aid, term in arrested_terms.items():
+                if term == 1:
+                    self.assertIsNotNone(sim.citizens[aid].location)
+                    self.assertEqual(sim.citizens[aid].jail_remaining, 0)
+                else:
+                    self.assertIsNone(sim.citizens[aid].location)
+                    self.assertEqual(sim.citizens[aid].jail_remaining, 1)
+            await sim.step()
+            for aid in arrested_terms:
+                self.assertIsNotNone(sim.citizens[aid].location)
+                self.assertEqual(sim.citizens[aid].jail_remaining, 0)
+        self.assertEqual(terms, {1, 2})
 
     async def test_all_role_goal_pairs_save_matched_worlds_and_replay_scores(self) -> None:
         for role in ("citizen", "police"):
@@ -597,15 +631,16 @@ class CivilViolenceTests(SandboxTestCase):
             sim = CivilViolenceSim(civil(threshold=10_000), runtime=resources)
             jailed_id = sim.controlled_agent_ids[0]
             citizen = sim.citizens[jailed_id]
-            citizen.location, citizen.active, citizen.jail_remaining = None, True, 1
+            citizen.location, citizen.active, citizen.jail_remaining = None, False, 2
             agent = sim.agents[jailed_id]
             await sim.step()
             self.assertIsNone(citizen.location)
-            self.assertTrue(citizen.active)
-            self.assertEqual(citizen.jail_remaining, 0)
+            self.assertFalse(citizen.active)
+            self.assertEqual(citizen.jail_remaining, 1)
             await sim.step()
             self.assertIsNotNone(citizen.location)
             self.assertFalse(citizen.active)
+            self.assertEqual(citizen.jail_remaining, 0)
             await sim.step()
             self.assertFalse(citizen.active)
             self.assertIs(agent, sim.agents[jailed_id])
@@ -1017,6 +1052,52 @@ class CivilViolenceTests(SandboxTestCase):
                         )
                     )
                 self.assertFalse((resources.writer.directory / "turns.jsonl").exists())
+
+    async def test_instructions_do_not_hardcode_step_30_and_duplicate_action_returns_first(
+        self,
+    ) -> None:
+        seen_instructions: list[str] = []
+        requests = 0
+
+        async def script(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal requests
+            identity = int(cast(str, info.instructions).split("Identity: ")[1].split(".")[0])
+            if identity != poster:
+                return ModelResponse(
+                    parts=[ToolCallPart("act", {"active": False, "destination": None})]
+                )
+            seen_instructions.append(info.instructions or "")
+            requests += 1
+            if requests == 1:
+                return ModelResponse(
+                    parts=[
+                        ToolCallPart("post_message", {"text": ""}),
+                        ToolCallPart("act", {"active": True, "destination": None}),
+                    ]
+                )
+            return ModelResponse(
+                parts=[ToolCallPart("act", {"active": False, "destination": None})]
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            resources = runtime(Path(directory) / "case", FunctionModel(script))
+            sim = CivilViolenceSim(civil(max_steps=5, threshold=10_000), runtime=resources)
+            poster = sim.controlled_agent_ids[0]
+            recorded: list[object] = []
+            original_choose = sim.agents[poster].choose_action
+
+            async def spy() -> object:
+                chosen = await original_choose()
+                recorded.append(chosen)
+                return chosen
+
+            sim.agents[poster].choose_action = spy  # type: ignore[method-assign]
+            await sim.step()
+            self.assertEqual(requests, 2)
+            self.assertTrue(sim.citizens[poster].active)
+            self.assertEqual(recorded, [CitizenAction(active=True, destination=None)])
+            self.assertTrue(seen_instructions)
+            self.assertNotIn("step 30", seen_instructions[0])
 
     async def test_arrest_target_claimed_by_a_peer_does_not_use_up_failed_calls(self) -> None:
         first: int | None = None

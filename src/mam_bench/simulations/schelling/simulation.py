@@ -57,6 +57,7 @@ class SchellingSim:
         self._vacancies: set[int] = set()
         self._moves: dict[int, int] = {}
         self._submitted: set[int] = set()
+        self._actions: dict[int, Action] = {}
         self._admitted: set[int] = set()
 
     @property
@@ -74,12 +75,12 @@ class SchellingSim:
             "satisfaction": self.board.ordinary_satisfaction,
         }
 
-    async def reserve_action(self, agent_id: int, action: Action) -> None:
+    async def reserve_action(self, agent_id: int, action: Action) -> Action:
         """Claim an action as soon as it is ready; only settlement moves agents."""
         if self._stepping and agent_id in self._admitted and agent_id in self._submitted:
             # The first accepted action stands. A repeat arrives when another call in
             # the same response failed and the model had to answer again.
-            return
+            return self._actions[agent_id]
         if not self._stepping or agent_id not in self._admitted or agent_id in self._submitted:
             raise ModelRetry("identity has no available turn")
         async with self._lock:
@@ -94,6 +95,8 @@ class SchellingSim:
                     raise ModelRetry(DESTINATION_TAKEN)
                 self._moves[agent_id] = destination
             self._submitted.add(agent_id)
+            self._actions[agent_id] = action
+            return action
 
     async def _act(self, identity: int) -> None:
         self._admitted.add(identity)
@@ -109,7 +112,7 @@ class SchellingSim:
         self._stepping = True
         try:
             self._vacancies = set(int(p) for p in np.flatnonzero(self.board.cells.ravel() == 0))
-            self._moves, self._submitted, self._admitted = {}, set(), set()
+            self._moves, self._submitted, self._actions, self._admitted = {}, set(), {}, set()
             if self.sessions is not None:
                 self.sessions.board.step = self.steps + 1
             selected = self.settings.controlled_agent_ids

@@ -771,7 +771,7 @@ class ModelProviderTests(SandboxTestCase):
                 )
                 for identity in sim.controlled_agent_ids:
                     sim.citizens[identity].location = None
-                    sim.citizens[identity].jail_remaining = 1
+                    sim.citizens[identity].jail_remaining = 2
                 request = streamed_request(model.client, tool_name="defer", tool_args="{}")
                 with patch.object(model.client.chat.completions, "create", request):
                     await sim.step()

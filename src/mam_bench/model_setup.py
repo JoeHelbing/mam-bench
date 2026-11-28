@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models import Model, ModelRequestParameters
+from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.models.openai import OpenAIResponsesModel
 from pydantic_ai.settings import ModelSettings
 
 from mam_bench.config import AgentSettings, ModelSelection
@@ -161,7 +163,12 @@ def _resolve_limits(
 async def resolve_model_setup(selection: ModelSelection) -> ResolvedModelSetup:
     """Discover serving limits and default output caps to a quarter of context."""
     if selection.runtime in ("openai", "anthropic"):
-        context = create_model(selection).context_window
+        model = create_model(selection)
+        try:
+            context = model.context_window
+        finally:
+            if isinstance(model, (AnthropicModel, OpenAIResponsesModel)):
+                await model.client.close()
         if context is None:
             service = "OpenAI" if selection.runtime == "openai" else "Anthropic"
             raise ValueError(f"Selected {service} model has no PydanticAI context metadata")

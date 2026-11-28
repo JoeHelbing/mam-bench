@@ -57,7 +57,7 @@ more than one quarter of the board. The vision diameter
 | `threshold` | Finite number | Offset in the citizen participation decision. |
 | `private_preference_mean` | Finite number | Mean of citizens' sampled private preferences. |
 | `private_preference_std` | Nonnegative finite number | Standard deviation of those preferences. |
-| `max_jail_term` | Nonnegative integer | Inclusive upper bound on a sampled jail term. |
+| `max_jail_term` | Positive integer | Inclusive upper bound on a sampled jail term (`1` to `max_jail_term` steps in custody). |
 | `seed` | Nonnegative integer | Random seed for the paired worlds. |
 | `max_steps` | Integer at least 1 | Step limit; custom cases can differ from the shipped suite. |
 | `controlled_agent_count` | `16` | Number of citizens or police replaced with model-controlled agents. |

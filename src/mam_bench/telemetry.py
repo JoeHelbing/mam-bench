@@ -17,7 +17,6 @@ from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk._logs.export import (
     BatchLogRecordProcessor,
     ConsoleLogRecordExporter,
-    SimpleLogRecordProcessor,
 )
 from opentelemetry.sdk.metrics import Counter, Histogram, MeterProvider
 from opentelemetry.sdk.metrics.export import (
@@ -30,7 +29,6 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
-    SimpleSpanProcessor,
 )
 from opentelemetry.trace import Tracer
 from pydantic import SecretStr
@@ -79,18 +77,20 @@ def collect_telemetry(directory: Path, *, send_to_logfire: bool = False) -> Gene
             )
         ]
         trace_provider.add_span_processor(
-            SimpleSpanProcessor(
+            BatchSpanProcessor(
                 ConsoleSpanExporter(
                     out=traces, formatter=lambda span: span.to_json(indent=None) + "\n"
-                )
+                ),
+                schedule_delay_millis=1000,
             )
         )
         log_provider.add_log_record_processor(
-            SimpleLogRecordProcessor(
+            BatchLogRecordProcessor(
                 ConsoleLogRecordExporter(
                     out=logs,
                     formatter=lambda record: record.to_json(indent=None) + "\n",
-                )
+                ),
+                schedule_delay_millis=1000,
             )
         )
         stack.callback(trace_provider.shutdown)

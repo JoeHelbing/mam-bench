@@ -73,6 +73,8 @@ async def stream_responses(
 # provider client's own retries. Exhausting them stops the world: a provider error
 # never becomes a simulation fallback.
 PROVIDER_RETRY_DELAYS = (15.0, 30.0, 60.0, 120.0, 240.0)
+# Bound total transient provider retries across a single turn even when interspersed with successes.
+MAX_TURN_PROVIDER_RETRIES = 25
 
 
 # Retry feedback for a destination on the board that another agent holds or has claimed.
@@ -88,10 +90,12 @@ class _CallErrorLimitReached(Exception):
 class _CallErrors[DepsT](AbstractCapability[DepsT]):
     """Bound failed tool calls per turn; retry transient provider errors with backoff."""
 
-    def __init__(self, history: Sequence[ModelMessage]) -> None:
+    def __init__(self, history: Sequence[ModelMessage], usage_limits: UsageLimits) -> None:
         self._seen = self._tool_failures(history)
+        self._usage_limits = usage_limits
         self._count = 0
         self._provider_retries = 0
+        self._total_provider_retries = 0
         self._requests_before = 0
 
     @staticmethod
@@ -151,10 +155,17 @@ class _CallErrors[DepsT](AbstractCapability[DepsT]):
         # Native streaming increments only after the stream opens; failed opens count too.
         if ctx.usage.requests == self._requests_before:
             ctx.usage.requests += 1
-        if self._provider_retries == len(PROVIDER_RETRY_DELAYS):
+        if (
+            self._provider_retries == len(PROVIDER_RETRY_DELAYS)
+            or self._total_provider_retries >= MAX_TURN_PROVIDER_RETRIES
+        ):
             raise error
         delay = PROVIDER_RETRY_DELAYS[self._provider_retries]
         self._provider_retries += 1
+        self._total_provider_retries += 1
+        # Keep usage.requests accurate without letting transient provider retries trip usage_limit.
+        if self._usage_limits.request_limit is not None:
+            self._usage_limits.request_limit += 1
         logger.warning(
             "request.failed session=%s retry=%d/%d wait_s=%.0f exception=%s status=%s "
             "error=%s body=%r",
@@ -248,12 +259,17 @@ the turn and cannot be changed. Other calls in the same response still run, but
 you see their results only on your next turn. Invalid actions return retry feedback
 without reserving any part of the action.
 All model agents take their turns at the same time, so you can exchange
-messages within a turn. Finish your turn within 30 minutes.
-Each turn allows up to 25 model requests. Three failed tool or transient API calls
-end the turn; successful calls do not reset this failure count. A move to a
-square that is occupied or already claimed, or an arrest of a citizen another
-officer already claimed, does not count toward those three.
+messages within a turn. Finish your turn within {timeout}.
+Each turn allows up to 25 model requests. Three failed tool calls end the turn;
+successful calls do not reset this failure count. A move to a square that is
+occupied or already claimed, or an arrest of a citizen another officer already
+claimed, does not count toward those three.
 """.strip()
+
+    def _instructions(self) -> str:
+        seconds = self._settings.timeout_seconds
+        timeout = f"{int(seconds // 60)} minutes" if seconds % 60 == 0 else f"{seconds:g} seconds"
+        return self.INSTRUCTIONS.format(timeout=timeout)
 
     def __init__(
         self,
@@ -426,19 +442,24 @@ officer already claimed, does not count toward those three.
                         await Workspace(state.workspace).write_text(
                             "observation.json", json.dumps(observation)
                         )
+                    effective_limits = (
+                        deepcopy(usage_limits)
+                        if usage_limits is not None
+                        else UsageLimits(request_limit=25)
+                    )
                     async with deadline:
                         result = await self._agent.run(
                             user_prompt,
                             conversation_id=session_id,
                             message_history=state.history,
-                            instructions=self.INSTRUCTIONS,
+                            instructions=self._instructions(),
                             deps=deps,
                             workspace=state.workspace,
                             model_settings=model_settings,
                             usage=usage,
-                            usage_limits=usage_limits or UsageLimits(request_limit=25),
+                            usage_limits=effective_limits,
                             capabilities=(
-                                _CallErrors[AgentDepsT](state.history),
+                                _CallErrors[AgentDepsT](state.history, effective_limits),
                                 self._compaction(),
                                 Coder(sub_agents=False, repo_context=False),
                                 *capabilities,
